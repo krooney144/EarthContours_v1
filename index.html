@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Viewport meta is critical for mobile — prevents auto-zoom and sets the viewport to device width -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0d1e2e" />
+    <meta name="description" content="EarthContours — terrain visualization through AR, 3D orbit, and topographic map views" />
+
+    <!-- App icons — placeholder until real icon is designed -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!-- Google Fonts — Josefin Sans (display) + Jost (data/body)
+         preconnect tells the browser to establish a connection early, before it parses the font links -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@300;400;600;700&family=Jost:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <title>EarthContours</title>
+  </head>
+  <body>
+    <!-- React mounts here. The #root div is empty until React hydrates it. -->
+    <div id="root"></div>
+    <!-- Vite injects the compiled TypeScript/JSX bundle here at build time -->
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

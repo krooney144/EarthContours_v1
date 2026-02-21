@@ -1,0 +1,225 @@
+/**
+ * PreviewLayout — Desktop "command center" — shows all 3 screens side by side
+ * Only appears on window width >= 900px, only on initial load
+ */
+
+.container {
+  width: 100%;
+  height: 100%;
+  background: var(--ec-bg-primary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8);
+  gap: var(--space-8);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.logoMark {
+  font-size: 28px;
+  color: var(--ec-glow);
+}
+
+.appName {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--ec-white);
+  text-transform: uppercase;
+}
+
+.subtitle {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-5);
+  width: 100%;
+  max-width: 1100px;
+}
+
+.card {
+  background: var(--ec-bg-elevated);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  cursor: pointer;
+  transition:
+    transform 250ms ease-out,
+    border-color 250ms ease-out,
+    box-shadow 250ms ease-out;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  aspect-ratio: 9 / 16;
+  max-height: 480px;
+}
+
+.card:hover {
+  transform: translateY(-4px) scale(1.02);
+  border-color: var(--ec-border-active);
+  box-shadow: var(--shadow-glow);
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--ec-glow);
+  outline-offset: 2px;
+}
+
+.cardPreview {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+
+/* SCAN card preview */
+.scanPreview {
+  background: linear-gradient(
+    160deg,
+    var(--ec-abyss) 0%,
+    var(--ec-deep) 30%,
+    var(--ec-navy) 60%,
+    var(--ec-ocean) 80%,
+    var(--ec-mid) 100%
+  );
+}
+
+/* EXPLORE card preview */
+.explorePreview {
+  background: radial-gradient(
+    ellipse at center,
+    var(--ec-deep) 0%,
+    var(--ec-abyss) 60%,
+    var(--ec-void) 100%
+  );
+}
+
+/* MAP card preview */
+.mapPreview {
+  background: var(--ec-bg-secondary);
+  display: grid;
+  place-items: center;
+}
+
+.previewIcon {
+  font-size: 48px;
+  opacity: 0.4;
+  color: var(--ec-glow);
+  text-shadow: var(--shadow-glow);
+}
+
+/* Contour lines decorative for EXPLORE preview */
+.contourLines {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  opacity: 0.3;
+}
+
+.contourLine {
+  height: 1px;
+  background: var(--ec-glow);
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 4px var(--ec-glow);
+}
+
+/* Mountain silhouette for SCAN preview */
+.mountainSilhouette {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 60%;
+}
+
+.cardInfo {
+  padding: var(--space-4);
+  border-top: 1px solid var(--ec-border);
+  background: var(--ec-bg-elevated);
+}
+
+.cardTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--ec-white);
+  text-transform: uppercase;
+  margin-bottom: var(--space-1);
+}
+
+.cardDescription {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  line-height: 1.5;
+}
+
+.enterHint {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  background: var(--ec-glow-medium);
+  color: var(--ec-glow);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  letter-spacing: 0.1em;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.card:hover .enterHint {
+  opacity: 1;
+}
+
+/* Settings button in corner */
+.settingsBtn {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  color: var(--ec-text-muted);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  background: var(--ec-bg-overlay);
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.settingsBtn:hover {
+  color: var(--ec-text-secondary);
+  border-color: var(--ec-border-active);
+}

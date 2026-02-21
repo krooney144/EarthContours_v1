@@ -1,0 +1,404 @@
+/**
+ * SCAN Screen — AR first-person terrain view
+ *
+ * Layout (top to bottom):
+ * 1. Compass strip (fixed at top)
+ * 2. Terrain viewport (drag area, full screen)
+ *    - Peak labels inside the viewport
+ *    - Height slider on the right edge
+ * 3. HUD bar (fixed above nav)
+ * 4. Nav bar (handled by App.tsx)
+ */
+
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--ec-bg-primary);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Compass Strip ─────────────────────────────────────────────────────────── */
+
+.compassStrip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 52px;
+  background: var(--ec-compass-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--ec-border);
+  overflow: hidden;
+  z-index: var(--z-compass);
+  pointer-events: none; /* Drag goes to the viewport below */
+  flex-shrink: 0;
+}
+
+/* Center notch/arrow that the compass scrolls under */
+.compassNotch {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 2px;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.compassNotch::before {
+  content: '▾';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--ec-glow);
+  font-size: 14px;
+  text-shadow: var(--shadow-glow);
+}
+
+.compassNotch::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 70%;
+  background: var(--ec-glow);
+  box-shadow: var(--shadow-glow);
+}
+
+/* The scrollable track — offset by heading so current direction is center */
+.compassTrack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  /* transform applied inline via React based on heading */
+  will-change: transform;
+}
+
+/* Individual direction label */
+.compassItem {
+  width: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.compassLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--ec-text-muted);
+  transition: color var(--transition-fast), text-shadow var(--transition-fast);
+}
+
+/* Cardinal directions (N/S/E/W) are brighter */
+.compassLabel.cardinal {
+  color: var(--ec-foam);
+  font-size: var(--text-sm);
+  text-shadow: 0 0 8px var(--ec-glow);
+}
+
+.compassTick {
+  width: 1px;
+  height: 4px;
+  background: var(--ec-navy);
+}
+
+.compassTick.cardinalTick {
+  height: 6px;
+  background: var(--ec-mid);
+}
+
+/* Heading degree display in compass */
+.headingDegrees {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-glow);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+  background: rgba(0,0,0,0.3);
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+}
+
+/* ── Terrain Viewport ──────────────────────────────────────────────────────── */
+
+/* The draggable area that shows the "AR" terrain */
+.viewport {
+  position: absolute;
+  inset: 0;
+  cursor: grab;
+  overflow: hidden;
+  touch-action: none; /* Prevent browser scroll/zoom on touch drag */
+}
+
+.viewport:active {
+  cursor: grabbing;
+}
+
+/* Simulated terrain — in Session 2 this is a Three.js <canvas> */
+.terrainCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Terrain gradient background for the MVP visual */
+.terrainBg {
+  position: absolute;
+  inset: 0;
+  /* Simulate sky → horizon → terrain gradient */
+  background: linear-gradient(
+    180deg,
+    #060f1a 0%,        /* sky - dark */
+    #0a2035 25%,       /* sky gradient */
+    #0d2a45 48%,       /* horizon */
+    #0e3951 50%,       /* horizon line */
+    #112a3d 52%,       /* near terrain */
+    #124B6B 65%,       /* mid terrain */
+    #0d3248 85%,       /* far terrain */
+    #0a2234 100%       /* foreground */
+  );
+}
+
+/* Contour line overlay on terrain */
+.contourOverlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* ── Peak Labels ───────────────────────────────────────────────────────────── */
+
+/* Container for all peak labels — sits above the terrain */
+.peakLabelsLayer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: var(--z-overlay);
+}
+
+/* Individual peak label group: card → line → dot (top to bottom) */
+.peakLabel {
+  position: absolute;
+  /* transform applied inline via React to position by heading/pitch */
+  display: flex;
+  flex-direction: column;  /* card first, then line, then dot — top to bottom */
+  align-items: center;
+  pointer-events: none;
+  transform: translateX(-50%);  /* Center the label on the peak's X position */
+}
+
+.peakCard {
+  background: rgba(13, 30, 46, 0.88);
+  border: 1px solid var(--ec-border-active);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  box-shadow: var(--shadow-card), var(--shadow-glow);
+  backdrop-filter: blur(4px);
+  white-space: nowrap;
+}
+
+.peakName {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--ec-foam);
+  text-shadow: 0 0 8px rgba(132, 209, 219, 0.5);
+}
+
+.peakElev {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-glow);
+  font-variant-numeric: tabular-nums;
+}
+
+.peakBearing {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* Vertical line from card DOWN to dot */
+.peakLine {
+  width: 1px;
+  height: 40px;
+  background: linear-gradient(to bottom, var(--ec-glow), rgba(132, 209, 219, 0.2));
+  box-shadow: 0 0 4px var(--ec-glow);
+}
+
+/* Glowing dot at the peak position */
+.peakDot {
+  width: 8px;
+  height: 8px;
+  background: var(--ec-glow);
+  border-radius: 50%;
+  box-shadow: var(--shadow-glow);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* ── Height Slider ─────────────────────────────────────────────────────────── */
+
+.heightSlider {
+  position: absolute;
+  right: var(--space-3);
+  top: 72px;  /* below compass */
+  bottom: calc(var(--ec-nav-height) + 60px);  /* above HUD */
+  width: 36px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  z-index: var(--z-overlay);
+}
+
+.heightSliderLabel {
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+.heightSliderTrack {
+  flex: 1;
+  width: 2px;
+  background: var(--ec-border);
+  border-radius: var(--radius-full);
+  position: relative;
+  margin: var(--space-2) 0;
+}
+
+.heightSliderFill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  background: linear-gradient(to top, var(--ec-ocean), var(--ec-glow));
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 6px var(--ec-glow);
+}
+
+.heightSliderThumb {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, 50%);
+  width: 16px;
+  height: 16px;
+  background: var(--ec-glow);
+  border-radius: 50%;
+  box-shadow: var(--shadow-glow);
+  cursor: ns-resize;
+  /* The thumb moves up/down — applied inline via React */
+}
+
+.heightSliderValue {
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: var(--ec-glow);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  letter-spacing: 0.05em;
+}
+
+/* ── HUD Bar ───────────────────────────────────────────────────────────────── */
+
+.hud {
+  position: absolute;
+  bottom: var(--ec-nav-height);
+  left: 0;
+  right: 0;
+  height: 52px;
+  background: var(--ec-hud-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-top: 1px solid var(--ec-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 0 var(--space-3);
+  z-index: var(--z-hud);
+  pointer-events: none;
+}
+
+.hudItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hudLabel {
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hudValue {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-glow);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.hudDivider {
+  width: 1px;
+  height: 24px;
+  background: var(--ec-border);
+}
+
+/* ── Drag Hint ─────────────────────────────────────────────────────────────── */
+
+.dragHint {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height) + 60px);
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  text-align: center;
+  opacity: 1;
+  transition: opacity 1s ease-out;
+  pointer-events: none;
+  z-index: var(--z-overlay);
+  letter-spacing: 0.08em;
+}
+
+.dragHint.hidden {
+  opacity: 0;
+}

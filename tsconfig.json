@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    // Strict mode — catches the most bugs at compile time
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "noImplicitThis": true,
+    "useUnknownInCatchVariables": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Module system
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+
+    // JSX — React 18 doesn't require importing React in every file
+    "jsx": "react-jsx",
+
+    // Output
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+
+    // noEmit: true means tsc does type-checking only, never writes .js files
+    // Vite handles the actual compilation — tsc is purely for type safety
+    "noEmit": true,
+    "sourceMap": true,
+    "declaration": false,
+
+    // Path aliases (makes imports cleaner: import from '@/store' instead of '../../store')
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

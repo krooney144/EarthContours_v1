@@ -1,0 +1,65 @@
+.container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  background: var(--ec-bg-primary);
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 2px solid var(--ec-border);
+  border-top-color: var(--ec-glow);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.message {
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.progress {
+  width: 160px;
+  height: 2px;
+  background: var(--ec-border);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--ec-ocean), var(--ec-glow));
+  border-radius: var(--radius-full);
+  transition: width 200ms ease-out;
+}
+
+.retryButton {
+  margin-top: var(--space-4);
+  padding: var(--space-2) var(--space-6);
+  border: 1px solid var(--ec-border-active);
+  border-radius: var(--radius-md);
+  color: var(--ec-glow);
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.retryButton:hover {
+  background: var(--ec-glow-soft);
+  border-color: var(--ec-glow);
+}
+
+.errorIcon {
+  font-size: 36px;
+  color: var(--ec-warning);
+}

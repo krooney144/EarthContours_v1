@@ -1,0 +1,350 @@
+/**
+ * SETTINGS Screen — 7 sections of app configuration
+ */
+
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--ec-bg-primary);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────────── */
+
+.header {
+  flex-shrink: 0;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--ec-border);
+  background: var(--ec-bg-secondary);
+}
+
+.headerTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--ec-white);
+  text-transform: uppercase;
+}
+
+.headerSubtitle {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.06em;
+  margin-top: 2px;
+}
+
+/* ── Scroll Area ─────────────────────────────────────────────────────────────── */
+
+.scrollArea {
+  flex: 1;
+  overflow-y: auto;
+  padding-bottom: calc(var(--ec-nav-height) + var(--space-4));
+}
+
+/* ── Section ─────────────────────────────────────────────────────────────────── */
+
+.section {
+  border-bottom: 1px solid var(--ec-border);
+}
+
+.sectionHeader {
+  padding: var(--space-4) var(--space-5) var(--space-2);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sectionIcon {
+  font-size: 14px;
+  color: var(--ec-glow);
+  width: 20px;
+  text-align: center;
+}
+
+.sectionTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--ec-text-secondary);
+  text-transform: uppercase;
+}
+
+/* ── Row (individual setting) ─────────────────────────────────────────────── */
+
+.row {
+  padding: var(--space-3) var(--space-5);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 52px;
+}
+
+.row:not(:last-child) {
+  border-bottom: 1px solid rgba(33, 92, 121, 0.2);
+}
+
+.rowLeft {
+  flex: 1;
+  min-width: 0;
+}
+
+.rowLabel {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ec-text-primary);
+  font-weight: 500;
+}
+
+.rowDescription {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+/* ── Toggle Switch ──────────────────────────────────────────────────────────── */
+
+.toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggleTrack {
+  position: absolute;
+  inset: 0;
+  background: var(--ec-bg-elevated);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-full);
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.toggle input:checked + .toggleTrack {
+  background: var(--ec-ocean);
+  border-color: var(--ec-mid);
+}
+
+.toggleThumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  background: var(--ec-text-muted);
+  border-radius: 50%;
+  transition: transform var(--transition-fast), background var(--transition-fast);
+}
+
+.toggle input:checked ~ .toggleThumb {
+  transform: translateX(20px);
+  background: var(--ec-glow);
+}
+
+.toggle:focus-within .toggleTrack {
+  outline: 2px solid var(--ec-glow);
+  outline-offset: 2px;
+}
+
+/* ── Segmented Control ──────────────────────────────────────────────────────── */
+
+.segmented {
+  display: flex;
+  background: var(--ec-bg-elevated);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.segmentBtn {
+  padding: var(--space-1) var(--space-3);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  color: var(--ec-text-muted);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+  white-space: nowrap;
+  border: none;
+  background: none;
+}
+
+.segmentBtn:not(:last-child) {
+  border-right: 1px solid var(--ec-border);
+}
+
+.segmentBtn.active {
+  background: var(--ec-ocean);
+  color: var(--ec-white);
+}
+
+.segmentBtn:hover:not(.active) {
+  background: var(--ec-glow-soft);
+  color: var(--ec-text-secondary);
+}
+
+/* ── Status Badge ───────────────────────────────────────────────────────────── */
+
+.statusBadge {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  letter-spacing: 0.06em;
+}
+
+.statusGranted {
+  background: rgba(76, 175, 143, 0.15);
+  color: #4CAF8F;
+  border: 1px solid rgba(76, 175, 143, 0.3);
+}
+
+.statusDenied {
+  background: rgba(230, 75, 75, 0.15);
+  color: #E64B4B;
+  border: 1px solid rgba(230, 75, 75, 0.3);
+}
+
+.statusUnknown {
+  background: rgba(75, 142, 163, 0.15);
+  color: var(--ec-text-muted);
+  border: 1px solid var(--ec-border);
+}
+
+/* ── Action Button (for buttons within settings rows) ──────────────────────── */
+
+.actionBtn {
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  color: var(--ec-text-secondary);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  background: none;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.actionBtn:hover {
+  background: var(--ec-glow-soft);
+  border-color: var(--ec-border-active);
+  color: var(--ec-glow);
+}
+
+.actionBtn.danger {
+  color: var(--ec-error);
+  border-color: rgba(230, 75, 75, 0.3);
+}
+
+.actionBtn.danger:hover {
+  background: rgba(230, 75, 75, 0.1);
+  border-color: var(--ec-error);
+}
+
+/* ── Feedback text area ─────────────────────────────────────────────────────── */
+
+.feedbackArea {
+  padding: var(--space-3) var(--space-5);
+}
+
+.textarea {
+  width: 100%;
+  min-height: 100px;
+  background: var(--ec-bg-elevated);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  color: var(--ec-text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  padding: var(--space-3);
+  resize: vertical;
+  transition: border-color var(--transition-fast);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.textarea:focus {
+  outline: none;
+  border-color: var(--ec-border-active);
+}
+
+.textarea::placeholder {
+  color: var(--ec-text-muted);
+}
+
+.feedbackActions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* ── Exaggeration buttons ───────────────────────────────────────────────────── */
+
+.exagOptions {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.exagBtn {
+  padding: 4px 8px;
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-sm);
+  color: var(--ec-text-muted);
+  font-family: var(--font-body);
+  font-size: 11px;
+  cursor: pointer;
+  background: none;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.exagBtn.active {
+  background: var(--ec-ocean);
+  border-color: var(--ec-mid);
+  color: var(--ec-white);
+}
+
+/* ── Version info ───────────────────────────────────────────────────────────── */
+
+.versionInfo {
+  padding: var(--space-6) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.logoMark {
+  font-size: 28px;
+  color: var(--ec-glow);
+  opacity: 0.4;
+}
+
+.versionText {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.06em;
+}

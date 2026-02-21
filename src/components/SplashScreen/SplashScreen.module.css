@@ -1,0 +1,99 @@
+/**
+ * SplashScreen styles — full-screen loading intro
+ */
+
+.splash {
+  position: fixed;
+  inset: 0;
+  background: var(--ec-bg-primary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-splash);
+  gap: var(--space-8);
+}
+
+.splash.fadeOut {
+  animation: fade-out 400ms ease-out forwards;
+}
+
+.logoArea {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  animation: fade-in 600ms ease-out forwards;
+}
+
+.logoPlaceholder {
+  width: 80px;
+  height: 80px;
+  border: 2px solid var(--ec-glow);
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 40px;
+  color: var(--ec-glow);
+  box-shadow: var(--shadow-glow-strong);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.appName {
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--ec-white);
+  text-transform: uppercase;
+}
+
+.tagline {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.loadingSection {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  animation: fade-in 600ms 300ms ease-out both;
+}
+
+.progressBar {
+  width: 200px;
+  height: 2px;
+  background: var(--ec-border);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--ec-ocean), var(--ec-glow));
+  border-radius: var(--radius-full);
+  transition: width 300ms ease-out;
+  box-shadow: 0 0 8px var(--ec-glow);
+}
+
+.loadingText {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.version {
+  position: absolute;
+  bottom: calc(var(--space-6) + env(safe-area-inset-bottom, 0px));
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-abyss);
+  letter-spacing: 0.08em;
+}

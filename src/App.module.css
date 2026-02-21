@@ -1,0 +1,71 @@
+/**
+ * App-level layout styles
+ */
+
+.app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--ec-bg-primary);
+}
+
+/* ── Screen container ──────────────────────────────────────────────────────── */
+
+.screenContainer {
+  position: absolute;
+  inset: 0;
+  /* Make room for the nav bar at the bottom */
+  bottom: var(--ec-nav-height);
+}
+
+/* When in preview mode, screen container fills full height (no nav offset) */
+.screenContainer.previewMode {
+  bottom: 0;
+}
+
+/* ── Screen transitions ────────────────────────────────────────────────────── */
+
+/* Screens animate in/out during navigation transitions */
+.screenWrapper {
+  position: absolute;
+  inset: 0;
+  will-change: opacity, transform;
+}
+
+.screenWrapper.idle {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* Exit: current screen zooms out and fades */
+.screenWrapper.exit {
+  animation: zoom-out 300ms ease-in forwards;
+}
+
+/* Black: brief invisible state while screen swaps */
+.screenWrapper.black {
+  opacity: 0;
+}
+
+/* Enter: new screen zooms in and fades */
+.screenWrapper.enter {
+  animation: zoom-in 300ms ease-out forwards;
+}
+
+/* ── Transition overlay ────────────────────────────────────────────────────── */
+
+/* Full-black overlay during the 'black' phase */
+.transitionOverlay {
+  position: absolute;
+  inset: 0;
+  background: #000010;
+  z-index: var(--z-transition);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 100ms ease-out;
+}
+
+.transitionOverlay.visible {
+  opacity: 1;
+}

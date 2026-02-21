@@ -1,0 +1,214 @@
+/**
+ * EXPLORE Screen — 3D orbit view with contour lines only
+ */
+
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--ec-bg-primary);
+  overflow: hidden;
+}
+
+.header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50px;
+  background: rgba(8, 20, 35, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--ec-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-4);
+  z-index: var(--z-hud);
+  pointer-events: none;
+}
+
+.headerTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--ec-text-secondary);
+  text-transform: uppercase;
+}
+
+.regionName {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+}
+
+.autoRotateBadge {
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--ec-glow);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0;
+  transition: opacity var(--transition-normal);
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.autoRotateBadge.visible {
+  opacity: 1;
+}
+
+.autoRotateDot {
+  width: 6px;
+  height: 6px;
+  background: var(--ec-glow);
+  border-radius: 50%;
+  animation: pulse-glow 1.5s ease-in-out infinite;
+}
+
+/* ── 3D Canvas area ─────────────────────────────────────────────────────────── */
+
+.canvasArea {
+  position: absolute;
+  inset: 0;
+  cursor: grab;
+  touch-action: none;
+  overflow: hidden;
+}
+
+.canvasArea:active {
+  cursor: grabbing;
+}
+
+/* The SVG/canvas that draws contour lines (Three.js canvas in Session 2) */
+.terrainCanvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Elevation Legend ─────────────────────────────────────────────────────── */
+
+.legend {
+  position: absolute;
+  right: var(--space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  z-index: var(--z-overlay);
+  pointer-events: none;
+}
+
+.legendGradient {
+  width: 8px;
+  height: 120px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(
+    to top,
+    var(--ec-abyss) 0%,
+    var(--ec-deep) 20%,
+    var(--ec-navy) 40%,
+    var(--ec-ocean) 60%,
+    var(--ec-reef) 80%,
+    var(--ec-foam) 100%
+  );
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.2);
+}
+
+.legendLabel {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.legendTop {
+  margin-bottom: -6px;
+}
+
+.legendBottom {
+  margin-top: -6px;
+}
+
+/* ── Peak Labels ─────────────────────────────────────────────────────────── */
+
+.peakLabelsLayer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: var(--z-overlay);
+}
+
+.peakLabel3D {
+  position: absolute;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: none;
+}
+
+.peakLabelCard {
+  background: rgba(13, 30, 46, 0.85);
+  border: 1px solid var(--ec-border-active);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.peakLabelName {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ec-foam);
+}
+
+.peakLabelElev {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: var(--ec-glow);
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+
+.peakLine3D {
+  width: 1px;
+  height: 20px;
+  background: linear-gradient(to bottom, var(--ec-glow), transparent);
+}
+
+.peakDot3D {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ec-glow);
+  box-shadow: var(--shadow-glow);
+}
+
+/* ── Drag hint ───────────────────────────────────────────────────────────── */
+
+.hint {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height) + var(--space-4));
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+  pointer-events: none;
+  z-index: var(--z-overlay);
+  transition: opacity 1s;
+}
+
+.hint.hidden {
+  opacity: 0;
+}

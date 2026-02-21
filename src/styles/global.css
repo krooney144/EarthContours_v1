@@ -1,0 +1,219 @@
+/**
+ * EarthContours — Global Styles
+ *
+ * Base reset and app-wide styles.
+ * Component-specific styles live in *.module.css files.
+ *
+ * We import palette.css first so variables are available everywhere.
+ */
+
+@import './palette.css';
+
+/* ── CSS Reset ───────────────────────────────────────────────────────────────
+   Modern CSS reset — removes browser inconsistencies without being too
+   aggressive. Based on Josh Comeau's reset (https://www.joshwcomeau.com/css/custom-css-reset/) */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  /* Smooth scrolling for any in-page scroll */
+  scroll-behavior: smooth;
+  /* Prevent text size adjustment on mobile rotation */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  /* App-wide typography */
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  color: var(--ec-text-primary);
+  background-color: var(--ec-bg-primary);
+
+  /* Prevent horizontal scroll */
+  overflow-x: hidden;
+  overflow-y: hidden;
+
+  /* Crisp rendering for the map */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Disable browser's default double-tap zoom on mobile */
+  touch-action: manipulation;
+  /* Prevent text selection during drag operations */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Root element — fills the full viewport */
+#root {
+  width: 100vw;
+  height: 100dvh;  /* dvh = dynamic viewport height — handles mobile browser chrome */
+  overflow: hidden;
+  position: relative;
+}
+
+/* ── Typography ──────────────────────────────────────────────────────────── */
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--ec-text-primary);
+  line-height: 1.2;
+}
+
+p {
+  line-height: 1.6;
+  color: var(--ec-text-secondary);
+}
+
+/* All display text (nav labels, screen titles, compass) uses Josefin Sans */
+.display {
+  font-family: var(--font-display);
+}
+
+/* All data text (coordinates, elevations, readouts) uses Jost */
+.data {
+  font-family: var(--font-body);
+  font-variant-numeric: tabular-nums; /* Fixed-width numbers prevent layout shift */
+}
+
+/* ── Interactive Elements ────────────────────────────────────────────────── */
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  /* Remove mobile tap highlight */
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+
+button:focus-visible {
+  /* Keyboard focus indicator — important for accessibility */
+  outline: 2px solid var(--ec-glow);
+  outline-offset: 2px;
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────── */
+
+/* Style scrollbars to match the app theme (only visible in Settings scroll area) */
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--ec-bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--ec-navy);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ec-ocean);
+}
+
+/* ── Utility Classes ─────────────────────────────────────────────────────── */
+
+/* Visually hidden but readable by screen readers */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Full bleed overlay */
+.overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Glow text effect for peak labels and accent text */
+.glow-text {
+  text-shadow: 0 0 8px var(--ec-glow), 0 0 20px rgba(132, 209, 219, 0.3);
+}
+
+/* ── Reduce Motion ───────────────────────────────────────────────────────── */
+
+/* Respect system reduce motion AND the in-app setting (applied via class on body) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+body.reduce-motion *, body.reduce-motion *::before, body.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+/* ── Canvas and WebGL ────────────────────────────────────────────────────── */
+
+canvas {
+  display: block;
+  /* Prevent canvas from being blurry on high-DPI displays
+     (The renderer handles pixel ratio scaling — CSS shouldn't override it) */
+  image-rendering: pixelated;
+}
+
+/* ── Loading Animations ──────────────────────────────────────────────────── */
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+@keyframes zoom-in {
+  from { opacity: 0; transform: scale(0.92); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes zoom-out {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(1.08); }
+}
+
+@keyframes contour-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%       { opacity: 1; }
+}
+
+@keyframes compass-glow {
+  0%, 100% { text-shadow: 0 0 4px var(--ec-glow); }
+  50%       { text-shadow: 0 0 12px var(--ec-glow), 0 0 24px rgba(132, 209, 219, 0.4); }
+}

@@ -1,0 +1,119 @@
+/**
+ * EarthContours — Ocean Depth Color Palette
+ *
+ * CSS custom properties (variables) for the entire app.
+ * Using CSS variables means:
+ * - Colors are defined once and referenced everywhere
+ * - Easy to create themes by overriding variables on :root
+ * - The browser can compute derived colors efficiently
+ *
+ * Palette concept: Like looking down through water.
+ * Low elevation = dark deep ocean. High elevation = pale foam at surface.
+ */
+
+:root {
+  /* ── Ocean Depth Palette ── */
+  --ec-void:    #000810;   /* Absolute black, deepest backgrounds */
+  --ec-abyss:   #0E3951;   /* Deepest ocean, lowest elevations */
+  --ec-deep:    #124B6B;   /* Ocean floor */
+  --ec-navy:    #215C79;   /* Mid depth */
+  --ec-ocean:   #2F6D87;   /* Rising toward surface */
+  --ec-mid:     #4B8EA3;   /* Surface layer, contour accents */
+  --ec-reef:    #68B0BF;   /* Near surface, secondary accents */
+  --ec-glow:    #84D1DB;   /* Surface glow, high elevations */
+  --ec-foam:    #A7DDE5;   /* Foam, highest peaks, labels */
+  --ec-white:   #F0F8FF;   /* Primary text */
+
+  /* ── Semantic Colors ── */
+  /* Background: medium slate blue-grey — NOT pure black so map tiles are readable */
+  --ec-bg-primary:    #0d1e2e;
+  --ec-bg-secondary:  #111f30;
+  --ec-bg-elevated:   #152638;  /* Cards, panels — slightly lighter */
+  --ec-bg-overlay:    rgba(13, 30, 46, 0.85);  /* Semi-transparent overlay */
+
+  /* Text */
+  --ec-text-primary:   #F0F8FF;
+  --ec-text-secondary: #A7DDE5;
+  --ec-text-muted:     #4B8EA3;
+  --ec-text-accent:    #84D1DB;
+
+  /* UI Elements */
+  --ec-border:         rgba(132, 209, 219, 0.15);
+  --ec-border-active:  rgba(132, 209, 219, 0.45);
+  --ec-glow-soft:      rgba(132, 209, 219, 0.12);
+  --ec-glow-medium:    rgba(132, 209, 219, 0.25);
+  --ec-glow-strong:    rgba(132, 209, 219, 0.5);
+
+  /* Status colors */
+  --ec-success:  #4CAF8F;
+  --ec-warning:  #E6A817;
+  --ec-error:    #E64B4B;
+  --ec-info:     #4B8EA3;
+
+  /* Nav bar */
+  --ec-nav-bg:     rgba(8, 20, 35, 0.95);
+  --ec-nav-height: 64px;
+
+  /* Compass strip */
+  --ec-compass-bg: rgba(13, 30, 46, 0.9);
+
+  /* HUD bar */
+  --ec-hud-bg:     rgba(8, 20, 35, 0.88);
+
+  /* ── Typography ── */
+  --font-display: 'Josefin Sans', 'Arial Narrow', Arial, sans-serif;
+  --font-body:    'Jost', 'Helvetica Neue', Arial, sans-serif;
+
+  /* Font sizes — using clamp() for responsive scaling */
+  --text-xs:   clamp(9px,  1.5vw, 11px);
+  --text-sm:   clamp(11px, 2vw,   13px);
+  --text-base: clamp(13px, 2.5vw, 15px);
+  --text-md:   clamp(15px, 3vw,   18px);
+  --text-lg:   clamp(18px, 4vw,   22px);
+  --text-xl:   clamp(22px, 5vw,   28px);
+  --text-2xl:  clamp(28px, 6vw,   36px);
+
+  /* ── Spacing ── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ── Border Radius ── */
+  --radius-sm:  4px;
+  --radius-md:  8px;
+  --radius-lg:  12px;
+  --radius-xl:  16px;
+  --radius-full: 9999px;
+
+  /* ── Shadows ── */
+  --shadow-glow:   0 0 12px rgba(132, 209, 219, 0.25);
+  --shadow-glow-strong: 0 0 20px rgba(132, 209, 219, 0.45);
+  --shadow-card:   0 4px 24px rgba(0, 0, 0, 0.4);
+  --shadow-inset:  inset 0 1px 3px rgba(0, 0, 0, 0.4);
+
+  /* ── Transitions ── */
+  --transition-fast:   120ms ease-out;
+  --transition-normal: 250ms ease-out;
+  --transition-slow:   400ms ease-out;
+
+  /* ── Z-index layers ── */
+  --z-terrain:    1;   /* 3D/map canvas */
+  --z-overlay:    10;  /* Labels, markers */
+  --z-hud:        20;  /* HUD bars */
+  --z-compass:    25;  /* Compass strip */
+  --z-nav:        30;  /* Navigation bar */
+  --z-modal:      40;  /* Modals/dialogs */
+  --z-splash:     50;  /* Splash screen (always on top) */
+  --z-transition: 60;  /* Screen transition overlay */
+}
+
+/* Dark theme adjustments (future: add light theme override here) */
+@media (prefers-color-scheme: dark) {
+  /* Already dark — no changes needed */
+}
