@@ -62,18 +62,21 @@ export const DEFAULT_MAP_CENTER = { lat: 39.7, lng: -105.5 }
 /** Default map zoom level */
 export const DEFAULT_MAP_ZOOM = 9
 
-/**
- * Carto Dark Matter tile URL — dark/minimal basemap that matches the ocean-depth
- * color palette far better than the default green OpenTopoMap tiles.
- * Free, no API key. Attribution: © OpenStreetMap contributors © CARTO
- * {r} = '@2x' for retina screens (auto-filled based on devicePixelRatio)
- */
-export const MAP_TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+/** Tile subdomains for Carto — rotate through a/b/c/d for parallel requests */
 export const MAP_TILE_SUBDOMAINS = ['a', 'b', 'c', 'd'] as const
-export const MAP_ATTRIBUTION = '© OpenStreetMap contributors © CARTO'
 
-// Keep old constant name as alias so nothing else breaks
-export const TOPO_TILE_URL = MAP_TILE_URL
+/**
+ * Carto dark_only_labels — transparent tiles, white place/road labels only.
+ * Drawn on top of the DEM overlay to show towns, cities, roads.
+ * Free, no API key. {r} = '@2x' retina suffix.
+ */
+export const MAP_LABEL_TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png'
+
+export const MAP_ATTRIBUTION = '© Mapzen / AWS Terrain Tiles · © OpenStreetMap · © CARTO'
+
+// Legacy aliases kept so nothing else breaks
+export const MAP_TILE_URL = MAP_LABEL_TILE_URL
+export const TOPO_TILE_URL = MAP_LABEL_TILE_URL
 export const TOPO_TILE_SUBDOMAINS = MAP_TILE_SUBDOMAINS
 
 /** Map tile size in pixels */
@@ -88,8 +91,12 @@ export const MAP_MAX_ZOOM = 16
 /** Default vertical exaggeration */
 export const DEFAULT_VERTICAL_EXAGGERATION = 1.5
 
-/** Grid resolution for simulated terrain (samples per axis) */
-export const TERRAIN_GRID_SIZE = 128
+/**
+ * Grid resolution for terrain elevation (samples per axis).
+ * 256 → ~156m/sample over a 40km region — fine enough for 100m contours.
+ * (was 128 → ~312m/sample, too coarse for sub-200m contour intervals)
+ */
+export const TERRAIN_GRID_SIZE = 256
 
 /** World size of the terrain in km */
 export const TERRAIN_WORLD_KM = 40

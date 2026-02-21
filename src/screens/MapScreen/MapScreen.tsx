@@ -34,6 +34,7 @@ import { createLogger } from '../../core/logger'
 import {
   DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM,
   MAP_MIN_ZOOM, MAP_MAX_ZOOM, TILE_SIZE,
+  MAP_LABEL_TILE_URL, MAP_TILE_SUBDOMAINS,
 } from '../../core/constants'
 import {
   latLngToTile, tileToLatLng, latLngToPixel, pixelToLatLng,
@@ -47,40 +48,43 @@ const log = createLogger('SCREEN:MAP')
 
 // ─── Attribution ───────────────────────────────────────────────────────────────
 
-const DEM_ATTRIBUTION = '© Mapzen / AWS Terrain Tiles · © OpenStreetMap'
+const DEM_ATTRIBUTION = '© Mapzen / AWS Terrain Tiles · © OpenStreetMap · © CARTO'
 
 // ─── Elevation → Ocean-Depth Color ────────────────────────────────────────────
 
 /**
- * Map an elevation (meters) to an RGB color using the ocean-depth palette.
+ * Map an elevation (meters) to an RGB color.
  *
- * Color stops (elevation → hex → RGB):
- *   -500m → #000810 → ( 0,  8, 16)  deep void / ocean
- *    500m → #061423 → ( 6, 20, 35)  shallow void
- *   1000m → #0E3951 → (14, 57, 81)  abyss
- *   2000m → #124B6B → (18, 75,107)  deep
- *   3000m → #215C79 → (33, 92,121)  navy
- *   4000m → #2F6D87 → (47,109,135)  ocean
- *   5000m → #4B8EA3 → (75,142,163)  mid
- *   6000m → #68B0BF → (104,176,191) reef
- *   7000m → #84D1DB → (132,209,219) glow / foam (highest peaks)
+ * Ramp goes from "ocean black" at sea level to near-white at 16,000ft (4,877m):
  *
- * Negative elevations (water) get extra darkening toward void.
+ *   ≤  0m → near-black ocean (#010812)
+ *    100m → very dark navy  — "just 1 foot above sea level"
+ *   1000m → dark navy blue
+ *   2000m → medium blue
+ *   3000m → lighter blue
+ *   4000m → pale blue-grey
+ *   4877m → near-white (16,000ft)
+ *   5500m → almost white
+ *
+ * This is an inverted hypsometric tint in the ocean-depth color family:
+ * brightness encodes altitude, dark = low, light = high.
  */
 const ELEV_STOPS: Array<[number, number, number, number]> = [
-  //  elev_m   R    G    B
-  [ -500,    0,   8,  16],
-  [    0,    2,  11,  22],   // sea level — very dark
-  [  500,    6,  20,  35],
-  [ 1000,   14,  57,  81],
-  [ 1500,   16,  66,  94],
-  [ 2000,   18,  75, 107],
-  [ 2500,   25,  83, 114],
-  [ 3000,   33,  92, 121],
-  [ 4000,   47, 109, 135],
-  [ 5000,   75, 142, 163],
-  [ 6000,  104, 176, 191],
-  [ 7000,  132, 209, 219],
+  //  elev_m    R    G    B
+  [  -500,     0,   4,  10],   // ocean void — near-pure black
+  [     0,     1,   8,  18],   // sea level — ocean black
+  [   100,     8,  24,  52],   // just above sea — very dark navy
+  [   500,    16,  48,  92],   // low terrain — dark navy
+  [  1000,    25,  72, 130],   // ~3,280ft — navy blue
+  [  1500,    40,  97, 158],   // ~5,000ft
+  [  2000,    60, 122, 175],   // ~6,560ft — medium blue
+  [  2500,    82, 148, 192],   // ~8,200ft
+  [  3000,   110, 172, 208],   // ~9,840ft — lighter blue
+  [  3500,   142, 196, 222],   // ~11,480ft
+  [  4000,   175, 218, 237],   // ~13,120ft — pale blue
+  [  4500,   205, 235, 247],   // ~14,760ft — very pale blue
+  [  4877,   225, 244, 252],   // 16,000ft — near white
+  [  5500,   240, 250, 255],   // above 16,000ft — almost white
 ]
 
 function elevationToRGB(elev: number): [number, number, number] {
@@ -175,6 +179,51 @@ async function loadDEMTile(z: number, x: number, y: number): Promise<HTMLCanvasE
   return tileCanvas
 }
 
+// ─── Label Tile Cache ──────────────────────────────────────────────────────────
+
+/**
+ * Cache of Carto dark_only_labels tiles (transparent PNG, white text).
+ * Drawn on top of the DEM layer to show towns, cities, and roads.
+ * Key: `${z}/${x}/${y}` → `HTMLImageElement`
+ */
+const labelTileCache = new Map<string, HTMLImageElement>()
+const LABEL_TILE_CACHE_MAX = 300
+
+/**
+ * Load a label tile from Carto's dark_only_labels endpoint.
+ * These are fully transparent except for white place/road labels —
+ * perfect for overlaying on top of the DEM without obscuring it.
+ */
+function loadLabelTile(z: number, x: number, y: number): Promise<HTMLImageElement> {
+  const key = `${z}/${x}/${y}`
+  if (labelTileCache.has(key)) return Promise.resolve(labelTileCache.get(key)!)
+
+  const subdomain = MAP_TILE_SUBDOMAINS[(x + y) % MAP_TILE_SUBDOMAINS.length]
+  const retina    = window.devicePixelRatio >= 2 ? '@2x' : ''
+
+  const url = MAP_LABEL_TILE_URL
+    .replace('{s}', subdomain)
+    .replace('{z}', String(z))
+    .replace('{x}', String(x))
+    .replace('{y}', String(y))
+    .replace('{r}', retina)
+
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => {
+      if (labelTileCache.size >= LABEL_TILE_CACHE_MAX) {
+        const firstKey = labelTileCache.keys().next().value
+        if (firstKey) labelTileCache.delete(firstKey)
+      }
+      labelTileCache.set(key, img)
+      resolve(img)
+    }
+    img.onerror = reject
+    img.src = url
+  })
+}
+
 // ─── Main Component ────────────────────────────────────────────────────────────
 
 const MapScreen: React.FC = () => {
@@ -246,16 +295,17 @@ const MapScreen: React.FC = () => {
     const startTileY = centerTile.y - Math.floor(tileCountY / 2)
 
     setIsLoading(true)
-    const tilePromises: Promise<void>[] = []
+
+    // ── Pre-compute tile positions (reused by both DEM and label passes) ──────
+    type TileJob = { wrappedX: number; tileY: number; pixelX: number; pixelY: number }
+    const tileJobs: TileJob[] = []
 
     for (let ty = 0; ty < tileCountY; ty++) {
       for (let tx = 0; tx < tileCountX; tx++) {
-        const tileX = startTileX + tx
-        const tileY = startTileY + ty
-
+        const tileX    = startTileX + tx
+        const tileY    = startTileY + ty
         const maxTile  = Math.pow(2, zoom)
         const wrappedX = ((tileX % maxTile) + maxTile) % maxTile
-
         if (tileY < 0 || tileY >= maxTile) continue
 
         const tileTL    = tileToLatLng(wrappedX, tileY, zoom)
@@ -263,28 +313,39 @@ const MapScreen: React.FC = () => {
           tileTL.lat, tileTL.lng,
           centerLat, centerLng, zoom, W, H,
         )
-
-        const promise = loadDEMTile(zoom, wrappedX, tileY)
-          .then((tileCanvas) => {
-            if (thisGeneration !== loadingRef.current) return
-            ctx.drawImage(
-              tileCanvas,
-              Math.round(tilePixel.x),
-              Math.round(tilePixel.y),
-              TILE_SIZE,
-              TILE_SIZE,
-            )
-          })
-          .catch(() => {
-            // Tile failed — fill with dark ocean base color (already drawn)
-            log.debug('DEM tile unavailable, leaving base fill', { tileX: wrappedX, tileY })
-          })
-
-        tilePromises.push(promise)
+        tileJobs.push({
+          wrappedX,
+          tileY,
+          pixelX: Math.round(tilePixel.x),
+          pixelY: Math.round(tilePixel.y),
+        })
       }
     }
 
-    await Promise.all(tilePromises)
+    // ── Pass 1: DEM elevation tiles ─────────────────────────────────────────
+    await Promise.all(tileJobs.map(({ wrappedX, tileY, pixelX, pixelY }) =>
+      loadDEMTile(zoom, wrappedX, tileY)
+        .then((tileCanvas) => {
+          if (thisGeneration !== loadingRef.current) return
+          ctx.drawImage(tileCanvas, pixelX, pixelY, TILE_SIZE, TILE_SIZE)
+        })
+        .catch(() => {
+          log.debug('DEM tile unavailable, leaving base fill', { x: wrappedX, y: tileY })
+        }),
+    ))
+    if (thisGeneration !== loadingRef.current) return
+
+    // ── Pass 2: Label overlay (towns, cities, roads) ─────────────────────────
+    await Promise.all(tileJobs.map(({ wrappedX, tileY, pixelX, pixelY }) =>
+      loadLabelTile(zoom, wrappedX, tileY)
+        .then((img) => {
+          if (thisGeneration !== loadingRef.current) return
+          ctx.drawImage(img, pixelX, pixelY, TILE_SIZE, TILE_SIZE)
+        })
+        .catch(() => {
+          // Label tiles are optional — silent fail if CDN is unavailable
+        }),
+    ))
     if (thisGeneration !== loadingRef.current) return
 
     // ── Loaded region border ───────────────────────────────────────────────

@@ -157,7 +157,7 @@ const ExploreScreen: React.FC = () => {
     autoRotating, lastInteractionTime,
     applyOrbitDrag, recordOrbitInteraction, tickAutoRotate,
   } = useCameraStore()
-  const { peaks, meshData, contourElevations, activeRegion } = useTerrainStore()
+  const { peaks, meshData, contourElevations, activeRegion, isRealElevation } = useTerrainStore()
   const { units, showPeakLabels, verticalExaggeration } = useSettingsStore()
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -293,9 +293,18 @@ const ExploreScreen: React.FC = () => {
             <div className={styles.regionName}>{activeRegion.name}</div>
           )}
         </div>
-        <div className={`${styles.autoRotateBadge} ${autoRotating ? styles.visible : ''}`} aria-live="polite">
-          <div className={styles.autoRotateDot} aria-hidden="true" />
-          AUTO-ROTATING
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {/* Data source indicator — tells user whether elevation is real or simulated */}
+          <div
+            className={`${styles.dataSourceBadge} ${isRealElevation ? styles.dataSourceReal : styles.dataSourceSim}`}
+            aria-label={isRealElevation ? 'Real elevation data from AWS Terrain Tiles' : 'Simulated procedural terrain'}
+          >
+            {isRealElevation ? '● REAL DATA' : '◌ SIMULATED'}
+          </div>
+          <div className={`${styles.autoRotateBadge} ${autoRotating ? styles.visible : ''}`} aria-live="polite">
+            <div className={styles.autoRotateDot} aria-hidden="true" />
+            AUTO-ROTATING
+          </div>
         </div>
       </div>
 

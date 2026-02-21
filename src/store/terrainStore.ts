@@ -176,12 +176,19 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
 
 function calculateContourElevations(minElev: number, maxElev: number): number[] {
   const range = maxElev - minElev
-  const interval = range < 500 ? 50 : range < 2000 ? 100 : 200
+
+  // Interval selection matches standard USGS topographic map conventions:
+  //   flat / coastal terrain  → 50m  (~164ft) — enough detail, not cluttered
+  //   rolling hills           → 100m (~328ft)
+  //   mountain terrain        → 100m — 2× denser than previous 200m default
+  //     (256×256 grid ≈ 156m/sample over 40km, so 100m intervals are resolvable)
+  const interval = range < 500 ? 50 : 100
+
   const contours: number[] = []
   const start = Math.ceil(minElev / interval) * interval
   for (let elev = start; elev <= maxElev; elev += interval) {
     contours.push(elev)
   }
-  log.debug('Contour elevations', { interval, count: contours.length })
+  log.debug('Contour elevations', { interval, count: contours.length, range: range.toFixed(0) })
   return contours
 }

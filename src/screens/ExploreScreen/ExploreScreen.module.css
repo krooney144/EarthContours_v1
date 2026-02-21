@@ -44,6 +44,30 @@
   letter-spacing: 0.08em;
 }
 
+/* Data source badge — shows REAL DATA or SIMULATED in the header */
+.dataSourceBadge {
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.dataSourceReal {
+  color: rgba(132, 209, 219, 0.85);   /* ec-glow — real data = good */
+  border-color: rgba(132, 209, 219, 0.35);
+  background: rgba(132, 209, 219, 0.06);
+}
+
+.dataSourceSim {
+  color: rgba(167, 140, 90, 0.75);    /* amber — simulated = notice */
+  border-color: rgba(167, 140, 90, 0.30);
+  background: rgba(167, 140, 90, 0.06);
+}
+
 .autoRotateBadge {
   font-family: var(--font-display);
   font-size: 9px;

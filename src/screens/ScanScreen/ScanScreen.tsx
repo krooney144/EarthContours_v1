@@ -263,7 +263,8 @@ function drawScanCanvas(
 
     for (const elev of contourElevations) {
       const t = (elev - minElevation_m) / elevRange  // 0=low, 1=high
-      const isIndex = elev % 1000 === 0              // Major (index) contour
+      // Index contour every 500m — matches EXPLORE's threshold; heavier + brighter
+      const isIndex = elev % 500 === 0
 
       // Ocean-depth tint for this contour level: low = dark navy, high = bright teal
       const cr = Math.round(14  + t * (132 - 14))
@@ -302,8 +303,9 @@ function drawScanCanvas(
         const avgDist  = (p1.horizDist + p2.horizDist) * 0.5
         const depthT   = Math.max(0, 1 - Math.pow(avgDist / MAX_DIST, 0.65))
 
-        // Index contours stronger; minor contours subtler
-        const baseOpacity = isIndex ? 0.72 : 0.32
+        // Index contours (500m) stronger; minor (100m) contours subtler
+        // Minor opacity raised slightly (0.32→0.40) because we now have 2× more lines
+        const baseOpacity = isIndex ? 0.72 : 0.40
         const opacity = depthT * baseOpacity
 
         if (opacity < 0.03) continue
