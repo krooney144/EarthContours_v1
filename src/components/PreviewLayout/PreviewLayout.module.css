@@ -30,8 +30,9 @@
 }
 
 .logoMark {
-  font-size: 28px;
-  color: var(--ec-glow);
+  width: 32px;
+  height: 32px;
+  filter: drop-shadow(0 0 6px rgba(132, 209, 219, 0.5));
 }
 
 .appName {

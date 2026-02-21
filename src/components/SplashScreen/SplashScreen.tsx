@@ -82,10 +82,13 @@ const SplashScreen: React.FC = () => {
     >
       {/* Logo area */}
       <div className={styles.logoArea}>
-        <div className={styles.logoPlaceholder}>
-          {/* Replace with <img src="/logo.svg" alt="EarthContours logo" /> when logo is ready */}
-          ◈
-        </div>
+        <img
+          src="/Favicon3.svg"
+          alt="Earth Contours logo"
+          className={styles.logoImage}
+          width="96"
+          height="96"
+        />
         <div className={styles.appName}>{appName}</div>
         <div className={styles.tagline}>Terrain Visualization</div>
       </div>

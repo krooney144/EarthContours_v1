@@ -62,11 +62,19 @@ export const DEFAULT_MAP_CENTER = { lat: 39.7, lng: -105.5 }
 /** Default map zoom level */
 export const DEFAULT_MAP_ZOOM = 9
 
-/** OpenTopoMap tile URL template — {a|b|c} are subdomains for parallel tile loading */
-export const TOPO_TILE_URL = 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png'
+/**
+ * Carto Dark Matter tile URL — dark/minimal basemap that matches the ocean-depth
+ * color palette far better than the default green OpenTopoMap tiles.
+ * Free, no API key. Attribution: © OpenStreetMap contributors © CARTO
+ * {r} = '@2x' for retina screens (auto-filled based on devicePixelRatio)
+ */
+export const MAP_TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+export const MAP_TILE_SUBDOMAINS = ['a', 'b', 'c', 'd'] as const
+export const MAP_ATTRIBUTION = '© OpenStreetMap contributors © CARTO'
 
-/** OpenTopoMap subdomain servers (rotate between them to parallelize tile loading) */
-export const TOPO_TILE_SUBDOMAINS = ['a', 'b', 'c'] as const
+// Keep old constant name as alias so nothing else breaks
+export const TOPO_TILE_URL = MAP_TILE_URL
+export const TOPO_TILE_SUBDOMAINS = MAP_TILE_SUBDOMAINS
 
 /** Map tile size in pixels */
 export const TILE_SIZE = 256

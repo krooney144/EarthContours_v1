@@ -129,6 +129,7 @@ export async function generateSimulatedTerrain(
     maxElevation_m: maxElev,
     worldWidth_km: TERRAIN_WORLD_KM,
     worldDepth_km: TERRAIN_WORLD_KM,
+    bounds: region.bounds,  // Required by TerrainMeshData type for ray-height-field renderer
   }
 }
 

@@ -83,8 +83,10 @@
   cursor: grabbing;
 }
 
-/* The SVG/canvas that draws contour lines (Three.js canvas in Session 2) */
+/* Canvas that draws marching-squares contour lines */
 .terrainCanvas {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
 }

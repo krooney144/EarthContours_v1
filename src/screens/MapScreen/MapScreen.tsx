@@ -1,7 +1,8 @@
 /**
  * EarthContours — MAP Screen
  *
- * Real topographic map using OpenTopoMap tiles rendered on HTML <canvas>.
+ * Dark topographic map using Carto Dark Matter tiles rendered on HTML <canvas>.
+ * The dark basemap matches the ocean-depth color palette of the rest of the app.
  *
  * Features:
  * - Drag to pan
@@ -9,16 +10,11 @@
  * - Click to set explore location (sends that location to SCAN/EXPLORE)
  * - GPS dot at current location
  * - Peak markers (▲) at summit coordinates
+ * - Glowing border around any loaded terrain region
  * - Coordinates bar at bottom
  *
- * Why canvas instead of a map library?
- * - No API key needed
- * - Full control over rendering
- * - We can draw custom markers, GPS dots, and overlay terrain data
- * - MapLibre GL JS is planned for Session 2 (better vector tiles support)
- *
- * Tile URL: https://{a|b|c}.tile.opentopomap.org/{z}/{x}/{y}.png
- * Attribution required: © OpenTopoMap contributors
+ * Tile URL: Carto Dark Matter — dark minimal basemap, free, no API key
+ * Attribution: © OpenStreetMap contributors © CARTO
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
@@ -27,7 +23,7 @@ import { createLogger } from '../../core/logger'
 import {
   DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM,
   MAP_MIN_ZOOM, MAP_MAX_ZOOM, TILE_SIZE,
-  TOPO_TILE_SUBDOMAINS,
+  MAP_TILE_SUBDOMAINS, MAP_ATTRIBUTION,
 } from '../../core/constants'
 import {
   latLngToTile, tileToLatLng, latLngToPixel, pixelToLatLng,
@@ -41,25 +37,20 @@ const log = createLogger('SCREEN:MAP')
 
 // ─── Tile Cache ────────────────────────────────────────────────────────────────
 
-/**
- * Simple in-memory tile image cache.
- * Key: "{z}/{x}/{y}" → HTMLImageElement
- * Prevents re-fetching tiles when panning back.
- * Max size: ~200 tiles (avoids memory issues)
- */
 const tileCache = new Map<string, HTMLImageElement>()
 const TILE_CACHE_MAX = 200
 
 function getTileUrl(z: number, x: number, y: number): string {
-  // Rotate between a/b/c subdomains to parallelize tile downloads
-  const subdomain = TOPO_TILE_SUBDOMAINS[(x + y) % 3]
-  return `https://${subdomain}.tile.opentopomap.org/${z}/${x}/${y}.png`
+  // Carto Dark Matter tiles — rotate through a/b/c/d subdomains for parallelism
+  const subdomain = MAP_TILE_SUBDOMAINS[(x + y) % MAP_TILE_SUBDOMAINS.length]
+  // {r} = '@2x' on retina screens for crisp tiles — empty string on 1x
+  const r = window.devicePixelRatio >= 2 ? '@2x' : ''
+  return `https://${subdomain}.basemaps.cartocdn.com/dark_all/${z}/${x}/${y}${r}.png`
 }
 
 function loadTile(z: number, x: number, y: number): Promise<HTMLImageElement> {
   const key = `${z}/${x}/${y}`
 
-  // Return cached tile immediately if available
   if (tileCache.has(key)) {
     return Promise.resolve(tileCache.get(key)!)
   }
@@ -71,7 +62,6 @@ function loadTile(z: number, x: number, y: number): Promise<HTMLImageElement> {
     img.src = url
 
     img.onload = () => {
-      // Evict oldest entry if cache is full
       if (tileCache.size >= TILE_CACHE_MAX) {
         const firstKey = tileCache.keys().next().value
         if (firstKey) tileCache.delete(firstKey)
@@ -93,41 +83,36 @@ function loadTile(z: number, x: number, y: number): Promise<HTMLImageElement> {
 
 const MapScreen: React.FC = () => {
   const { activeLat, activeLng, gpsLat, gpsLng, mode, setExploreLocation, switchToGPS } = useLocationStore()
-  const { peaks } = useTerrainStore()
+  const { peaks, meshData, activeRegion } = useTerrainStore()
   const { coordFormat, showPeakLabels } = useSettingsStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
-  // Map state — center position and zoom
   const [centerLat, setCenterLat] = useState(DEFAULT_MAP_CENTER.lat)
   const [centerLng, setCenterLng] = useState(DEFAULT_MAP_CENTER.lng)
   const [zoom, setZoom] = useState(DEFAULT_MAP_ZOOM)
   const [isLoading, setIsLoading] = useState(false)
   const [showTapHint, setShowTapHint] = useState(true)
 
-  // Track cursor/finger position for coordinate display
   const [cursorLat, setCursorLat] = useState(DEFAULT_MAP_CENTER.lat)
   const [cursorLng, setCursorLng] = useState(DEFAULT_MAP_CENTER.lng)
 
-  // Drag state
   const dragRef = useRef({
     isDragging: false,
     startX: 0, startY: 0,
     startCenterLat: DEFAULT_MAP_CENTER.lat,
     startCenterLng: DEFAULT_MAP_CENTER.lng,
-    hasMoved: false,  // Track if this is a click or a drag
+    hasMoved: false,
   })
 
-  // Pinch zoom state
   const pinchRef = useRef({ isPinching: false, startDist: 0, startZoom: DEFAULT_MAP_ZOOM })
-
-  // Active tile loads — used to prevent stale redraws
   const loadingRef = useRef(0)
 
   log.debug('MapScreen render', {
     center: `${centerLat.toFixed(4)}, ${centerLng.toFixed(4)}`,
     zoom,
     mode,
+    hasRegion: !!activeRegion,
   })
 
   // ── Canvas Draw ─────────────────────────────────────────────────────────────
@@ -142,31 +127,25 @@ const MapScreen: React.FC = () => {
     const W = canvas.width
     const H = canvas.height
 
-    // Increment load generation — stale callbacks check against this
     const thisGeneration = ++loadingRef.current
 
     log.debug('Drawing map', { W, H, zoom, center: `${centerLat.toFixed(4)},${centerLng.toFixed(4)}` })
 
-    // ── Clear canvas ──
-    ctx.fillStyle = '#1a2f3f'
+    // Clear with dark ocean background
+    ctx.fillStyle = '#070f18'
     ctx.fillRect(0, 0, W, H)
 
     // ── Calculate which tiles to draw ──
-    const scale = Math.pow(2, zoom)
-    const tileCountX = Math.ceil(W / TILE_SIZE) + 2  // Extra tiles to avoid edge flicker
+    const tileCountX = Math.ceil(W / TILE_SIZE) + 2
     const tileCountY = Math.ceil(H / TILE_SIZE) + 2
 
-    // Center tile
     const centerTile = latLngToTile(centerLat, centerLng, zoom)
-
-    // Pixel offset of center tile's top-left corner within canvas
     const centerTileTopLeft = tileToLatLng(centerTile.x, centerTile.y, zoom)
     const centerTilePixel = latLngToPixel(
       centerTileTopLeft.lat, centerTileTopLeft.lng,
       centerLat, centerLng, zoom, W, H,
     )
 
-    // Range of tiles to load
     const startTileX = centerTile.x - Math.floor(tileCountX / 2)
     const startTileY = centerTile.y - Math.floor(tileCountY / 2)
 
@@ -178,20 +157,11 @@ const MapScreen: React.FC = () => {
         const tileX = startTileX + tx
         const tileY = startTileY + ty
 
-        // Wrap X tiles (Earth is round — tiles wrap at 180°)
         const maxTile = Math.pow(2, zoom)
         const wrappedX = ((tileX % maxTile) + maxTile) % maxTile
 
-        // Skip invalid Y tiles
         if (tileY < 0 || tileY >= maxTile) continue
 
-        const pixelX = centerTilePixel.x + tx * TILE_SIZE - Math.floor(tileCountX / 2) * TILE_SIZE
-        const pixelY = centerTilePixel.y + ty * TILE_SIZE - Math.floor(tileCountY / 2) * TILE_SIZE
-
-        const drawX = Math.round(pixelX - (centerTile.x - startTileX) * TILE_SIZE)
-        const drawY = Math.round(pixelY - (centerTile.y - startTileY) * TILE_SIZE)
-
-        // Recalculate pixel position properly
         const tileLat_tl = tileToLatLng(wrappedX, tileY, zoom)
         const tilePixel = latLngToPixel(
           tileLat_tl.lat, tileLat_tl.lng,
@@ -200,14 +170,12 @@ const MapScreen: React.FC = () => {
 
         const promise = loadTile(zoom, wrappedX, tileY)
           .then((img) => {
-            // Check if this draw is still current
             if (thisGeneration !== loadingRef.current) return
             ctx.drawImage(img, Math.round(tilePixel.x), Math.round(tilePixel.y), TILE_SIZE, TILE_SIZE)
           })
           .catch(() => {
-            // Draw a placeholder for failed tiles
             if (thisGeneration !== loadingRef.current) return
-            ctx.fillStyle = '#112233'
+            ctx.fillStyle = '#0a1520'
             ctx.fillRect(Math.round(tilePixel.x), Math.round(tilePixel.y), TILE_SIZE - 1, TILE_SIZE - 1)
           })
 
@@ -216,19 +184,56 @@ const MapScreen: React.FC = () => {
     }
 
     await Promise.all(tilePromises)
+    if (thisGeneration !== loadingRef.current) return
 
-    if (thisGeneration !== loadingRef.current) return  // Stale — another draw started
+    // ── Draw loaded region border (glowing rectangle) ──
+    if (activeRegion && meshData) {
+      const { bounds } = activeRegion
+      const nw = latLngToPixel(bounds.north, bounds.west, centerLat, centerLng, zoom, W, H)
+      const se = latLngToPixel(bounds.south, bounds.east, centerLat, centerLng, zoom, W, H)
+
+      const rx = Math.round(nw.x)
+      const ry = Math.round(nw.y)
+      const rw = Math.round(se.x - nw.x)
+      const rh = Math.round(se.y - nw.y)
+
+      // Outer glow
+      ctx.save()
+      ctx.shadowColor = 'rgba(132, 209, 219, 0.8)'
+      ctx.shadowBlur = 16
+      ctx.strokeStyle = 'rgba(132, 209, 219, 0.85)'
+      ctx.lineWidth = 2
+      ctx.strokeRect(rx, ry, rw, rh)
+      // Wide soft halo
+      ctx.shadowBlur = 32
+      ctx.strokeStyle = 'rgba(132, 209, 219, 0.25)'
+      ctx.lineWidth = 8
+      ctx.strokeRect(rx, ry, rw, rh)
+      ctx.restore()
+
+      // Region name label at the top of the border
+      if (rw > 80 && rh > 24) {
+        ctx.save()
+        ctx.font = `bold 10px 'Josefin Sans', sans-serif`
+        ctx.fillStyle = 'rgba(132, 209, 219, 0.9)'
+        ctx.textAlign = 'left'
+        ctx.shadowColor = 'rgba(132, 209, 219, 0.7)'
+        ctx.shadowBlur = 6
+        ctx.fillText('▣ ' + activeRegion.name.toUpperCase(), rx + 6, ry + 15)
+        ctx.restore()
+      }
+
+      log.debug('Region border drawn', { region: activeRegion.id })
+    }
 
     // ── Draw GPS dot ──
     if (gpsLat !== null && gpsLng !== null) {
       const gpsPx = latLngToPixel(gpsLat, gpsLng, centerLat, centerLng, zoom, W, H)
       if (gpsPx.x >= 0 && gpsPx.x <= W && gpsPx.y >= 0 && gpsPx.y <= H) {
-        // Outer ring
         ctx.beginPath()
         ctx.arc(gpsPx.x, gpsPx.y, 12, 0, Math.PI * 2)
         ctx.fillStyle = 'rgba(132, 209, 219, 0.2)'
         ctx.fill()
-        // Inner dot
         ctx.beginPath()
         ctx.arc(gpsPx.x, gpsPx.y, 6, 0, Math.PI * 2)
         ctx.fillStyle = '#84D1DB'
@@ -264,14 +269,12 @@ const MapScreen: React.FC = () => {
         const px = latLngToPixel(peak.lat, peak.lng, centerLat, centerLng, zoom, W, H)
         if (px.x < -20 || px.x > W + 20 || px.y < -20 || px.y > H + 20) continue
 
-        // Triangle marker
         ctx.fillStyle = '#A7DDE5'
         ctx.shadowColor = '#84D1DB'
         ctx.shadowBlur = 4
         ctx.fillText('▲', px.x, px.y)
         ctx.shadowBlur = 0
 
-        // Name label (only at higher zoom)
         if (zoom >= 10) {
           ctx.font = `10px 'Josefin Sans', sans-serif`
           ctx.fillStyle = 'rgba(167, 221, 229, 0.9)'
@@ -282,13 +285,14 @@ const MapScreen: React.FC = () => {
 
     // ── Attribution ──
     ctx.font = '10px Arial, sans-serif'
-    ctx.fillStyle = 'rgba(240, 248, 255, 0.6)'
+    ctx.fillStyle = 'rgba(240, 248, 255, 0.45)'
     ctx.textAlign = 'right'
-    ctx.fillText('© OpenTopoMap contributors', W - 8, H - 8)
+    ctx.shadowBlur = 0
+    ctx.fillText(MAP_ATTRIBUTION, W - 8, H - 8)
 
     setIsLoading(false)
     log.debug('Map draw complete')
-  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels])
+  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, activeRegion, meshData])
 
   // ── Resize observer ─────────────────────────────────────────────────────────
 
@@ -299,10 +303,8 @@ const MapScreen: React.FC = () => {
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect
-        // Set canvas pixel size to match display size
         canvas.width = Math.round(width * window.devicePixelRatio)
         canvas.height = Math.round(height * window.devicePixelRatio)
-        // Scale context to account for device pixel ratio
         const ctx = canvas.getContext('2d')
         if (ctx) ctx.scale(window.devicePixelRatio, window.devicePixelRatio)
         log.debug('Canvas resized', { width, height, dpr: window.devicePixelRatio })
@@ -314,7 +316,6 @@ const MapScreen: React.FC = () => {
     return () => observer.disconnect()
   }, [drawMap])
 
-  // Redraw when map state changes
   useEffect(() => {
     drawMap()
   }, [drawMap])
@@ -336,7 +337,6 @@ const MapScreen: React.FC = () => {
 
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!dragRef.current.isDragging) {
-      // Update cursor coordinates for the coord bar
       const canvas = canvasRef.current
       if (!canvas) return
       const rect = canvas.getBoundingClientRect()
@@ -355,8 +355,6 @@ const MapScreen: React.FC = () => {
       dragRef.current.hasMoved = true
     }
 
-    // Convert pixel delta to lat/lng delta
-    // At zoom Z, one tile = 256px covers 360/2^Z degrees of longitude
     const scale = Math.pow(2, zoom)
     const lngPerPx = 360 / (TILE_SIZE * scale)
     const latPerPx = lngPerPx * Math.cos((centerLat * Math.PI) / 180)
@@ -372,7 +370,6 @@ const MapScreen: React.FC = () => {
     canvasRef.current?.releasePointerCapture(e.pointerId)
 
     if (dragRef.current.isDragging && !dragRef.current.hasMoved) {
-      // This was a click (no drag movement) — set explore location
       const canvas = canvasRef.current
       if (!canvas) return
       const rect = canvas.getBoundingClientRect()
@@ -405,7 +402,7 @@ const MapScreen: React.FC = () => {
     })
   }, [])
 
-  // ── Pinch Zoom (touch) ──────────────────────────────────────────────────────
+  // ── Pinch Zoom ──────────────────────────────────────────────────────────────
 
   const handleTouchStart = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
     if (e.touches.length === 2) {

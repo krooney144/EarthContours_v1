@@ -13,7 +13,7 @@
  * │                                       │     │
  * │  Peak labels float above their peaks  │     │
  * │─────────────────────────────────────────────│
- * │ HUD: HDG | LAT | LONG | ELEV | EYE         │
+ * │ HUD: HDG | LAT | LONG | ELEV | VIEWPT AGL  │
  * └─────────────────────────────────────────────┘
  *
  * Key behaviors:
@@ -22,15 +22,16 @@
  * - Height slider → changes eye height above ground
  * - Peak labels always appear ABOVE the peak (card → line → dot, top to bottom)
  *
- * In Session 2: Three.js renderer replaces the CSS terrain background.
+ * Terrain canvas: ray-height-field renderer that casts rays along the heading
+ * direction and draws the terrain silhouette based on real elevation data.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useCameraStore, useLocationStore, useTerrainStore, useSettingsStore } from '../../store'
 import { createLogger } from '../../core/logger'
 import { COMPASS_DIRECTIONS, COMPASS_ITEM_WIDTH, MAX_HEIGHT_M, MIN_HEIGHT_M } from '../../core/constants'
-import { formatElevation, calculateBearing, haversineDistance, headingToCompass, normalizeAngle, clamp, metersToFeet } from '../../core/utils'
-import type { Peak } from '../../core/types'
+import { formatElevation, calculateBearing, haversineDistance, headingToCompass, clamp, metersToFeet } from '../../core/utils'
+import type { Peak, TerrainMeshData } from '../../core/types'
 import styles from './ScanScreen.module.css'
 
 const log = createLogger('SCREEN:SCAN')
@@ -43,6 +44,133 @@ interface DragState {
   lastY: number
 }
 
+// ─── Terrain Canvas Helpers ───────────────────────────────────────────────────
+
+/**
+ * Sample elevation at a lat/lng from the terrain mesh.
+ * Uses nearest-neighbor lookup — fast for real-time rendering.
+ */
+function sampleMeshAt(lat: number, lng: number, mesh: TerrainMeshData): number {
+  const { bounds, width, height, elevations } = mesh
+  const col = Math.round((lng - bounds.west) / (bounds.east - bounds.west) * (width - 1))
+  const row = Math.round((bounds.north - lat) / (bounds.north - bounds.south) * (height - 1))
+  const c = Math.max(0, Math.min(width - 1, col))
+  const r = Math.max(0, Math.min(height - 1, row))
+  return elevations[r * width + c] ?? 0
+}
+
+/**
+ * Ray-height-field terrain renderer.
+ *
+ * For each screen column, casts a ray at the corresponding bearing angle
+ * and finds the highest visible terrain point (the horizon silhouette).
+ * Fills sky above the silhouette and terrain below it, with distance-based
+ * color shading (dark = far, bright = near).
+ *
+ * This is a 2.5D technique (the classic Comanche heightmap algorithm).
+ */
+function drawTerrainCanvas(
+  canvas: HTMLCanvasElement,
+  mesh: TerrainMeshData,
+  heading_deg: number,
+  pitch_deg: number,
+  eyeHeight_m: number,
+  activeLat: number,
+  activeLng: number,
+): void {
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+
+  const W = canvas.width
+  const H = canvas.height
+
+  const HFOV = 70          // Horizontal field of view (degrees)
+  const VFOV = 60          // Vertical field of view (degrees)
+  const MAX_DIST = 35000   // Max render distance (meters)
+  const STEP_COUNT = 100   // Depth samples per column
+  const DEG_TO_RAD = Math.PI / 180
+
+  const groundElev = sampleMeshAt(activeLat, activeLng, mesh)
+  const eyeElev = groundElev + eyeHeight_m
+
+  // ── Sky gradient ────────────────────────────────────────────────────────────
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H)
+  skyGrad.addColorStop(0,   '#010810')   // deep space
+  skyGrad.addColorStop(0.4, '#04121e')   // sky
+  skyGrad.addColorStop(0.65, '#082030')  // near horizon
+  skyGrad.addColorStop(1,   '#0d2a42')   // horizon
+  ctx.fillStyle = skyGrad
+  ctx.fillRect(0, 0, W, H)
+
+  // Horizon Y pixel position (pitch shifts it up/down)
+  const pitchRad = pitch_deg * DEG_TO_RAD
+  const vfovRad = VFOV * DEG_TO_RAD
+  const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
+
+  // Lat factor for converting distances to longitude deltas
+  const cosLat = Math.cos(activeLat * DEG_TO_RAD)
+
+  // ── Terrain columns ─────────────────────────────────────────────────────────
+  for (let col = 0; col < W; col++) {
+    const bearingDeg = heading_deg + (col / W - 0.5) * HFOV
+    const bearingRad = bearingDeg * DEG_TO_RAD
+
+    // sin/cos for lat/lng movement along this bearing
+    const sinB = Math.sin(bearingRad)
+    const cosB = Math.cos(bearingRad)
+
+    let maxTerrainY = H  // lowest point drawn so far (start from bottom)
+
+    // Far-to-near: step from MAX_DIST down to 0, finding new visible terrain
+    for (let step = STEP_COUNT; step >= 1; step--) {
+      const dist = (step / STEP_COUNT) * MAX_DIST  // meters
+
+      // Approximate lat/lng at this distance along the ray
+      const sampleLat = activeLat + (cosB * dist) / 111320
+      const sampleLng = activeLng + (sinB * dist) / (111320 * cosLat)
+
+      const terrainElev = sampleMeshAt(sampleLat, sampleLng, mesh)
+      const elevDiff = terrainElev - eyeElev
+
+      // Angle from eye to terrain point (positive = above eye)
+      const angleRad = Math.atan2(elevDiff, dist)
+
+      // Project to screen Y (below horizon = larger Y)
+      const screenY = horizonY - angleRad * (H / vfovRad)
+
+      if (screenY < maxTerrainY) {
+        // This terrain is higher on screen — draw the newly visible slice
+        const distFrac = step / STEP_COUNT  // 1=far/dark, 0=near/bright
+
+        // Ocean-depth color palette: dark far ridges → brighter near terrain
+        const r = Math.round(8  + (1 - distFrac) * 28)
+        const g = Math.round(35 + (1 - distFrac) * 85)
+        const b = Math.round(55 + (1 - distFrac) * 100)
+
+        ctx.fillStyle = `rgb(${r},${g},${b})`
+        ctx.fillRect(
+          col,
+          Math.round(screenY),
+          1,
+          Math.round(maxTerrainY - screenY) + 1,
+        )
+
+        maxTerrainY = screenY
+      }
+    }
+  }
+
+  // ── Horizon glow line ───────────────────────────────────────────────────────
+  ctx.fillStyle = 'rgba(132, 209, 219, 0.12)'
+  ctx.fillRect(0, Math.round(horizonY) - 1, W, 2)
+
+  log.debug('Terrain canvas drawn', {
+    heading: heading_deg.toFixed(1),
+    pitch: pitch_deg.toFixed(1),
+    eyeElev: eyeElev.toFixed(0),
+  })
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 const ScanScreen: React.FC = () => {
@@ -52,6 +180,7 @@ const ScanScreen: React.FC = () => {
   const { units, showPeakLabels, showContourLines } = useSettingsStore()
 
   const viewportRef = useRef<HTMLDivElement>(null)
+  const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
   const dragState = useRef<DragState>({ isDragging: false, lastX: 0, lastY: 0 })
   const [showDragHint, setShowDragHint] = useState(true)
 
@@ -66,12 +195,31 @@ const ScanScreen: React.FC = () => {
     pitch: pitch_deg.toFixed(1),
     height_m: height_m.toFixed(0),
     peakCount: peaks.length,
+    hasMesh: !!meshData,
   })
+
+  // ── Terrain Canvas Draw ───────────────────────────────────────────────────
+
+  useEffect(() => {
+    const canvas = terrainCanvasRef.current
+    if (!canvas || !meshData) return
+
+    // Set canvas resolution to match display size
+    const rect = canvas.getBoundingClientRect()
+    if (rect.width > 0 && rect.height > 0) {
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = Math.round(rect.width * dpr)
+      canvas.height = Math.round(rect.height * dpr)
+      const ctx = canvas.getContext('2d')
+      if (ctx) ctx.scale(dpr, dpr)
+    }
+
+    drawTerrainCanvas(canvas, meshData, heading_deg, pitch_deg, height_m, activeLat, activeLng)
+  }, [heading_deg, pitch_deg, height_m, activeLat, activeLng, meshData])
 
   // ── Drag Handlers (viewport) ──────────────────────────────────────────────
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    // Capture the pointer so we get move events even if cursor leaves the element
     viewportRef.current?.setPointerCapture(e.pointerId)
     dragState.current = { isDragging: true, lastX: e.clientX, lastY: e.clientY }
     setShowDragHint(false)
@@ -98,7 +246,7 @@ const ScanScreen: React.FC = () => {
   // ── Height Slider ─────────────────────────────────────────────────────────
 
   const handleSliderPointerDown = useCallback((e: React.PointerEvent) => {
-    e.stopPropagation()  // Don't trigger viewport drag
+    e.stopPropagation()
     sliderRef.current?.setPointerCapture(e.pointerId)
     sliderDragRef.current = { isDragging: true, startY: e.clientY, startHeight: height_m }
     log.debug('Height slider drag start', { height_m: height_m.toFixed(0) })
@@ -113,11 +261,7 @@ const ScanScreen: React.FC = () => {
     const sliderRect = sliderEl.getBoundingClientRect()
     const sliderHeight = sliderRect.height
 
-    // Distance dragged (negative = up = higher elevation)
     const deltaY = e.clientY - sliderDragRef.current.startY
-
-    // Convert pixel delta to height change
-    // Full slider height = full range (MIN to MAX height)
     const heightRange_m = MAX_HEIGHT_M - MIN_HEIGHT_M
     const heightDelta_m = -(deltaY / sliderHeight) * heightRange_m
 
@@ -138,39 +282,14 @@ const ScanScreen: React.FC = () => {
 
   // ── Compass ───────────────────────────────────────────────────────────────
 
-  /**
-   * Calculate the pixel offset for the compass strip.
-   * We render 3 loops of the 16 directions (48 items total) for seamless wrapping.
-   * The center of the visible strip should show the current heading.
-   *
-   * Formula: offset = (center of viewport) - (pixel position of current heading)
-   * Since we're using transform:translateX from left:0, we adjust so the
-   * current heading is always under the center notch.
-   */
   const compassOffset = (() => {
-    // Each direction is 22.5 degrees. Find which item index corresponds to heading.
-    const headingIndex = heading_deg / 22.5  // 0–16 (fractional)
-    // Start from the second loop (offset by 16 items) to allow wrapping
+    const headingIndex = heading_deg / 22.5
     const centerItemIndex = headingIndex + 16
-    // Pixel offset to center this item
-    // We want the center of our rendered strip to align with the viewport center
-    // The strip starts at left:0, so we translate left by (centerItemIndex * width - viewport/2)
     return -(centerItemIndex * COMPASS_ITEM_WIDTH)
   })()
 
   // ── Peak Label Positions ──────────────────────────────────────────────────
 
-  /**
-   * Determine which peaks are visible from the current viewpoint and
-   * calculate their 2D screen positions.
-   *
-   * For MVP: We use a simplified bearing + angular distance model.
-   * A peak is "visible" if its bearing is within ~60° of the current heading.
-   * Its horizontal position is proportional to the angle offset from heading.
-   * Its vertical position is simplified based on distance and pitch.
-   *
-   * Session 2 will project peaks from 3D world space via Three.js camera matrices.
-   */
   const visiblePeaks = peaks
     .map((peak) => {
       const bearing = calculateBearing(
@@ -182,9 +301,7 @@ const ScanScreen: React.FC = () => {
         { lat: peak.lat, lng: peak.lng },
       )
 
-      // Angular difference from current heading
       let angleDiff = bearing - heading_deg
-      // Normalize to -180 to +180
       while (angleDiff > 180) angleDiff -= 360
       while (angleDiff < -180) angleDiff += 360
 
@@ -193,7 +310,7 @@ const ScanScreen: React.FC = () => {
     .filter(({ angleDiff, distance_km }) =>
       Math.abs(angleDiff) < 65 && distance_km < 120
     )
-    .slice(0, 6)  // Show max 6 peaks to avoid clutter
+    .slice(0, 6)
 
   return (
     <div className={styles.screen}>
@@ -201,20 +318,15 @@ const ScanScreen: React.FC = () => {
       <div className={styles.compassStrip} role="img" aria-label={`Compass showing ${headingToCompass(heading_deg)} at ${Math.round(heading_deg)}°`}>
         <div className={styles.compassNotch} aria-hidden="true" />
 
-        {/* Heading degrees display */}
         <div className={styles.headingDegrees} aria-hidden="true">
           {Math.round(heading_deg)}°
         </div>
 
-        {/* The scrolling track — 3 loops for seamless wrap */}
         <div
           className={styles.compassTrack}
-          style={{
-            transform: `translateX(calc(50vw + ${compassOffset}px))`,
-          }}
+          style={{ transform: `translateX(calc(50vw + ${compassOffset}px))` }}
           aria-hidden="true"
         >
-          {/* Render 3 full loops so the strip wraps seamlessly */}
           {[0, 1, 2].flatMap((loop) =>
             COMPASS_DIRECTIONS.map((dir, dirIndex) => {
               const isCardinal = ['N', 'S', 'E', 'W'].includes(dir)
@@ -242,17 +354,14 @@ const ScanScreen: React.FC = () => {
         role="application"
         aria-label="Terrain view — drag to look around"
       >
-        {/* Simulated terrain background (replaced by Three.js in Session 2) */}
-        <div
-          className={styles.terrainBg}
-          style={{
-            // Subtle parallax — terrain shifts slightly with pitch
-            backgroundPositionY: `${50 + pitch_deg * 0.5}%`,
-          }}
+        {/* Ray-height-field terrain canvas */}
+        <canvas
+          ref={terrainCanvasRef}
+          className={styles.terrainCanvas}
           aria-hidden="true"
         />
 
-        {/* Contour line overlay (simplified for MVP) */}
+        {/* Contour line overlay */}
         {showContourLines && (
           <ContourOverlay
             heading={heading_deg}
@@ -276,7 +385,7 @@ const ScanScreen: React.FC = () => {
           </div>
         )}
 
-        {/* Drag hint — fades after first interaction */}
+        {/* Drag hint */}
         <div className={`${styles.dragHint} ${!showDragHint ? styles.hidden : ''}`} aria-hidden="true">
           ← Drag to look around →
         </div>
@@ -299,7 +408,6 @@ const ScanScreen: React.FC = () => {
           aria-valuemax={Math.round(metersToFeet(MAX_HEIGHT_M))}
           aria-valuenow={Math.round(metersToFeet(height_m))}
         >
-          {/* Fill — proportion of current height in range */}
           <div
             className={styles.heightSliderFill}
             style={{
@@ -307,7 +415,6 @@ const ScanScreen: React.FC = () => {
             }}
             aria-hidden="true"
           />
-          {/* Draggable thumb */}
           <div
             className={styles.heightSliderThumb}
             style={{
@@ -342,66 +449,38 @@ const ScanScreen: React.FC = () => {
 
 interface PeakLabelProps {
   peak: Peak
-  angleDiff: number    // Angular offset from heading (-65 to +65)
+  angleDiff: number
   distance_km: number
   bearing: number
   units: 'imperial' | 'metric'
 }
 
-/**
- * Individual peak label.
- * Layout (top to bottom): Card → Line → Dot
- * The label is positioned horizontally by angleDiff and vertically
- * by a simplified distance-based projection.
- */
 const PeakLabelComponent: React.FC<PeakLabelProps> = ({
   peak, angleDiff, distance_km, bearing, units,
 }) => {
-  const log2 = createLogger('COMPONENT:PEAK_LABEL')
-
-  // Horizontal position: center of screen + angle offset
-  // ±65° maps to roughly ±50% of screen width
   const leftPercent = 50 + (angleDiff / 65) * 45
-
-  // Vertical position: closer peaks appear lower (simpler approach for MVP)
-  // Far peaks appear near the horizon (top), close peaks appear lower
   const maxDist = 120
   const topPercent = 15 + (1 - Math.min(distance_km, maxDist) / maxDist) * 35
-
-  log2.debug('Peak label position', {
-    name: peak.name,
-    angleDiff: angleDiff.toFixed(1),
-    leftPercent: leftPercent.toFixed(1),
-    topPercent: topPercent.toFixed(1),
-  })
 
   return (
     <div
       className={styles.peakLabel}
-      style={{
-        left: `${leftPercent}%`,
-        top: `${topPercent}%`,
-      }}
+      style={{ left: `${leftPercent}%`, top: `${topPercent}%` }}
       role="img"
       aria-label={`${peak.name}, ${formatElevation(peak.elevation_m, units)}, ${Math.round(distance_km)} km away`}
     >
-      {/* Card at top */}
       <div className={styles.peakCard}>
         <span className={styles.peakName}>{peak.name}</span>
         <span className={styles.peakElev}>{formatElevation(peak.elevation_m, units)}</span>
         <span className={styles.peakBearing}>{headingToCompass(bearing)} · {distance_km.toFixed(0)} km</span>
       </div>
-      {/* Vertical line pointing DOWN */}
       <div className={styles.peakLine} aria-hidden="true" />
-      {/* Glowing dot at the bottom (terrain level) */}
       <div className={styles.peakDot} aria-hidden="true" />
     </div>
   )
 }
 
-/** Decorative contour lines drawn across the terrain viewport */
 const ContourOverlay: React.FC<{ heading: number; pitch: number }> = ({ heading, pitch }) => {
-  // Simplified contour lines — in Session 2 these come from Three.js
   const lines = [
     { y: 55, opacity: 0.12, width: '100%' },
     { y: 62, opacity: 0.15, width: '90%' },
@@ -430,7 +509,6 @@ const ContourOverlay: React.FC<{ heading: number; pitch: number }> = ({ heading,
   )
 }
 
-/** HUD readout bar at the bottom of the scan screen */
 interface HUDBarProps {
   heading_deg: number
   lat: number
@@ -472,18 +550,18 @@ const HUDBar: React.FC<HUDBarProps> = ({
       </div>
       <div className={styles.hudDivider} aria-hidden="true" />
       <div className={styles.hudItem}>
-        <span className={styles.hudLabel}>EYE</span>
+        {/* VIEWPT = viewpoint elevation above ground level (AGL) */}
+        <span className={styles.hudLabel}>VIEWPT</span>
         <span className={styles.hudValue}>{eyeStr}</span>
+        <span className={styles.hudSubLabel}>AGL</span>
       </div>
     </div>
   )
 }
 
-/** Get a representative ground elevation from the terrain mesh center */
 function getGroundElevation(elevations: Float32Array, width: number, height: number): number {
-  // Sample the center of the terrain grid
   const centerIdx = Math.floor(height / 2) * width + Math.floor(width / 2)
-  return elevations[centerIdx] ?? 2400  // Default to ~Colorado base elevation
+  return elevations[centerIdx] ?? 2400
 }
 
 export default ScanScreen

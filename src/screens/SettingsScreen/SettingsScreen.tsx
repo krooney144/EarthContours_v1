@@ -279,10 +279,11 @@ const SettingsScreen: React.FC = () => {
             label="App Name"
             description="Compare two name options for the app"
           >
-            <Segmented<'EarthContours' | 'Earthscape'>
+            <Segmented<'Earth Contours' | 'EarthContours' | 'Earthscape'>
               options={[
-                { value: 'EarthContours', label: 'EarthContours' },
-                { value: 'Earthscape',    label: 'Earthscape' },
+                { value: 'Earth Contours', label: 'Earth Contours' },
+                { value: 'EarthContours',  label: 'EarthContours' },
+                { value: 'Earthscape',     label: 'Earthscape' },
               ]}
               value={settings.appName}
               onChange={(v) => {

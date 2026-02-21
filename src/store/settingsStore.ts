@@ -47,7 +47,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   verticalExaggeration: 1.5,   // 1.5× default per briefing
 
   // Appearance
-  appName: 'EarthContours',    // Default name
+  appName: 'Earth Contours',   // Two-word brand name
   colorTheme: 'ocean',
   labelSize: 'medium',
   reduceMotion: false,
@@ -79,7 +79,7 @@ interface SettingsStore extends AppSettings {
   toggleContourLines: () => void
   toggleContourAnimation: () => void
   setVerticalExaggeration: (v: VerticalExaggeration) => void
-  setAppName: (name: 'EarthContours' | 'Earthscape') => void
+  setAppName: (name: 'Earth Contours' | 'EarthContours' | 'Earthscape') => void
   setColorTheme: (theme: ColorTheme) => void
   setLabelSize: (size: LabelSize) => void
   toggleReduceMotion: () => void

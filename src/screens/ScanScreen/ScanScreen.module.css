@@ -375,6 +375,16 @@
   white-space: nowrap;
 }
 
+/* Secondary sub-label below value — e.g. "AGL" under the VIEWPT reading */
+.hudSubLabel {
+  font-family: var(--font-display);
+  font-size: 8px;
+  color: var(--ec-ocean);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-top: -1px;
+}
+
 .hudDivider {
   width: 1px;
   height: 24px;

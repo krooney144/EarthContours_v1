@@ -1,29 +1,240 @@
 /**
  * EarthContours — EXPLORE Screen
  *
- * 3D orbit view showing contour lines only — no filled terrain mesh.
- * Like looking at a physical topographic model from above and around.
+ * 3D orbit view showing contour lines extracted from real elevation data
+ * using the marching squares algorithm, projected into an orthographic 3D view.
  *
  * Key behaviors:
  * - Drag to orbit (rotate + tilt)
  * - Auto-rotates slowly after 3 seconds of idle
  * - Peak labels float above terrain
  * - Elevation legend on right side
- * - Contour lines color-coded from dark (low) to light (high)
+ * - Contour lines color-coded from dark (low) to bright (high)
  *
- * In Session 2: Three.js renderer with real WebGL contour lines.
- * For MVP: SVG-based simulated contour view that responds to orbit drag.
+ * Rendering pipeline:
+ * 1. Marching squares extracts line segments from the elevation grid for each
+ *    contour level
+ * 2. Each segment's 3D position is projected using the orbit camera angles
+ *    (theta = horizontal rotation, phi = vertical tilt)
+ * 3. Segments are drawn on a canvas with color and opacity based on elevation
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useCameraStore, useTerrainStore, useSettingsStore } from '../../store'
 import { createLogger } from '../../core/logger'
-import { formatElevation, lerpColor } from '../../core/utils'
+import { formatElevation } from '../../core/utils'
 import { PALETTE } from '../../core/constants'
-import type { Peak } from '../../core/types'
+import type { Peak, TerrainMeshData } from '../../core/types'
 import styles from './ExploreScreen.module.css'
 
 const log = createLogger('SCREEN:EXPLORE')
+
+// ─── Marching Squares ─────────────────────────────────────────────────────────
+
+/**
+ * Marching squares edge table.
+ * Each case (0-15) maps to a list of edge pairs [fromEdge, toEdge].
+ * Edges are: 0=top, 1=right, 2=bottom, 3=left
+ * Case is built from corners: bit0=TL>t, bit1=TR>t, bit2=BR>t, bit3=BL>t
+ */
+const MS_EDGES: Array<Array<[number, number]>> = [
+  [],              // 0000 - all below
+  [[3, 0]],        // 0001 - TL above
+  [[0, 1]],        // 0010 - TR above
+  [[3, 1]],        // 0011 - TL+TR above
+  [[1, 2]],        // 0100 - BR above
+  [[3, 0],[1, 2]], // 0101 - TL+BR (saddle — pick consistent case)
+  [[0, 2]],        // 0110 - TR+BR above
+  [[3, 2]],        // 0111 - TL+TR+BR above
+  [[2, 3]],        // 1000 - BL above
+  [[2, 0]],        // 1001 - TL+BL above
+  [[0, 1],[2, 3]], // 1010 - TR+BL (saddle)
+  [[2, 1]],        // 1011 - TL+TR+BL above
+  [[1, 3]],        // 1100 - BR+BL above
+  [[1, 0]],        // 1101 - TL+BR+BL above
+  [[0, 3]],        // 1110 - TR+BR+BL above
+  [],              // 1111 - all above
+]
+
+interface Segment {
+  x1: number; y1: number  // grid-normalized [0,1]
+  x2: number; y2: number
+}
+
+/**
+ * Extract line segments for a given elevation threshold from the mesh.
+ * Returns segments in normalized grid space (0 to 1 for both axes).
+ */
+function marchingSquares(elevations: Float32Array, w: number, h: number, threshold: number): Segment[] {
+  const segments: Segment[] = []
+
+  for (let row = 0; row < h - 1; row++) {
+    for (let col = 0; col < w - 1; col++) {
+      const tl = elevations[row * w + col]
+      const tr = elevations[row * w + col + 1]
+      const br = elevations[(row + 1) * w + col + 1]
+      const bl = elevations[(row + 1) * w + col]
+
+      // Build case index
+      const caseIdx =
+        ((tl > threshold) ? 1 : 0) |
+        ((tr > threshold) ? 2 : 0) |
+        ((br > threshold) ? 4 : 0) |
+        ((bl > threshold) ? 8 : 0)
+
+      const edgePairs = MS_EDGES[caseIdx]
+      if (edgePairs.length === 0) continue
+
+      // Normalized cell bounds [0,1]
+      const x0 = col / (w - 1)
+      const x1 = (col + 1) / (w - 1)
+      const y0 = row / (h - 1)
+      const y1 = (row + 1) / (h - 1)
+
+      // Linear interpolation factor for each edge crossing
+      const tTop    = tl !== tr ? (threshold - tl) / (tr - tl) : 0.5
+      const tRight  = tr !== br ? (threshold - tr) / (br - tr) : 0.5
+      const tBottom = bl !== br ? (threshold - bl) / (br - bl) : 0.5
+      const tLeft   = tl !== bl ? (threshold - tl) / (bl - tl) : 0.5
+
+      // Edge midpoint positions [gx, gy] in normalized grid space
+      // edge 0=top, 1=right, 2=bottom, 3=left
+      const edgePts: Array<[number, number]> = [
+        [x0 + tTop * (x1 - x0), y0],          // top edge
+        [x1, y0 + tRight * (y1 - y0)],         // right edge
+        [x0 + tBottom * (x1 - x0), y1],        // bottom edge
+        [x0, y0 + tLeft * (y1 - y0)],          // left edge
+      ]
+
+      for (const [fromEdge, toEdge] of edgePairs) {
+        const [px1, py1] = edgePts[fromEdge]
+        const [px2, py2] = edgePts[toEdge]
+        segments.push({ x1: px1, y1: py1, x2: px2, y2: py2 })
+      }
+    }
+  }
+
+  return segments
+}
+
+// ─── 3D Projection ────────────────────────────────────────────────────────────
+
+/**
+ * Project a 3D terrain point (gx, gy, gz) to 2D screen coordinates.
+ *
+ * Coordinate system:
+ *   gx: grid X, centered at 0, range [-0.5, 0.5] (east/west)
+ *   gy: elevation, range [0, vertExag * elevScale]
+ *   gz: grid Z, centered at 0, range [-0.5, 0.5] (south = positive z)
+ *
+ * Camera orbit:
+ *   theta: rotation around Y axis (horizontal orbit)
+ *   phi: angle from zenith (0 = top-down, π/2 = side view)
+ */
+function project3D(
+  gx: number, gy: number, gz: number,
+  theta: number, phi: number,
+  cx: number, cy: number,
+  scale: number,
+): [number, number] {
+  // Step 1: Rotate around Y by theta
+  const rx = gx * Math.cos(theta) + gz * Math.sin(theta)
+  const rz = -gx * Math.sin(theta) + gz * Math.cos(theta)
+  const ry = gy
+
+  // Step 2: Rotate around X by phi (tilt)
+  const ry2 = ry * Math.cos(phi) - rz * Math.sin(phi)
+  const rx2 = rx  // x unchanged by X rotation
+
+  // Orthographic projection
+  const sx = cx + rx2 * scale
+  const sy = cy - ry2 * scale  // screen y flipped
+
+  return [sx, sy]
+}
+
+// ─── Canvas Draw ──────────────────────────────────────────────────────────────
+
+function drawExploreCanvas(
+  canvas: HTMLCanvasElement,
+  mesh: TerrainMeshData,
+  contourElevations: number[],
+  theta: number,
+  phi: number,
+  verticalExaggeration: number,
+): void {
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+
+  const W = canvas.width
+  const H = canvas.height
+  const { elevations, width, height, minElevation_m, maxElevation_m } = mesh
+  const elevRange = maxElevation_m - minElevation_m || 1
+
+  // Clear background
+  ctx.fillStyle = '#020e18'
+  ctx.fillRect(0, 0, W, H)
+
+  // Projection parameters
+  const cx = W / 2
+  const cy = H / 2 + H * 0.05  // slightly below center for better framing
+  const scale = Math.min(W, H) * 0.62
+
+  // Elevation scale: max elevation maps to 0.25 units, then multiplied by exaggeration
+  const elevScale = 0.25 * verticalExaggeration
+
+  // Subtle ground plane ellipse (shows the base of the terrain)
+  const groundY = cy + (Math.sin(phi) * scale * 0.05)
+  const groundRX = scale * 0.52
+  const groundRY = scale * 0.52 * Math.abs(Math.cos(phi)) * 0.35 + 4
+  ctx.beginPath()
+  ctx.ellipse(cx, groundY, groundRX, groundRY, 0, 0, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(18, 75, 107, 0.4)'
+  ctx.lineWidth = 1
+  ctx.stroke()
+
+  // Draw contour levels from lowest to highest (painter's algorithm)
+  for (const elev of contourElevations) {
+    const t = (elev - minElevation_m) / elevRange  // 0=low, 1=high
+
+    // Color: interpolate from dark ocean blue to bright foam
+    const r = Math.round(14 + t * (167 - 14))
+    const g = Math.round(75 + t * (221 - 75))
+    const b = Math.round(107 + t * (229 - 107))
+    const opacity = 0.3 + t * 0.55
+
+    ctx.strokeStyle = `rgba(${r},${g},${b},${opacity})`
+    ctx.lineWidth = elev % 500 === 0 ? 1.5 : 0.8  // Index contours thicker
+
+    // Get segments from marching squares
+    const segments = marchingSquares(elevations, width, height, elev)
+
+    // Map elevation to 3D Y (normalized to [0, elevScale])
+    const gy = (t * elevScale)
+
+    ctx.beginPath()
+    for (const seg of segments) {
+      // Convert from grid [0,1] to centered [-0.5, 0.5]
+      const gx1 = seg.x1 - 0.5
+      const gz1 = seg.y1 - 0.5
+      const gx2 = seg.x2 - 0.5
+      const gz2 = seg.y2 - 0.5
+
+      const [sx1, sy1] = project3D(gx1, gy, gz1, theta, phi, cx, cy, scale)
+      const [sx2, sy2] = project3D(gx2, gy, gz2, theta, phi, cx, cy, scale)
+
+      ctx.moveTo(sx1, sy1)
+      ctx.lineTo(sx2, sy2)
+    }
+    ctx.stroke()
+  }
+
+  log.debug('Explore canvas drawn', {
+    contours: contourElevations.length,
+    theta: theta.toFixed(2),
+    phi: phi.toFixed(2),
+  })
+}
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -36,7 +247,8 @@ const ExploreScreen: React.FC = () => {
   const { peaks, meshData, contourElevations, activeRegion } = useTerrainStore()
   const { units, showPeakLabels, verticalExaggeration } = useSettingsStore()
 
-  const canvasRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
   const dragState = useRef({ isDragging: false, lastX: 0, lastY: 0 })
   const animFrameRef = useRef<number | null>(null)
   const lastTimeRef = useRef<number>(performance.now())
@@ -47,7 +259,30 @@ const ExploreScreen: React.FC = () => {
     phi: orbitPhi.toFixed(3),
     autoRotating,
     contourCount: contourElevations.length,
+    hasMesh: !!meshData,
   })
+
+  // ── Canvas draw effect ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !meshData || contourElevations.length === 0) return
+
+    // Size canvas to container on first draw
+    const container = containerRef.current
+    if (container) {
+      const rect = container.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) {
+        const dpr = window.devicePixelRatio || 1
+        canvas.width = Math.round(rect.width * dpr)
+        canvas.height = Math.round(rect.height * dpr)
+        const ctx = canvas.getContext('2d')
+        if (ctx) ctx.scale(dpr, dpr)
+      }
+    }
+
+    drawExploreCanvas(canvas, meshData, contourElevations, orbitTheta, orbitPhi, verticalExaggeration)
+  }, [orbitTheta, orbitPhi, meshData, contourElevations, verticalExaggeration])
 
   // ── Auto-rotate animation loop ────────────────────────────────────────────
 
@@ -73,10 +308,35 @@ const ExploreScreen: React.FC = () => {
     }
   }, [tickAutoRotate])
 
+  // ── Resize observer ───────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const container = containerRef.current
+    const canvas = canvasRef.current
+    if (!container || !canvas) return
+
+    const observer = new ResizeObserver(() => {
+      const rect = container.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0 && meshData && contourElevations.length > 0) {
+        const dpr = window.devicePixelRatio || 1
+        canvas.width = Math.round(rect.width * dpr)
+        canvas.height = Math.round(rect.height * dpr)
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          ctx.scale(dpr, dpr)
+          drawExploreCanvas(canvas, meshData, contourElevations, orbitTheta, orbitPhi, verticalExaggeration)
+        }
+      }
+    })
+
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [meshData, contourElevations, orbitTheta, orbitPhi, verticalExaggeration])
+
   // ── Drag handlers ─────────────────────────────────────────────────────────
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    canvasRef.current?.setPointerCapture(e.pointerId)
+    containerRef.current?.setPointerCapture(e.pointerId)
     dragState.current = { isDragging: true, lastX: e.clientX, lastY: e.clientY }
     recordOrbitInteraction()
     setShowHint(false)
@@ -93,24 +353,10 @@ const ExploreScreen: React.FC = () => {
   }, [applyOrbitDrag])
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
-    canvasRef.current?.releasePointerCapture(e.pointerId)
+    containerRef.current?.releasePointerCapture(e.pointerId)
     dragState.current.isDragging = false
     log.debug('Orbit drag end')
   }, [])
-
-  // ── Contour line rendering (MVP SVG simulation) ───────────────────────────
-
-  /**
-   * For the MVP, we draw contour lines as SVG ellipses that simulate the
-   * view of a 3D terrain from an orbiting camera.
-   *
-   * In Session 2: Three.js draws actual 3D contour lines on a WebGL canvas.
-   *
-   * The simulation uses the orbit angles to:
-   * - Tilt the ellipses (phi → vertical compression)
-   * - Rotate them (theta → horizontal rotation of the mountain shape)
-   * - Offset them (simulating the 3D position)
-   */
 
   if (!meshData) {
     return (
@@ -123,7 +369,6 @@ const ExploreScreen: React.FC = () => {
   }
 
   const { minElevation_m, maxElevation_m } = meshData
-  const elevRange = maxElevation_m - minElevation_m
 
   return (
     <div className={styles.screen}>
@@ -143,7 +388,7 @@ const ExploreScreen: React.FC = () => {
 
       {/* 3D Canvas area */}
       <div
-        ref={canvasRef}
+        ref={containerRef}
         className={styles.canvasArea}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -152,16 +397,13 @@ const ExploreScreen: React.FC = () => {
         role="application"
         aria-label="3D terrain view — drag to orbit"
       >
-        <ContourTerrain
-          theta={orbitTheta}
-          phi={orbitPhi}
-          contourElevations={contourElevations}
-          minElev={minElevation_m}
-          maxElev={maxElevation_m}
-          verticalExaggeration={verticalExaggeration}
+        <canvas
+          ref={canvasRef}
+          className={styles.terrainCanvas}
+          aria-hidden="true"
         />
 
-        {/* Peak labels */}
+        {/* Peak labels in 3D-projected space */}
         {showPeakLabels && (
           <div className={styles.peakLabelsLayer}>
             <PeakLabels3D
@@ -196,97 +438,6 @@ const ExploreScreen: React.FC = () => {
 
 // ─── Sub-Components ───────────────────────────────────────────────────────────
 
-interface ContourTerrainProps {
-  theta: number
-  phi: number
-  contourElevations: number[]
-  minElev: number
-  maxElev: number
-  verticalExaggeration: number
-}
-
-/**
- * SVG-based simulated contour terrain for MVP.
- * Renders ellipses representing each contour elevation level.
- * The ellipses are skewed by theta/phi to simulate 3D orbit viewing.
- *
- * In Session 2, this is replaced by a Three.js WebGL canvas.
- */
-const ContourTerrain: React.FC<ContourTerrainProps> = ({
-  theta, phi, contourElevations, minElev, maxElev, verticalExaggeration,
-}) => {
-  const elevRange = maxElev - minElev
-
-  // View projection parameters based on orbit angles
-  const cosTheta = Math.cos(theta)
-  const sinTheta = Math.sin(theta)
-  const cosPhi = Math.cos(phi)
-
-  // Vertical compression based on viewing angle (phi)
-  // phi near 0 = top-down (very compressed), phi near π/2 = side-on (full height)
-  const verticalCompress = Math.sin(phi) * 0.8 + 0.1
-
-  return (
-    <svg
-      viewBox="0 0 400 400"
-      style={{ width: '100%', height: '100%' }}
-      aria-hidden="true"
-    >
-      {/* Background */}
-      <rect width="400" height="400" fill="var(--ec-bg-primary)" />
-
-      {/* Draw contour lines from bottom (low) to top (high) */}
-      {contourElevations.map((elev, i) => {
-        const t = (elev - minElev) / elevRange  // 0=low, 1=high
-        const color = lerpColor(PALETTE.abyss, PALETTE.foam, t)
-
-        // Size of this contour's ellipse:
-        // Higher contours are smaller (mountain narrows toward peak)
-        // Apply vertical exaggeration to spread them out vertically
-        const baseRadius = 150 * (1 - t * 0.7 * (verticalExaggeration / 2))
-
-        // Horizontal radius varies with theta (rotation)
-        const rx = baseRadius * (0.6 + 0.4 * Math.abs(cosTheta))
-
-        // Vertical radius is compressed by viewing angle
-        const ry = baseRadius * verticalCompress
-
-        // Center point — higher contours shifted up on screen
-        const cx = 200 + baseRadius * 0.15 * sinTheta  // Slight rotation offset
-        const cy = 220 - t * 120 * verticalCompress * verticalExaggeration
-
-        // Opacity — higher contours slightly more visible
-        const opacity = 0.35 + t * 0.45
-
-        // Animation offset for contour pulse effect
-        const animationDelay = `${i * 0.1}s`
-
-        return (
-          <ellipse
-            key={elev}
-            cx={cx}
-            cy={cy}
-            rx={Math.max(rx, 2)}
-            ry={Math.max(ry * 0.35, 1)}
-            fill="none"
-            stroke={color}
-            strokeWidth={elev % 500 === 0 ? 2 : 1}  // Index contours thicker
-            opacity={opacity}
-            style={{
-              animation: `contour-pulse 3s ease-in-out ${animationDelay} infinite`,
-            }}
-          />
-        )
-      })}
-
-      {/* Peak indicator dots (rough positions) */}
-      <circle cx="200" cy={220 - 115 * verticalCompress} r="4" fill={PALETTE.foam} opacity="0.8" />
-      <circle cx="200" cy={220 - 115 * verticalCompress} r="8" fill="none" stroke={PALETTE.glow} strokeWidth="1" opacity="0.4" />
-    </svg>
-  )
-}
-
-/** Peak labels positioned in 3D-projected space */
 const PeakLabels3D: React.FC<{
   peaks: Peak[]
   theta: number
@@ -295,9 +446,8 @@ const PeakLabels3D: React.FC<{
   maxElev: number
   units: 'imperial' | 'metric'
 }> = ({ peaks, theta, phi, minElev, maxElev, units }) => {
-  const elevRange = maxElev - minElev
+  const elevRange = maxElev - minElev || 1
 
-  // Show only the top 5 peaks
   const topPeaks = [...peaks]
     .sort((a, b) => b.elevation_m - a.elevation_m)
     .slice(0, 5)
@@ -307,7 +457,6 @@ const PeakLabels3D: React.FC<{
       {topPeaks.map((peak, i) => {
         const t = (peak.elevation_m - minElev) / elevRange
 
-        // Position peaks in a rough arc
         const angle = (i / topPeaks.length) * Math.PI * 0.6 - 0.3 + theta * 0.1
         const leftPercent = 30 + Math.cos(angle) * 30
         const topPercent = 20 + (1 - t) * 35 + Math.sin(phi) * 10

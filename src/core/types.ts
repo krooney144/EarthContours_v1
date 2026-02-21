@@ -120,6 +120,18 @@ export interface TerrainMeshData {
   worldWidth_km: number
   /** Real-world depth in kilometers */
   worldDepth_km: number
+  /**
+   * Geographic bounds of this mesh — required for the ray-height-field
+   * renderer to convert lat/lng to grid coordinates.
+   * Added for real elevation support; simulated terrain fills this from
+   * the region definition.
+   */
+  bounds: {
+    north: number
+    south: number
+    east: number
+    west: number
+  }
 }
 
 /** Loading state for async data operations */
@@ -181,7 +193,7 @@ export interface AppSettings {
   verticalExaggeration: VerticalExaggeration
 
   // Appearance
-  appName: 'EarthContours' | 'Earthscape'
+  appName: 'Earth Contours' | 'EarthContours' | 'Earthscape'
   colorTheme: ColorTheme
   labelSize: LabelSize
   reduceMotion: boolean

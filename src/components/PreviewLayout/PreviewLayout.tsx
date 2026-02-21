@@ -79,7 +79,7 @@ const PreviewLayout: React.FC = () => {
       {/* Header */}
       <div className={styles.header}>
         <div className={styles.logo}>
-          <span className={styles.logoMark} aria-hidden="true">◈</span>
+          <img src="/Favicon3.svg" alt="" className={styles.logoMark} width="32" height="32" aria-hidden="true" />
           <span className={styles.appName}>{appName}</span>
         </div>
         <div className={styles.subtitle}>Choose your view</div>

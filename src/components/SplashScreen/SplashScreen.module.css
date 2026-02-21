@@ -26,17 +26,10 @@
   animation: fade-in 600ms ease-out forwards;
 }
 
-.logoPlaceholder {
-  width: 80px;
-  height: 80px;
-  border: 2px solid var(--ec-glow);
-  border-radius: var(--radius-lg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 40px;
-  color: var(--ec-glow);
-  box-shadow: var(--shadow-glow-strong);
+.logoImage {
+  width: 96px;
+  height: 96px;
+  filter: drop-shadow(0 0 12px rgba(132, 209, 219, 0.6));
   animation: pulse-glow 2s ease-in-out infinite;
 }
 
