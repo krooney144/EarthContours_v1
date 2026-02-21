@@ -197,15 +197,25 @@
   z-index: var(--z-overlay);
 }
 
-/* Individual peak label group: card → line → dot (top to bottom) */
+/*
+ * Individual peak label group.
+ * Default layout (top to bottom): card → line → dot
+ * The `top` CSS property is set inline so the DOT aligns with the peak position.
+ * For peaks near the top of the viewport, `.peakLabelFlipped` reverses the stack.
+ */
 .peakLabel {
   position: absolute;
-  /* transform applied inline via React to position by heading/pitch */
   display: flex;
-  flex-direction: column;  /* card first, then line, then dot — top to bottom */
+  flex-direction: column;  /* card → line → dot, top to bottom */
   align-items: center;
   pointer-events: none;
-  transform: translateX(-50%);  /* Center the label on the peak's X position */
+  transform: translateX(-50%);  /* Center on the peak's X coordinate */
+  transition: opacity 0.3s ease;
+}
+
+/* Flipped: dot at top, card below (used when peak is near viewport top) */
+.peakLabelFlipped {
+  /* Flex direction stays column; JSX order is reversed to dot → line → card */
 }
 
 .peakCard {
@@ -246,12 +256,18 @@
   letter-spacing: 0.1em;
 }
 
-/* Vertical line from card DOWN to dot */
+/* Vertical line connecting card to dot */
 .peakLine {
   width: 1px;
   height: 40px;
-  background: linear-gradient(to bottom, var(--ec-glow), rgba(132, 209, 219, 0.2));
+  /* Bright at top (card end), fades toward dot */
+  background: linear-gradient(to bottom, var(--ec-glow), rgba(132, 209, 219, 0.15));
   box-shadow: 0 0 4px var(--ec-glow);
+}
+
+/* Flipped gradient: bright at bottom (dot end), fades toward card */
+.peakLineDown {
+  background: linear-gradient(to top, var(--ec-glow), rgba(132, 209, 219, 0.15));
 }
 
 /* Glowing dot at the peak position */
