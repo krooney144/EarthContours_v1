@@ -17,7 +17,7 @@ EarthContours renders geographic elevation data across the United States in thre
 | **MAP** | Dark topographic map — Carto Dark Matter tiles on Canvas, with peak/river overlays |
 | **SETTINGS** | User preferences — units, labels, performance, data resolution |
 
-MVP uses procedural terrain (Gaussian + sine waves) and real Colorado/Alaska peak coordinates. Real Copernicus GLO-10 elevation tiles are scaffolded for Session 2.
+Elevation data comes from **AWS Terrarium RGB-encoded DEM tiles** (public dataset, no API key). Procedural terrain (Gaussian + sine waves) is kept as a Tier 4 offline fallback. Real Colorado/Alaska peak coordinates are used for POI overlays.
 
 ---
 
@@ -105,10 +105,13 @@ EarthContours_v1/
 **State-based routing** — Zustand `uiStore` manages active screen instead of URL paths. Enables custom zoom transition animations and native app feel (no URL changes).
 
 **Elevation data fallback chain** (4-tier):
-1. IndexedDB cache (instant if previously visited)
-2. Local `/tiles/elevation/` bundle (offline support)
-3. AWS Terrarium tiles (live network)
-4. Procedural terrain (always works)
+1. **Tier 1 — Memory cache** — in-process, instant, survives only the current page load
+2. **Tier 2 — IndexedDB** — persisted browser cache; tiles from Tier 4 are stored here after first fetch
+3. **Tier 3 — Local `/tiles/elevation/` bundle** — pre-downloaded PNG tiles for true offline use; empty by default
+4. **Tier 4 — AWS Terrarium** (live) — `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png` — public dataset, no API key required; Terrarium RGB encoding: `elevation_m = R×256 + G + B/256 − 32768`
+5. **Tier 5 — Procedural fallback** — Gaussian peaks + sine waves; always works, used only if all network tiers fail
+
+**Active data source (as of Session 2):** AWS Terrarium tiles (Tier 4). Mount Elbert test region (39.1°N, 106.4°W) should show max elevation ~4400m (14,440 ft). Open the browser console and filter for `ELEVATION LOAD` or `TERRAIN SOURCE` to see which tier is active at runtime.
 
 **Rendering approaches per screen:**
 - SCAN: Ray-height-field (casts rays per screen column, colors by elevation)
@@ -125,9 +128,9 @@ EarthContours_v1/
 
 | Session | Focus |
 |---------|-------|
-| **1 (current)** | MVP — procedural terrain, Canvas/SVG rendering, mock data |
-| **2** | Real elevation tiles (Copernicus GLO-10), Three.js WebGL renderer, audio |
-| **3** | Real GPS, DeviceOrientation/magnetometer for true AR |
+| **1 (done)** | MVP — procedural terrain, Canvas/SVG rendering, mock data |
+| **2 (current)** | Real AWS Terrarium DEM tiles, fixed elevation loader, real Colorado terrain |
+| **3** | Real GPS, DeviceOrientation/magnetometer for true AR, Three.js WebGL renderer |
 | **Future** | Museum exhibit mode (7680×1080 triple ultra-wide), multi-touch |
 
 ---

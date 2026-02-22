@@ -204,44 +204,44 @@ export async function loadElevationTile(
   const key = `${z}/${x}/${y}`
   const endTiming = log.time(`loadElevationTile(${key})`)
 
-  // ── Level 1: Memory cache ──────────────────────────────────────────────────
+  // ── Tier 1: In-memory cache (fastest — survives only for this page load) ──
   const memHit = memoryCache.get(key)
   if (memHit) {
-    log.debug('Tile served from memory cache', { key })
+    log.debug('[TIER 1 — MEMORY] Tile served from in-process cache', { key })
     endTiming()
     return memHit
   }
 
-  // ── Level 2: IndexedDB (persistent browser cache) ─────────────────────────
+  // ── Tier 2: IndexedDB (persistent browser cache) ──────────────────────────
   const idbHit = await getFromIDB(key)
   if (idbHit) {
-    log.debug('Tile served from IndexedDB cache', { key })
+    log.info('[TIER 2 — IndexedDB] Tile served from browser cache', { key })
     memoryCache.set(key, idbHit)  // Promote to memory cache
     endTiming()
     return idbHit
   }
 
-  // ── Level 3: Local file (offline bundle) ──────────────────────────────────
+  // ── Tier 3: Local file (offline bundle) ───────────────────────────────────
   const localUrl = `${LOCAL_TILE_BASE}/${key}.png`
   try {
     const tile = await loadImageToPixels(localUrl)
-    log.info('Tile loaded from local offline bundle', { key, localUrl })
+    log.info('[TIER 3 — LOCAL FILE] Tile loaded from offline bundle', { key, localUrl })
     memoryCache.set(key, tile)
     await saveToIDB(key, tile)  // Cache it for next time
     endTiming()
     return tile
   } catch {
-    log.debug('Local tile not found (expected for non-offline regions)', { key })
+    log.debug('Tier 3 miss — no local file (expected for live regions)', { key })
   }
 
-  // ── Level 4: AWS Terrarium (live network) ─────────────────────────────────
+  // ── Tier 4: AWS Terrarium (live network) ──────────────────────────────────
   const awsUrl = `${AWS_TERRARIUM_BASE}/${key}.png`
   try {
-    log.info('Fetching elevation tile from AWS', { key, awsUrl })
+    log.info('[TIER 4 — AWS TERRARIUM] Fetching live elevation tile', { key, awsUrl })
     const tile = await loadImageToPixels(awsUrl)
     memoryCache.set(key, tile)
-    await saveToIDB(key, tile)  // Cache locally for offline fallback next time
-    log.info('Tile cached from AWS to IndexedDB', { key })
+    await saveToIDB(key, tile)  // Cache locally so next load uses Tier 2
+    log.info('[TIER 4 — AWS TERRARIUM] Tile fetched and cached to IndexedDB', { key })
     endTiming()
     return tile
   } catch (err) {
@@ -274,6 +274,13 @@ export async function loadRegionElevation(
 ): Promise<Float32Array> {
   const endTiming = log.time(`loadRegionElevation(${region.id})`)
   const z = TERRAIN_ZOOM
+
+  log.info('━━━ ELEVATION LOAD START ━━━', {
+    region: region.id,
+    zoom: z,
+    gridSize: `${gridSize}×${gridSize}`,
+    source: 'attempting Tier 1→2→3→4 (memory → IDB → local → AWS Terrarium)',
+  })
 
   // ── Calculate tile range ──────────────────────────────────────────────────
   const margin = 0.5  // degrees of margin around bounds to avoid edge artifacts
@@ -335,7 +342,32 @@ export async function loadRegionElevation(
   }
 
   await Promise.all(tilePromises)
-  log.info('All tiles loaded', { loaded: loadedCount, total: totalTiles })
+
+  // Count how many tiles actually loaded vs failed
+  let successfulTiles = 0
+  for (let ty = 0; ty < tilesTall; ty++) {
+    for (let tx = 0; tx < tilesWide; tx++) {
+      if (tileGrid[ty][tx] !== null) successfulTiles++
+    }
+  }
+  const failedTiles = totalTiles - successfulTiles
+
+  log.info('Tile batch complete', {
+    total: totalTiles,
+    successful: successfulTiles,
+    failed: failedTiles,
+    successRate: `${((successfulTiles / totalTiles) * 100).toFixed(0)}%`,
+  })
+
+  // If every tile failed (e.g. CORS blocked, network down), throw so the caller
+  // can fall back to simulated terrain — don't silently return garbage −32768m data.
+  if (successfulTiles === 0) {
+    throw new TileLoadError(
+      `region/${region.id}`,
+      new Error(`All ${totalTiles} elevation tiles failed to load — AWS unreachable or CORS blocked`),
+    )
+  }
+
   onProgress(0.78)
 
   // ── Stitch tiles into one large pixel grid ────────────────────────────────
@@ -379,10 +411,17 @@ export async function loadRegionElevation(
   }
   const stitchedElevations = decodeTerrarium(stitchedTile)
 
+  // Use a loop instead of spread to avoid stack overflow on multi-million-sample arrays.
+  // Math.min(...Float32Array_of_31M) throws RangeError in every browser.
+  let stitchedMin = Infinity, stitchedMax = -Infinity
+  for (let i = 0; i < stitchedElevations.length; i++) {
+    if (stitchedElevations[i] < stitchedMin) stitchedMin = stitchedElevations[i]
+    if (stitchedElevations[i] > stitchedMax) stitchedMax = stitchedElevations[i]
+  }
   log.debug('Terrarium decoded', {
     samples: stitchedElevations.length,
-    min: Math.min(...stitchedElevations).toFixed(0),
-    max: Math.max(...stitchedElevations).toFixed(0),
+    min: stitchedMin.toFixed(0),
+    max: stitchedMax.toFixed(0),
   })
 
   onProgress(0.92)
@@ -399,11 +438,14 @@ export async function loadRegionElevation(
     if (output[i] < minE) minE = output[i]
     if (output[i] > maxE) maxE = output[i]
   }
-  log.info('Elevation grid ready', {
+  log.info('━━━ ELEVATION LOAD COMPLETE ━━━', {
+    region: region.id,
+    source: 'AWS Terrarium RGB tiles (real DEM data)',
     gridSize: `${gridSize}×${gridSize}`,
     minElev: `${minE.toFixed(0)}m`,
     maxElev: `${maxE.toFixed(0)}m`,
     range: `${(maxE - minE).toFixed(0)}m`,
+    note: minE > 1000 ? 'Plausible Colorado elevations ✓' : 'WARNING: elevations look suspect — check CORS',
   })
 
   return output

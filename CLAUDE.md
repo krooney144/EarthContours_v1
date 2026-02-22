@@ -7,7 +7,7 @@ Quick reference for any Claude Code session in this repo.
 ## What This Project Is
 
 A **terrain visualization web app** (React + TypeScript + Vite) for exploring US elevation data.
-- **MVP v1.0.0** — uses procedural/simulated terrain; real tiles scaffolded for Session 2.
+- **Session 2** — real AWS Terrarium DEM tiles active; procedural terrain kept as Tier 5 fallback.
 - Mobile-first, state-based routing (no URL changes), native app feel.
 - 4 screens: SCAN (AR first-person), EXPLORE (3D orbit), MAP (topo tiles), SETTINGS.
 
@@ -15,7 +15,7 @@ A **terrain visualization web app** (React + TypeScript + Vite) for exploring US
 
 ## Branch
 
-Active development branch: `claude/earthcontours-terrain-app-Duu9o`
+Active development branch: `claude/real-elevation-data-colorado-QVXoW`
 
 ---
 
@@ -89,12 +89,23 @@ Transitions use zoom animation stored in `uiStore`.
 
 ---
 
-## Elevation Data (4-Tier Fallback)
+## Elevation Data — Fallback Chain
 
-1. IndexedDB cache
-2. Local `/tiles/elevation/` bundle (offline)
-3. AWS Terrarium tiles (live)
-4. Procedural (always available)
+**Active source:** AWS Terrarium tiles (Tier 4 below). After first fetch, tiles are cached to IndexedDB (Tier 2).
+
+| Tier | Source | Notes |
+|------|--------|-------|
+| 1 | In-memory cache | Fastest; current page load only |
+| 2 | IndexedDB | Persistent browser cache; auto-populated from Tier 4 |
+| 3 | `/tiles/elevation/{z}/{x}/{y}.png` | Pre-bundled offline tiles; empty by default |
+| 4 | AWS Terrarium (live) | `s3.amazonaws.com/elevation-tiles-prod/terrarium/` — no API key |
+| 5 | Procedural fallback | Gaussian peaks + sine waves; only when all network tiers fail |
+
+**Tile format:** Terrarium RGB-encoded PNG — `elevation_m = R×256 + G + B/256 − 32768`
+
+**Colorado test point:** Mount Elbert at ~39.1°N, 106.4°W → expected ~4400m (14,440ft).
+
+**Console debugging:** filter for `ELEVATION LOAD` or `TERRAIN SOURCE` to see the active tier.
 
 ---
 
@@ -130,8 +141,8 @@ Transitions use zoom animation stored in `uiStore`.
 | Session | Goal |
 |---------|------|
 | 1 (done) | MVP — procedural terrain, Canvas/SVG rendering |
-| 2 (next) | Real Copernicus GLO-10 tiles, Three.js WebGL renderer, audio |
-| 3 | GPS + DeviceOrientation for true AR |
+| 2 (current) | Real AWS Terrarium DEM tiles; fixed elevation loader stack-overflow bug |
+| 3 | GPS + DeviceOrientation for true AR, Three.js WebGL renderer |
 | Future | Museum exhibit mode (7680×1080 triple ultra-wide) |
 
 ---
