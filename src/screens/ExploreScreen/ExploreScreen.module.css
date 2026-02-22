@@ -219,22 +219,107 @@
   box-shadow: var(--shadow-glow);
 }
 
-/* ── Drag hint ───────────────────────────────────────────────────────────── */
+/* ── Location pin — "you are here" marker from MAP screen selection ──────── */
 
-.hint {
+.locationPin {
   position: absolute;
-  bottom: calc(var(--ec-nav-height) + var(--space-4));
-  left: 50%;
-  transform: translateX(-50%);
-  font-family: var(--font-body);
-  font-size: var(--text-xs);
-  color: var(--ec-text-muted);
-  letter-spacing: 0.08em;
+  width: 0;
+  height: 0;
   pointer-events: none;
   z-index: var(--z-overlay);
-  transition: opacity 1s;
+  /* transform applied so the pin center is at the projected terrain point */
 }
 
-.hint.hidden {
-  opacity: 0;
+.locationPinRing {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid rgba(230, 168, 23, 0.6);
+  transform: translate(-50%, -50%);
+  animation: location-ring-pulse 2s ease-in-out infinite;
+}
+
+.locationPinDot {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #E6A817;
+  box-shadow: 0 0 10px rgba(230, 168, 23, 0.8), 0 0 20px rgba(230, 168, 23, 0.4);
+  transform: translate(-50%, -50%);
+  animation: location-dot-pulse 2s ease-in-out infinite;
+}
+
+@keyframes location-ring-pulse {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
+  50%       { transform: translate(-50%, -50%) scale(1.6); opacity: 0.1; }
+}
+
+@keyframes location-dot-pulse {
+  0%, 100% { transform: translate(-50%, -50%) scale(1);   box-shadow: 0 0 10px rgba(230, 168, 23, 0.8), 0 0 20px rgba(230, 168, 23, 0.4); }
+  50%       { transform: translate(-50%, -50%) scale(1.2); box-shadow: 0 0 16px rgba(230, 168, 23, 1),   0 0 32px rgba(230, 168, 23, 0.6); }
+}
+
+/* ── Controls hint overlay — shown only on first visit ───────────────────── */
+
+.controlsHint {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height, 64px) + var(--space-4, 16px));
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(8, 20, 35, 0.88);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(132, 209, 219, 0.2);
+  border-radius: var(--radius-sm, 6px);
+  padding: 10px 14px;
+  z-index: var(--z-overlay);
+  cursor: pointer;
+  user-select: none;
+  min-width: 180px;
+}
+
+.controlsHintTitle {
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--ec-glow);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.controlsHintRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.controlsHintKey {
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ec-foam);
+  white-space: nowrap;
+  min-width: 72px;
+}
+
+.controlsHintDesc {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.04em;
+}
+
+.controlsHintDismiss {
+  font-family: var(--font-body);
+  font-size: 8px;
+  color: rgba(132, 209, 219, 0.35);
+  letter-spacing: 0.08em;
+  text-align: center;
+  margin-top: 8px;
 }
