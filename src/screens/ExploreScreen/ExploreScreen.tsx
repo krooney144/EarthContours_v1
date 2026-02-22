@@ -14,20 +14,19 @@
  * Navigation (mobile / touch):
  *   1 finger drag    → pan across terrain
  *   2 finger pinch   → zoom in / out
- *   2 finger rotate  → rotate view (theta)
- *   2 finger swipe   → tilt camera (phi via vertical movement)
+ *   2 finger twist   → rotate view (theta)
  *
  * Rendering pipeline:
  * 1. Marching squares extracts contour line segments from the elevation grid
  * 2. Segments offset by pan, projected with orbit camera angles (theta, phi)
  * 3. Scale responds to orbitRadius so scroll-zoom works
- * 4. Peak labels projected using the same math as contour lines
+ * 4. Peak labels projected using actual terrain maxima found by grid search
  * 5. Location pin (MAP screen selection) rendered as a pulsing HTML dot
  *
- * FIX 1 — elevScale = verticalExaggeration (no hidden 0.25x compression)
- * FIX 2 — PeakLabels3D uses real lat/lng -> project3D() (no fake trig)
- * FIX 3 — Free-roam pan + zoom + separate rotate gesture
- * FIX 4 — Subscribes to locationStore; renders pulsing "you are here" pin
+ * elevScale = ELEV_BASE_SCALE × verticalExaggeration
+ *   ELEV_BASE_SCALE = 0.25 — viewport scale factor (makes terrain height
+ *   proportional to the grid width at 1× exaggeration)
+ *   verticalExaggeration from settings multiplies on top of this baseline
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -43,6 +42,10 @@ import styles from './ExploreScreen.module.css'
 
 const log = createLogger('SCREEN:EXPLORE')
 
+// Viewport scale factor: keeps terrain height proportional to the grid width
+// at 1× vertical exaggeration. verticalExaggeration multiplies on top.
+const ELEV_BASE_SCALE = 0.25
+
 // --- 3D Projection ------------------------------------------------------------
 
 /**
@@ -50,7 +53,7 @@ const log = createLogger('SCREEN:EXPLORE')
  *
  * Coordinate system:
  *   gx: grid X, centered at 0 (east/west). Range after pan: roughly [-0.5, 0.5]
- *   gy: elevation. Range [0, elevScale]
+ *   gy: elevation. Range [0, ELEV_BASE_SCALE × verticalExaggeration]
  *   gz: grid Z, centered at 0 (south = positive z)
  *
  * Camera orbit:
@@ -82,9 +85,9 @@ function project3D(
 /**
  * Render the EXPLORE 3D terrain onto the canvas.
  *
- * @param panX       World-space X pan offset (moves terrain left/right)
- * @param panZ       World-space Z pan offset (moves terrain toward/away)
- * @param orbitRadius Controls zoom: lower = more zoomed in
+ * elevScale = ELEV_BASE_SCALE * verticalExaggeration
+ * panX / panZ shift the terrain in world space (left-drag pan)
+ * orbitRadius controls zoom: lower = more zoomed in
  */
 function drawExploreCanvas(
   canvas: HTMLCanvasElement,
@@ -111,12 +114,11 @@ function drawExploreCanvas(
   const cx = W / 2
   const cy = H / 2 + H * 0.05  // slightly below center for better framing
 
-  // FIX 3: Scale responds to orbitRadius — zoom in/out moves terrain closer/further
+  // Scale responds to orbitRadius — scroll-zoom moves terrain closer/further
   const scale = (Math.min(W, H) * 0.62) * (DEFAULT_ORBIT_RADIUS / orbitRadius)
 
-  // FIX 1: Remove the hidden 0.25x compression.
-  // 1x vertical exaggeration now means "use elevation data as-is" with no extra compression.
-  const elevScale = verticalExaggeration
+  // Vertical scale: named constant × user setting (no hidden compression)
+  const elevScale = ELEV_BASE_SCALE * verticalExaggeration
 
   // Subtle ground plane ellipse at the terrain base
   const groundY  = cy + (Math.sin(phi) * scale * 0.05)
@@ -148,7 +150,7 @@ function drawExploreCanvas(
 
     ctx.beginPath()
     for (const seg of segments) {
-      // FIX 3: Apply pan offset so terrain moves when the user pans
+      // Apply pan offset so terrain moves when the user pans
       const gx1 = seg.x1 - 0.5 - panX
       const gz1 = seg.y1 - 0.5 - panZ
       const gx2 = seg.x2 - 0.5 - panX
@@ -179,22 +181,18 @@ const ExploreScreen: React.FC = () => {
   const {
     orbitTheta, orbitPhi, orbitRadius,
     orbitPanX, orbitPanZ,
-    autoRotating,
     applyOrbitDrag, applyOrbitPan, applyOrbitZoom, setOrbitPan,
-    recordOrbitInteraction, tickAutoRotate,
   } = useCameraStore()
 
   const { peaks, meshData, contourElevations, activeRegion, isRealElevation } = useTerrainStore()
   const { units, showPeakLabels, verticalExaggeration } = useSettingsStore()
-  // FIX 4: Subscribe to location store to show the MAP-selected pin
+  // Subscribe to location store to show the MAP-selected pin
   const { activeLat, activeLng, mode } = useLocationStore()
 
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef    = useRef<HTMLCanvasElement>(null)
-  const animFrameRef = useRef<number | null>(null)
-  const lastTimeRef  = useRef<number>(performance.now())
 
-  // FIX 3: Track all active pointer positions for multi-touch
+  // Track all active pointer positions for multi-touch
   const pointerMapRef     = useRef<Map<number, { x: number; y: number }>>(new Map())
   const lastPinchDistRef  = useRef(0)
   const lastPinchAngleRef = useRef(0)
@@ -203,7 +201,7 @@ const ExploreScreen: React.FC = () => {
   // Container CSS size kept in state so peak label positions update on resize
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
 
-  // FIX 3: Controls hint shown only on first visit, persisted in localStorage
+  // Controls hint shown only on first visit, persisted in localStorage
   const [showHint, setShowHint] = useState<boolean>(() => {
     try { return !localStorage.getItem('ec_explore_hint_seen') } catch { return true }
   })
@@ -217,7 +215,6 @@ const ExploreScreen: React.FC = () => {
     theta: orbitTheta.toFixed(3),
     phi: orbitPhi.toFixed(3),
     radius: orbitRadius.toFixed(2),
-    autoRotating,
     contourCount: contourElevations.length,
     hasMesh: !!meshData,
   })
@@ -247,27 +244,6 @@ const ExploreScreen: React.FC = () => {
       orbitPanX, orbitPanZ, orbitRadius,
     )
   }, [orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ, meshData, contourElevations, verticalExaggeration])
-
-  // -- Auto-rotate animation loop ----------------------------------------------
-
-  useEffect(() => {
-    log.info('ExploreScreen mounted — starting animation loop')
-
-    function animate(timestamp: number) {
-      const deltaTime_s = (timestamp - lastTimeRef.current) / 1000
-      lastTimeRef.current = timestamp
-      tickAutoRotate(deltaTime_s)
-      animFrameRef.current = requestAnimationFrame(animate)
-    }
-
-    animFrameRef.current = requestAnimationFrame(animate)
-    return () => {
-      if (animFrameRef.current !== null) {
-        cancelAnimationFrame(animFrameRef.current)
-        log.debug('ExploreScreen animation loop stopped')
-      }
-    }
-  }, [tickAutoRotate])
 
   // -- Resize observer ---------------------------------------------------------
 
@@ -307,7 +283,6 @@ const ExploreScreen: React.FC = () => {
 
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault()
-      // Scroll down (deltaY > 0) = zoom out; scroll up (deltaY < 0) = zoom in
       applyOrbitZoom(e.deltaY > 0 ? 1 : -1)
     }
 
@@ -332,9 +307,8 @@ const ExploreScreen: React.FC = () => {
       lastPinchAngleRef.current = Math.atan2(dy, dx)
     }
 
-    recordOrbitInteraction()
     dismissHint()
-  }, [recordOrbitInteraction, dismissHint])
+  }, [dismissHint])
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     const prev = pointerMapRef.current.get(e.pointerId)
@@ -413,9 +387,6 @@ const ExploreScreen: React.FC = () => {
     const gx_camera = rx2 * Math.cos(orbitTheta) - rz * Math.sin(orbitTheta)
     const gz_camera = rx2 * Math.sin(orbitTheta) + rz * Math.cos(orbitTheta)
 
-    // Center the view on this terrain point
-    // gx_camera = worldGx - panX, so worldGx = gx_camera + panX
-    // To center on worldGx: set panX_new = worldGx
     setOrbitPan(gx_camera + orbitPanX, gz_camera + orbitPanZ)
 
     log.debug('Fly-to double-click', {
@@ -428,20 +399,21 @@ const ExploreScreen: React.FC = () => {
     e.preventDefault()
   }, [])
 
-  // -- FIX 4: Compute location pin screen position ----------------------------
+  // -- Compute location pin screen position -----------------------------------
 
   const locationPinScreen = useMemo((): { sx: number; sy: number } | null => {
     if (!meshData || !containerSize.w || mode !== 'exploring') return null
 
     const { bounds, minElevation_m, maxElevation_m, elevations, width, height } = meshData
-
-    // Only show pin if the selected location is inside the loaded terrain region
-    if (
-      activeLat < bounds.south || activeLat > bounds.north ||
-      activeLng < bounds.west  || activeLng > bounds.east
-    ) return null
-
     const elevRange = maxElevation_m - minElevation_m || 1
+
+    // Small tolerance so the bounds check doesn't reject locations right on the edge
+    const LAT_TOL = (bounds.north - bounds.south) * 0.02
+    const LNG_TOL = (bounds.east  - bounds.west)  * 0.02
+    if (
+      activeLat < bounds.south - LAT_TOL || activeLat > bounds.north + LAT_TOL ||
+      activeLng < bounds.west  - LNG_TOL || activeLng > bounds.east  + LNG_TOL
+    ) return null
 
     // Sample terrain elevation at the selected location (nearest-neighbor)
     const col  = Math.round((activeLng - bounds.west)  / (bounds.east  - bounds.west)  * (width  - 1))
@@ -451,9 +423,9 @@ const ExploreScreen: React.FC = () => {
     const elev = elevations[r * width + c] ?? minElevation_m
 
     // World coordinates in grid space, with pan applied (must match drawExploreCanvas)
-    const gx = (activeLng - bounds.west)  / (bounds.east  - bounds.west)  - 0.5 - orbitPanX
-    const gz = (bounds.north - activeLat) / (bounds.north - bounds.south) - 0.5 - orbitPanZ
-    const gy = ((elev - minElevation_m) / elevRange) * verticalExaggeration
+    const gx = c / (width  - 1) - 0.5 - orbitPanX
+    const gz = r / (height - 1) - 0.5 - orbitPanZ
+    const gy = ((elev - minElevation_m) / elevRange) * (ELEV_BASE_SCALE * verticalExaggeration)
 
     // Project to CSS screen space
     const W     = containerSize.w
@@ -498,17 +470,11 @@ const ExploreScreen: React.FC = () => {
             <div className={styles.regionName}>{activeRegion.name}</div>
           )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <div
-            className={`${styles.dataSourceBadge} ${isRealElevation ? styles.dataSourceReal : styles.dataSourceSim}`}
-            aria-label={isRealElevation ? 'Real elevation data from AWS Terrain Tiles' : 'Simulated procedural terrain'}
-          >
-            {isRealElevation ? '● REAL DATA' : '◌ SIMULATED'}
-          </div>
-          <div className={`${styles.autoRotateBadge} ${autoRotating ? styles.visible : ''}`} aria-live="polite">
-            <div className={styles.autoRotateDot} aria-hidden="true" />
-            AUTO-ROTATING
-          </div>
+        <div
+          className={`${styles.dataSourceBadge} ${isRealElevation ? styles.dataSourceReal : styles.dataSourceSim}`}
+          aria-label={isRealElevation ? 'Real elevation data from AWS Terrain Tiles' : 'Simulated procedural terrain'}
+        >
+          {isRealElevation ? '● REAL DATA' : '◌ SIMULATED'}
         </div>
       </div>
 
@@ -531,7 +497,7 @@ const ExploreScreen: React.FC = () => {
           aria-hidden="true"
         />
 
-        {/* FIX 2: Peak labels projected using real lat/lng via project3D() */}
+        {/* Peak labels projected using real lat/lng snapped to terrain maxima */}
         {showPeakLabels && containerSize.w > 0 && (
           <div className={styles.peakLabelsLayer}>
             <PeakLabels3D
@@ -550,7 +516,7 @@ const ExploreScreen: React.FC = () => {
           </div>
         )}
 
-        {/* FIX 4: Pulsing "you are here" pin at MAP-selected location */}
+        {/* Pulsing "you are here" pin at MAP-selected location */}
         {locationPinScreen && (
           <div
             className={styles.locationPin}
@@ -562,7 +528,7 @@ const ExploreScreen: React.FC = () => {
           </div>
         )}
 
-        {/* FIX 3: Controls hint — shown only on first visit */}
+        {/* Controls hint — shown only on first visit */}
         {showHint && (
           <div
             className={styles.controlsHint}
@@ -609,11 +575,16 @@ const ExploreScreen: React.FC = () => {
 // --- Sub-Components -----------------------------------------------------------
 
 /**
- * FIX 2: Peak labels projected using the same project3D() math as the terrain mesh.
+ * Peak labels projected to 3D screen space.
  *
- * Each peak's lat/lng is converted to world-space grid coordinates using the
- * terrain bounds, then projected to CSS screen space — no fake trig positioning.
- * Labels that fall outside the current view are culled.
+ * Instead of using the stored lat/lng directly, each peak is snapped to the
+ * actual local maximum in the elevation grid within a search radius. This
+ * ensures labels sit on visible terrain peaks regardless of any small
+ * coordinate discrepancies between the named list and the elevation tiles.
+ *
+ * Coordinate pipeline:
+ *   peak lat/lng → nominal grid cell → search radius for local max →
+ *   grid cell → world space (with pan) → project3D() → CSS px
  */
 const PeakLabels3D: React.FC<{
   peaks: Peak[]
@@ -628,15 +599,16 @@ const PeakLabels3D: React.FC<{
   containerH: number
   units: 'imperial' | 'metric'
 }> = ({ peaks, theta, phi, panX, panZ, orbitRadius, meshData, verticalExaggeration, containerW, containerH, units }) => {
-  const { minElevation_m, maxElevation_m, bounds } = meshData
+  const { minElevation_m, maxElevation_m, bounds, elevations, width, height } = meshData
   const elevRange = maxElevation_m - minElevation_m || 1
-
-  // FIX 1 applied here too — same elevScale formula as drawExploreCanvas
-  const elevScale = verticalExaggeration
+  const elevScale = ELEV_BASE_SCALE * verticalExaggeration
 
   const cx    = containerW / 2
   const cy    = containerH / 2 + containerH * 0.05  // must match drawExploreCanvas
   const scale = (Math.min(containerW, containerH) * 0.62) * (DEFAULT_ORBIT_RADIUS / orbitRadius)
+
+  // Search radius: ~5 cells in each direction to find actual terrain peak
+  const SEARCH_RADIUS = 6
 
   const topPeaks = [...peaks]
     .sort((a, b) => b.elevation_m - a.elevation_m)
@@ -645,16 +617,39 @@ const PeakLabels3D: React.FC<{
   return (
     <>
       {topPeaks.map((peak) => {
-        // Skip peaks outside the loaded terrain bounds
+        // Skip peaks outside the loaded terrain bounds (with small tolerance)
+        const LAT_TOL = (bounds.north - bounds.south) * 0.02
+        const LNG_TOL = (bounds.east  - bounds.west)  * 0.02
         if (
-          peak.lat < bounds.south || peak.lat > bounds.north ||
-          peak.lng < bounds.west  || peak.lng > bounds.east
+          peak.lat < bounds.south - LAT_TOL || peak.lat > bounds.north + LAT_TOL ||
+          peak.lng < bounds.west  - LNG_TOL || peak.lng > bounds.east  + LNG_TOL
         ) return null
 
-        // Convert real lat/lng to world-space grid coords (with pan applied)
-        const gx = (peak.lng - bounds.west)  / (bounds.east  - bounds.west)  - 0.5 - panX
-        const gz = (bounds.north - peak.lat) / (bounds.north - bounds.south) - 0.5 - panZ
-        const t  = (peak.elevation_m - minElevation_m) / elevRange
+        // Nominal grid cell from stored lat/lng
+        const nomCol = Math.round(
+          (peak.lng - bounds.west) / (bounds.east - bounds.west) * (width - 1)
+        )
+        const nomRow = Math.round(
+          (bounds.north - peak.lat) / (bounds.north - bounds.south) * (height - 1)
+        )
+
+        // Snap to actual local maximum within search radius
+        // This makes the label sit on the visible terrain peak, not just the
+        // stored GPS coordinate (which may be slightly off from the tile data)
+        let bestElev = -Infinity, bestCol = nomCol, bestRow = nomRow
+        for (let dr = -SEARCH_RADIUS; dr <= SEARCH_RADIUS; dr++) {
+          for (let dc = -SEARCH_RADIUS; dc <= SEARCH_RADIUS; dc++) {
+            const c = Math.max(0, Math.min(width  - 1, nomCol + dc))
+            const r = Math.max(0, Math.min(height - 1, nomRow + dr))
+            const e = elevations[r * width + c]
+            if (e > bestElev) { bestElev = e; bestCol = c; bestRow = r }
+          }
+        }
+
+        // World coordinates from the actual terrain-maximum cell (with pan)
+        const gx = bestCol / (width  - 1) - 0.5 - panX
+        const gz = bestRow / (height - 1) - 0.5 - panZ
+        const t  = (bestElev - minElevation_m) / elevRange
         const gy = t * elevScale
 
         // Project to CSS screen space
@@ -671,7 +666,7 @@ const PeakLabels3D: React.FC<{
           >
             <div className={styles.peakLabelCard}>
               <span className={styles.peakLabelName}>{peak.name}</span>
-              <span className={styles.peakLabelElev}>{formatElevation(peak.elevation_m, units)}</span>
+              <span className={styles.peakLabelElev}>{formatElevation(bestElev, units)}</span>
             </div>
             <div className={styles.peakLine3D} />
             <div className={styles.peakDot3D} />

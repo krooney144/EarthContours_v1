@@ -405,15 +405,19 @@ const MapScreen: React.FC = () => {
     if (mode === 'exploring') {
       const explorePx = latLngToPixel(activeLat, activeLng, centerLat, centerLng, zoom, W, H)
       if (explorePx.x >= 0 && explorePx.x <= W && explorePx.y >= 0 && explorePx.y <= H) {
+        // Outer halo
         ctx.beginPath()
-        ctx.arc(explorePx.x, explorePx.y, 8, 0, Math.PI * 2)
-        ctx.strokeStyle = '#E6A817'
-        ctx.lineWidth   = 2
-        ctx.stroke()
-        ctx.beginPath()
-        ctx.arc(explorePx.x, explorePx.y, 3, 0, Math.PI * 2)
-        ctx.fillStyle = '#E6A817'
+        ctx.arc(explorePx.x, explorePx.y, 12, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(132, 209, 219, 0.2)'
         ctx.fill()
+        // Inner dot — matches EXPLORE screen pin color
+        ctx.beginPath()
+        ctx.arc(explorePx.x, explorePx.y, 6, 0, Math.PI * 2)
+        ctx.fillStyle   = '#84D1DB'
+        ctx.shadowColor = '#84D1DB'
+        ctx.shadowBlur  = 8
+        ctx.fill()
+        ctx.shadowBlur  = 0
       }
     }
 

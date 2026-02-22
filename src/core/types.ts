@@ -158,8 +158,6 @@ export interface OrbitCameraState {
   theta: number         // Horizontal rotation angle in radians (0 to 2π)
   phi: number           // Vertical angle in radians (0=top, π/2=side)
   radius: number        // Distance from the center of the terrain
-  autoRotating: boolean // Whether the scene is auto-rotating (idle)
-  lastInteraction: number // Timestamp of last user interaction (ms)
 }
 
 // ─── Sensor Data ──────────────────────────────────────────────────────────────
