@@ -26,7 +26,6 @@ import {
   DEFAULT_FOV,
   MIN_HEIGHT_M,
   MAX_HEIGHT_M,
-  AUTO_ROTATE_DELAY_MS,
 } from '../core/constants'
 import { clamp, feetToMeters, metersToFeet, degToRad, normalizeAngle } from '../core/utils'
 
@@ -47,8 +46,6 @@ interface CameraStore {
   orbitRadius: number    // Distance from center (controls zoom — lower = closer)
   orbitPanX: number      // Horizontal pan offset in world units [-0.5, 0.5] space
   orbitPanZ: number      // Depth pan offset in world units [-0.5, 0.5] space
-  autoRotating: boolean  // Whether idle auto-rotation is active
-  lastInteractionTime: number // Timestamp of last user touch/click
 
   // Actions
   /** Apply drag input to the SCAN camera — changes heading and pitch */
@@ -65,10 +62,6 @@ interface CameraStore {
   applyOrbitZoom: (delta: number) => void
   /** Directly set the pan offset (used for fly-to double-click) */
   setOrbitPan: (panX: number, panZ: number) => void
-  /** Record that the user interacted with EXPLORE — stops auto-rotate */
-  recordOrbitInteraction: () => void
-  /** Check if auto-rotate should start and update state */
-  tickAutoRotate: (deltaTime_s: number) => void
   /** Reset SCAN camera to defaults */
   resetARCamera: () => void
   /** Reset EXPLORE camera to defaults */
@@ -92,8 +85,6 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
   orbitRadius: DEFAULT_ORBIT_RADIUS,
   orbitPanX: 0,                // Start centered on the terrain
   orbitPanZ: 0,
-  autoRotating: false,
-  lastInteractionTime: Date.now(),
 
   /**
    * Handle drag input on the SCAN screen.
@@ -162,12 +153,7 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
       newPhi: newPhi.toFixed(3),
     })
 
-    set({
-      orbitTheta: newTheta,
-      orbitPhi: newPhi,
-      autoRotating: false,
-      lastInteractionTime: Date.now(),
-    })
+    set({ orbitTheta: newTheta, orbitPhi: newPhi })
   },
 
   /**
@@ -204,12 +190,7 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
       dGz: dGz.toFixed(4),
     })
 
-    set({
-      orbitPanX: orbitPanX + dGx,
-      orbitPanZ: orbitPanZ + dGz,
-      autoRotating: false,
-      lastInteractionTime: Date.now(),
-    })
+    set({ orbitPanX: orbitPanX + dGx, orbitPanZ: orbitPanZ + dGz })
   },
 
   /**
@@ -226,7 +207,7 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
       oldRadius: orbitRadius.toFixed(2),
       newRadius: newRadius.toFixed(2),
     })
-    set({ orbitRadius: newRadius, autoRotating: false, lastInteractionTime: Date.now() })
+    set({ orbitRadius: newRadius })
   },
 
   /**
@@ -235,35 +216,7 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
    */
   setOrbitPan: (panX, panZ) => {
     log.debug('Orbit pan set', { panX: panX.toFixed(4), panZ: panZ.toFixed(4) })
-    set({ orbitPanX: panX, orbitPanZ: panZ, autoRotating: false, lastInteractionTime: Date.now() })
-  },
-
-  recordOrbitInteraction: () => {
-    log.debug('Orbit interaction recorded — stopping auto-rotate')
-    set({ autoRotating: false, lastInteractionTime: Date.now() })
-  },
-
-  /**
-   * Called on each animation frame for the EXPLORE screen.
-   * If the user hasn't interacted for AUTO_ROTATE_DELAY_MS, start rotating.
-   */
-  tickAutoRotate: (deltaTime_s) => {
-    const { autoRotating, lastInteractionTime, orbitTheta } = get()
-    const now = Date.now()
-    const idleTime = now - lastInteractionTime
-
-    if (!autoRotating && idleTime > AUTO_ROTATE_DELAY_MS) {
-      // Just started auto-rotating
-      log.debug('Auto-rotate started (idle for 3s)')
-      set({ autoRotating: true })
-    }
-
-    if (autoRotating) {
-      // Rotate slowly — 0.003 rad/s
-      const rotationSpeed = 0.3  // degrees per second
-      const deltaRad = (rotationSpeed * Math.PI / 180) * deltaTime_s
-      set({ orbitTheta: orbitTheta + deltaRad })
-    }
+    set({ orbitPanX: panX, orbitPanZ: panZ })
   },
 
   resetARCamera: () => {
@@ -284,8 +237,6 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
       orbitRadius: DEFAULT_ORBIT_RADIUS,
       orbitPanX: 0,
       orbitPanZ: 0,
-      autoRotating: false,
-      lastInteractionTime: Date.now(),
     })
   },
 

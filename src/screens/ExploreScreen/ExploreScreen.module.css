@@ -235,7 +235,7 @@
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  border: 2px solid rgba(230, 168, 23, 0.6);
+  border: 2px solid rgba(132, 209, 219, 0.6);
   transform: translate(-50%, -50%);
   animation: location-ring-pulse 2s ease-in-out infinite;
 }
@@ -245,8 +245,8 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #E6A817;
-  box-shadow: 0 0 10px rgba(230, 168, 23, 0.8), 0 0 20px rgba(230, 168, 23, 0.4);
+  background: #84D1DB;
+  box-shadow: 0 0 10px rgba(132, 209, 219, 0.8), 0 0 20px rgba(132, 209, 219, 0.4);
   transform: translate(-50%, -50%);
   animation: location-dot-pulse 2s ease-in-out infinite;
 }
@@ -257,8 +257,8 @@
 }
 
 @keyframes location-dot-pulse {
-  0%, 100% { transform: translate(-50%, -50%) scale(1);   box-shadow: 0 0 10px rgba(230, 168, 23, 0.8), 0 0 20px rgba(230, 168, 23, 0.4); }
-  50%       { transform: translate(-50%, -50%) scale(1.2); box-shadow: 0 0 16px rgba(230, 168, 23, 1),   0 0 32px rgba(230, 168, 23, 0.6); }
+  0%, 100% { transform: translate(-50%, -50%) scale(1);   box-shadow: 0 0 10px rgba(132, 209, 219, 0.8), 0 0 20px rgba(132, 209, 219, 0.4); }
+  50%       { transform: translate(-50%, -50%) scale(1.2); box-shadow: 0 0 16px rgba(132, 209, 219, 1),   0 0 32px rgba(132, 209, 219, 0.6); }
 }
 
 /* ── Controls hint overlay — shown only on first visit ───────────────────── */
