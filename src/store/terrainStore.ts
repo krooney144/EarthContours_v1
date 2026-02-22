@@ -101,9 +101,9 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
           (p) => set({ loadingProgress: 15 + Math.round(p * 65) }),
         )
         isRealElevation = true
-        log.info('Real elevation data loaded successfully')
+        log.info('━━━ TERRAIN SOURCE: REAL (AWS Terrarium DEM tiles) ━━━', { region: region.id })
       } catch (elevErr) {
-        log.warn('Real elevation load failed — falling back to simulated terrain', elevErr)
+        log.warn('━━━ TERRAIN SOURCE: SIMULATED (real data unavailable) ━━━', { region: region.id, reason: elevErr })
         set({ loadingMessage: 'Network unavailable — using simulated terrain...' })
 
         // Simulated terrain fallback — always works, no network needed
