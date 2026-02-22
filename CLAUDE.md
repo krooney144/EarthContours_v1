@@ -15,7 +15,7 @@ A **terrain visualization web app** (React + TypeScript + Vite) for exploring US
 
 ## Branch
 
-Active development branch: `claude/real-elevation-data-colorado-QVXoW`
+Active development branch: `claude/fix-explore-screen-issues-FYjik`
 
 ---
 
@@ -50,7 +50,7 @@ Five Zustand stores in `src/store/`:
 |-------|------|
 | `uiStore` | Active screen, transitions, splash, preview mode |
 | `settingsStore` | User prefs — persisted to localStorage |
-| `cameraStore` | AR camera (heading/pitch/height) + orbit camera (theta/phi/radius) |
+| `cameraStore` | AR camera (heading/pitch/height) + orbit camera (theta/phi/radius/panX/panZ) |
 | `locationStore` | GPS position, explore location, sensor data |
 | `terrainStore` | Elevation mesh, peaks, rivers, loading state |
 
@@ -83,9 +83,14 @@ Transitions use zoom animation stored in `uiStore`.
 
 ## Rendering Per Screen
 
-- **SCAN**: Ray-height-field algorithm — casts rays per screen column, colors by elevation angle
-- **EXPLORE**: Marching squares — extracts contour lines at elevation thresholds, projected via orbit camera
-- **MAP**: Carto Dark Matter tile fetching on Canvas with overlay graphics (peaks, rivers)
+- **SCAN**: Ray-height-field algorithm — casts rays per screen column, colors by elevation angle. Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location.
+- **EXPLORE**: Marching squares — contour lines at elevation thresholds, projected via free-roam orbit camera.
+  - Navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to
+  - `elevScale = verticalExaggeration` (no hidden 0.25× compression; 1× = uncompressed)
+  - Peak labels use real `project3D()` with lat/lng from `simulatedData.ts` (not fake trig)
+  - Pulsing gold dot renders at MAP-selected location using `locationStore.mode === 'exploring'`
+  - `cameraStore.orbitPanX/orbitPanZ` control terrain pan offset; `orbitRadius` controls zoom scale
+- **MAP**: Carto Dark Matter tile fetching on Canvas with overlay graphics (peaks, rivers). Tap to `setExploreLocation(lat, lng)` — syncs EXPLORE and SCAN.
 
 ---
 
@@ -141,7 +146,8 @@ Transitions use zoom animation stored in `uiStore`.
 | Session | Goal |
 |---------|------|
 | 1 (done) | MVP — procedural terrain, Canvas/SVG rendering |
-| 2 (current) | Real AWS Terrarium DEM tiles; fixed elevation loader stack-overflow bug |
+| 2 (done) | Real AWS Terrarium DEM tiles; fixed elevation loader stack-overflow bug |
+| 2.5 (done) | EXPLORE fixes: correct vertical exaggeration (removed hidden 0.25×), real peak label coordinates via project3D(), free-roam pan/zoom/tilt/fly-to navigation, MAP→EXPLORE location sync with pulsing pin |
 | 3 | GPS + DeviceOrientation for true AR, Three.js WebGL renderer |
 | Future | Museum exhibit mode (7680×1080 triple ultra-wide) |
 

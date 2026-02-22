@@ -13,7 +13,7 @@ EarthContours renders geographic elevation data across the United States in thre
 | Screen | Description |
 |--------|-------------|
 | **SCAN** | AR first-person view — Comanche-style ray-height-field renderer, shows peaks/rivers in your heading direction |
-| **EXPLORE** | 3D orbit view — marching squares contour extraction projected via an orbit camera, draggable |
+| **EXPLORE** | 3D terrain explorer — free-roam pan/zoom/orbit, real peak label projection, location pin from MAP |
 | **MAP** | Dark topographic map — Carto Dark Matter tiles on Canvas, with peak/river overlays |
 | **SETTINGS** | User preferences — units, labels, performance, data resolution |
 
@@ -114,9 +114,9 @@ EarthContours_v1/
 **Active data source (as of Session 2):** AWS Terrarium tiles (Tier 4). Mount Elbert test region (39.1°N, 106.4°W) should show max elevation ~4400m (14,440 ft). Open the browser console and filter for `ELEVATION LOAD` or `TERRAIN SOURCE` to see which tier is active at runtime.
 
 **Rendering approaches per screen:**
-- SCAN: Ray-height-field (casts rays per screen column, colors by elevation)
-- EXPLORE: Marching squares (extracts contour line segments at elevation thresholds)
-- MAP: Canvas tile fetching with overlay graphics
+- SCAN: Ray-height-field (casts rays per screen column, colors by elevation). Subscribes to `locationStore.activeLat/activeLng` — re-centers automatically when MAP sets explore location.
+- EXPLORE: Marching squares (extracts contour line segments at elevation thresholds). Free-roam navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to. Peak labels use real `project3D()` projection from actual lat/lng. Pulsing gold location pin appears when MAP sets an explore point.
+- MAP: Canvas tile fetching with overlay graphics. Tap anywhere to set the explore location (synced to EXPLORE and SCAN via `locationStore`).
 
 **Layout:**
 - Mobile: Single screen + bottom nav
@@ -129,9 +129,10 @@ EarthContours_v1/
 | Session | Focus |
 |---------|-------|
 | **1 (done)** | MVP — procedural terrain, Canvas/SVG rendering, mock data |
-| **2 (current)** | Real AWS Terrarium DEM tiles, fixed elevation loader, real Colorado terrain |
+| **2 (done)** | Real AWS Terrarium DEM tiles, fixed elevation loader, real Colorado terrain |
+| **2.5 (done)** | EXPLORE fixes: correct vertical exaggeration, real peak label coordinates, free-roam navigation (pan/zoom/tilt/fly-to), MAP→EXPLORE location sync with pulsing pin |
 | **3** | Real GPS, DeviceOrientation/magnetometer for true AR, Three.js WebGL renderer |
-| **Future** | Museum exhibit mode (7680×1080 triple ultra-wide), multi-touch |
+| **Future** | Museum exhibit mode (7680×1080 triple ultra-wide) |
 
 ---
 

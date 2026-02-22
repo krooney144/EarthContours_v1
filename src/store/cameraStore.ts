@@ -44,7 +44,9 @@ interface CameraStore {
   // EXPLORE (orbit) camera
   orbitTheta: number     // Horizontal angle around center (radians)
   orbitPhi: number       // Vertical angle (radians, clamped 0.1 to π/2)
-  orbitRadius: number    // Distance from center
+  orbitRadius: number    // Distance from center (controls zoom — lower = closer)
+  orbitPanX: number      // Horizontal pan offset in world units [-0.5, 0.5] space
+  orbitPanZ: number      // Depth pan offset in world units [-0.5, 0.5] space
   autoRotating: boolean  // Whether idle auto-rotation is active
   lastInteractionTime: number // Timestamp of last user touch/click
 
@@ -55,8 +57,14 @@ interface CameraStore {
   setHeightFromSlider: (heightFt: number) => void
   /** Set height directly in meters */
   setHeight_m: (height_m: number) => void
-  /** Apply drag input to EXPLORE orbit camera */
+  /** Apply drag input to EXPLORE orbit camera — changes theta and phi (rotate/tilt) */
   applyOrbitDrag: (deltaX: number, deltaY: number) => void
+  /** Pan the orbit camera across the terrain — moves the look-at point */
+  applyOrbitPan: (deltaX: number, deltaY: number) => void
+  /** Zoom the orbit camera in or out by adjusting orbitRadius */
+  applyOrbitZoom: (delta: number) => void
+  /** Directly set the pan offset (used for fly-to double-click) */
+  setOrbitPan: (panX: number, panZ: number) => void
   /** Record that the user interacted with EXPLORE — stops auto-rotate */
   recordOrbitInteraction: () => void
   /** Check if auto-rotate should start and update state */
@@ -82,6 +90,8 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
   orbitTheta: degToRad(30),    // Start at a 30° angle so we see the terrain from a nice angle
   orbitPhi: degToRad(45),      // 45° down from vertical — good default view
   orbitRadius: DEFAULT_ORBIT_RADIUS,
+  orbitPanX: 0,                // Start centered on the terrain
+  orbitPanZ: 0,
   autoRotating: false,
   lastInteractionTime: Date.now(),
 
@@ -133,6 +143,7 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
    * Handle drag input on the EXPLORE orbit camera.
    * Dragging left/right rotates the orbit (theta).
    * Dragging up/down changes the viewing angle (phi).
+   * Used for right-click drag on desktop, 2-finger rotate+tilt on mobile.
    */
   applyOrbitDrag: (deltaX, deltaY) => {
     const THETA_SENSITIVITY = 0.008   // radians per pixel
@@ -157,6 +168,74 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
       autoRotating: false,
       lastInteractionTime: Date.now(),
     })
+  },
+
+  /**
+   * Pan the EXPLORE camera across the terrain.
+   * Used for left-click drag on desktop, 1-finger drag on mobile.
+   *
+   * Converts screen-space drag (CSS pixels) to world-space pan offset.
+   * Pan sensitivity scales with zoom level so the terrain feels the same
+   * to interact with regardless of how far in/out you've zoomed.
+   *
+   * The math: screen drag is decomposed into camera-local X (strafe) and
+   * Z (depth) movements, then rotated back to world space by theta to keep
+   * the terrain sliding under the cursor at the correct angle.
+   */
+  applyOrbitPan: (deltaX, deltaY) => {
+    const { orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ } = get()
+
+    // Sensitivity scales with zoom (closer = same feel, farther = larger strides)
+    const PAN_SENSITIVITY = 0.0025 * (orbitRadius / DEFAULT_ORBIT_RADIUS)
+    // Vertical drag pans in depth — adjust for viewing angle (more top-down = more depth per pixel)
+    const vertSens = PAN_SENSITIVITY / Math.max(0.25, Math.sin(orbitPhi))
+
+    const cos_t = Math.cos(orbitTheta)
+    const sin_t = Math.sin(orbitTheta)
+
+    // Decompose screen drag into world-space pan (undo theta rotation)
+    const dGx = -deltaX * PAN_SENSITIVITY * cos_t + deltaY * vertSens * sin_t
+    const dGz = -deltaX * PAN_SENSITIVITY * sin_t - deltaY * vertSens * cos_t
+
+    log.debug('Orbit pan applied', {
+      deltaX: deltaX.toFixed(1),
+      deltaY: deltaY.toFixed(1),
+      dGx: dGx.toFixed(4),
+      dGz: dGz.toFixed(4),
+    })
+
+    set({
+      orbitPanX: orbitPanX + dGx,
+      orbitPanZ: orbitPanZ + dGz,
+      autoRotating: false,
+      lastInteractionTime: Date.now(),
+    })
+  },
+
+  /**
+   * Zoom the orbit camera in or out.
+   * delta > 0 = zoom out (increase radius), delta < 0 = zoom in (decrease radius).
+   * Used for scroll wheel, pinch gesture.
+   */
+  applyOrbitZoom: (delta) => {
+    const { orbitRadius } = get()
+    // Multiply radius by a factor — exponential feel
+    const newRadius = clamp(orbitRadius * (1 + delta * 0.15), 0.5, 20)
+    log.debug('Orbit zoom applied', {
+      delta: delta.toFixed(3),
+      oldRadius: orbitRadius.toFixed(2),
+      newRadius: newRadius.toFixed(2),
+    })
+    set({ orbitRadius: newRadius, autoRotating: false, lastInteractionTime: Date.now() })
+  },
+
+  /**
+   * Directly set pan position — used by double-click fly-to.
+   * Moves the look-at point to the specified world coordinates.
+   */
+  setOrbitPan: (panX, panZ) => {
+    log.debug('Orbit pan set', { panX: panX.toFixed(4), panZ: panZ.toFixed(4) })
+    set({ orbitPanX: panX, orbitPanZ: panZ, autoRotating: false, lastInteractionTime: Date.now() })
   },
 
   recordOrbitInteraction: () => {
@@ -203,6 +282,8 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
       orbitTheta: degToRad(30),
       orbitPhi: degToRad(45),
       orbitRadius: DEFAULT_ORBIT_RADIUS,
+      orbitPanX: 0,
+      orbitPanZ: 0,
       autoRotating: false,
       lastInteractionTime: Date.now(),
     })
