@@ -51,8 +51,33 @@ export const DEFAULT_HEADING = 0
 /** Starting pitch (degrees) — looking at horizon */
 export const DEFAULT_PITCH = 0
 
-/** Default orbit camera distance from center */
-export const DEFAULT_ORBIT_RADIUS = 5
+/**
+ * ENU (East-North-Up) projection constants.
+ * These convert decimal-degree lat/lng offsets to metres.
+ * lat0 is always the centre of the loaded region.
+ *
+ *   x_m = (lng - lng0) * ENU_M_PER_DEG_LON(lat0)
+ *   z_m = (lat - lat0) * ENU_M_PER_DEG_LAT
+ *   y_m = elevation_m * verticalExaggeration   ← only scaling that touches Y
+ */
+export const ENU_M_PER_DEG_LAT = 111_132          // metres per degree latitude (nearly constant)
+export const ENU_M_PER_DEG_LON_AT_LAT = (lat0Deg: number): number =>
+  111_320 * Math.cos(lat0Deg * Math.PI / 180)     // shrinks toward poles
+
+/**
+ * Orbit camera zoom limits in metres.
+ * MIN = ~500 m above terrain (close-up of a single peak).
+ * MAX = 2 000 km (enough to see any single-region chunk from orbit).
+ */
+export const ORBIT_RADIUS_MIN_M = 500
+export const ORBIT_RADIUS_MAX_M = 2_000_000
+
+/**
+ * Default orbit radius is set dynamically from terrain bounds via
+ * cameraStore.initOrbitCamera(terrainWidth_m).  This fallback is only used
+ * before the first terrain loads (e.g. on first render).
+ */
+export const ORBIT_RADIUS_FALLBACK_M = 80_000
 
 // ─── Map Defaults ─────────────────────────────────────────────────────────────
 

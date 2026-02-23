@@ -22,10 +22,12 @@ import {
   DEFAULT_HEADING,
   DEFAULT_PITCH,
   DEFAULT_HEIGHT_M,
-  DEFAULT_ORBIT_RADIUS,
   DEFAULT_FOV,
   MIN_HEIGHT_M,
   MAX_HEIGHT_M,
+  ORBIT_RADIUS_MIN_M,
+  ORBIT_RADIUS_MAX_M,
+  ORBIT_RADIUS_FALLBACK_M,
 } from '../core/constants'
 import { clamp, feetToMeters, metersToFeet, degToRad, normalizeAngle } from '../core/utils'
 
@@ -40,12 +42,13 @@ interface CameraStore {
   height_m: number       // Eye height above ground in meters
   fov: number            // Field of view in degrees
 
-  // EXPLORE (orbit) camera
-  orbitTheta: number     // Horizontal angle around center (radians)
-  orbitPhi: number       // Vertical angle (radians, clamped 0.1 to π/2)
-  orbitRadius: number    // Distance from center (controls zoom — lower = closer)
-  orbitPanX: number      // Horizontal pan offset in world units [-0.5, 0.5] space
-  orbitPanZ: number      // Depth pan offset in world units [-0.5, 0.5] space
+  // EXPLORE (orbit) camera — all distances in metres
+  orbitTheta: number          // Horizontal angle around pivot (radians)
+  orbitPhi: number            // Vertical angle from top (radians, clamped 0.1 – π/2)
+  orbitRadius: number         // Camera distance from pivot in METRES (lower = closer)
+  orbitDefaultRadius: number  // Auto-computed from terrain width; reference for pan sensitivity
+  orbitPanX: number           // Pivot X offset as fraction of terrain width [-0.5, 0.5]
+  orbitPanZ: number           // Pivot Z offset as fraction of terrain depth [-0.5, 0.5]
 
   // Actions
   /** Apply drag input to the SCAN camera — changes heading and pitch */
@@ -56,12 +59,19 @@ interface CameraStore {
   setHeight_m: (height_m: number) => void
   /** Apply drag input to EXPLORE orbit camera — changes theta and phi (rotate/tilt) */
   applyOrbitDrag: (deltaX: number, deltaY: number) => void
-  /** Pan the orbit camera across the terrain — moves the look-at point */
+  /** Pan the orbit camera across the terrain — moves the look-at pivot point */
   applyOrbitPan: (deltaX: number, deltaY: number) => void
-  /** Zoom the orbit camera in or out by adjusting orbitRadius */
+  /** Zoom the orbit camera in or out by adjusting orbitRadius (metres) */
   applyOrbitZoom: (delta: number) => void
-  /** Directly set the pan offset (used for fly-to double-click) */
+  /** Directly set the normalised pan offset (used for fly-to double-click) */
   setOrbitPan: (panX: number, panZ: number) => void
+  /**
+   * Initialise the orbit camera for a newly-loaded terrain.
+   * Sets orbitRadius and orbitDefaultRadius from the terrain's physical width
+   * so the full terrain is visible at the default zoom level.
+   * Call this whenever a new terrain mesh loads.
+   */
+  initOrbitCamera: (terrainWidth_m: number) => void
   /** Reset SCAN camera to defaults */
   resetARCamera: () => void
   /** Reset EXPLORE camera to defaults */
@@ -79,11 +89,13 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
   height_m: DEFAULT_HEIGHT_M,
   fov: DEFAULT_FOV,
 
-  // Initial EXPLORE camera state
-  orbitTheta: degToRad(30),    // Start at a 30° angle so we see the terrain from a nice angle
-  orbitPhi: degToRad(45),      // 45° down from vertical — good default view
-  orbitRadius: DEFAULT_ORBIT_RADIUS,
-  orbitPanX: 0,                // Start centered on the terrain
+  // Initial EXPLORE camera state — orbitRadius/orbitDefaultRadius updated by
+  // initOrbitCamera() once the first terrain mesh loads.
+  orbitTheta: degToRad(30),
+  orbitPhi: degToRad(45),
+  orbitRadius: ORBIT_RADIUS_FALLBACK_M,
+  orbitDefaultRadius: ORBIT_RADIUS_FALLBACK_M,
+  orbitPanX: 0,
   orbitPanZ: 0,
 
   /**
@@ -169,10 +181,11 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
    * the terrain sliding under the cursor at the correct angle.
    */
   applyOrbitPan: (deltaX, deltaY) => {
-    const { orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ } = get()
+    const { orbitTheta, orbitPhi, orbitRadius, orbitDefaultRadius, orbitPanX, orbitPanZ } = get()
 
-    // Sensitivity scales with zoom (closer = same feel, farther = larger strides)
-    const PAN_SENSITIVITY = 0.0025 * (orbitRadius / DEFAULT_ORBIT_RADIUS)
+    // Pan sensitivity: scales with zoom so the terrain feels consistent at any distance.
+    // orbitDefaultRadius is the "full terrain in view" reference distance.
+    const PAN_SENSITIVITY = 0.0025 * (orbitRadius / orbitDefaultRadius)
     // Vertical drag pans in depth — adjust for viewing angle (more top-down = more depth per pixel)
     const vertSens = PAN_SENSITIVITY / Math.max(0.25, Math.sin(orbitPhi))
 
@@ -200,8 +213,8 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
    */
   applyOrbitZoom: (delta) => {
     const { orbitRadius } = get()
-    // Multiply radius by a factor — exponential feel
-    const newRadius = clamp(orbitRadius * (1 + delta * 0.15), 0.5, 20)
+    // Multiply radius by a factor — exponential feel regardless of scale
+    const newRadius = clamp(orbitRadius * (1 + delta * 0.15), ORBIT_RADIUS_MIN_M, ORBIT_RADIUS_MAX_M)
     log.debug('Orbit zoom applied', {
       delta: delta.toFixed(3),
       oldRadius: orbitRadius.toFixed(2),
@@ -219,6 +232,23 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
     set({ orbitPanX: panX, orbitPanZ: panZ })
   },
 
+  initOrbitCamera: (terrainWidth_m) => {
+    // Place the camera at 80 % of terrain width — shows full terrain with a little margin
+    const defaultRadius = clamp(terrainWidth_m * 0.8, ORBIT_RADIUS_MIN_M, ORBIT_RADIUS_MAX_M)
+    log.info('Orbit camera initialised for terrain', {
+      terrainWidth_m: terrainWidth_m.toFixed(0),
+      orbitRadius_m: defaultRadius.toFixed(0),
+    })
+    set({
+      orbitRadius: defaultRadius,
+      orbitDefaultRadius: defaultRadius,
+      orbitPanX: 0,
+      orbitPanZ: 0,
+      orbitTheta: degToRad(30),
+      orbitPhi: degToRad(45),
+    })
+  },
+
   resetARCamera: () => {
     log.info('AR camera reset to defaults')
     set({
@@ -230,11 +260,12 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
   },
 
   resetOrbitCamera: () => {
+    const { orbitDefaultRadius } = get()
     log.info('Orbit camera reset to defaults')
     set({
       orbitTheta: degToRad(30),
       orbitPhi: degToRad(45),
-      orbitRadius: DEFAULT_ORBIT_RADIUS,
+      orbitRadius: orbitDefaultRadius,
       orbitPanX: 0,
       orbitPanZ: 0,
     })

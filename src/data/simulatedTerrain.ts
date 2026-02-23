@@ -229,6 +229,42 @@ const REGION_PARAMS: Record<string, TerrainParams> = {
     ],
   },
 
+  'wa-cascades': {
+    baseElevation: 400,
+    seaLevel: 0,
+    noiseAmplitude: 120,
+    noiseSeed: 88.7,
+    ridgeAmplitude: 800,
+    ridgeFrequencyX: 4,
+    ridgeFrequencyY: 3,
+    valleyDepth: 350,
+    smoothPasses: 3,
+    peaks: [
+      // Mount Rainier
+      { nx: 0.45, ny: 0.55, height: 3990, spread: 0.10 },
+      // Mount Baker
+      { nx: 0.35, ny: 0.20, height: 3285, spread: 0.09 },
+      // Glacier Peak
+      { nx: 0.55, ny: 0.35, height: 3213, spread: 0.09 },
+    ],
+  },
+
+  // 'alaska-range' is the current region id; 'anchorage-alaska' kept as alias
+  'alaska-range': {
+    baseElevation: 800,
+    seaLevel: 0,
+    noiseAmplitude: 180,
+    noiseSeed: 137.3,
+    ridgeAmplitude: 600,
+    ridgeFrequencyX: 3,
+    ridgeFrequencyY: 2,
+    valleyDepth: 500,
+    smoothPasses: 3,
+    peaks: [
+      { nx: 0.40, ny: 0.15, height: 5400, spread: 0.12 },
+      { nx: 0.45, ny: 0.30, height: 3500, spread: 0.20 },
+    ],
+  },
   'anchorage-alaska': {
     baseElevation: 800,
     seaLevel: 0,             // Alaska goes to sea level in Cook Inlet
