@@ -103,8 +103,13 @@ function drawExploreCanvas(
   const ctx = canvas.getContext('2d')
   if (!ctx) return
 
-  const W = canvas.width
-  const H = canvas.height
+  // canvas.width/height are in device pixels (set to rect.width * dpr).
+  // ctx.scale(dpr, dpr) is already applied by the caller, so all drawing
+  // coordinates must be in CSS pixels. Divide back to get the CSS-pixel
+  // dimensions that both this canvas path and the PeakLabels3D HTML overlay use.
+  const dpr = window.devicePixelRatio || 1
+  const W = canvas.width  / dpr   // CSS pixels — matches containerW in PeakLabels3D
+  const H = canvas.height / dpr   // CSS pixels — matches containerH in PeakLabels3D
   const { elevations, width, height, minElevation_m, maxElevation_m } = mesh
   const elevRange = maxElevation_m - minElevation_m || 1
 
