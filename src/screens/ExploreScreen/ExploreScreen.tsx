@@ -24,9 +24,9 @@
  * 5. Location pin (MAP screen selection) rendered as a pulsing HTML dot
  *
  * elevScale = ELEV_BASE_SCALE × verticalExaggeration
- *   ELEV_BASE_SCALE = 0.25 — viewport scale factor (makes terrain height
- *   proportional to the grid width at 1× exaggeration)
- *   verticalExaggeration from settings multiplies on top of this baseline
+ *   ELEV_BASE_SCALE = 1.0 — at 1× exaggeration the terrain height range
+ *   equals the terrain width in world units (1:1 square world space)
+ *   verticalExaggeration from settings is the sole control over drama
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -42,9 +42,9 @@ import styles from './ExploreScreen.module.css'
 
 const log = createLogger('SCREEN:EXPLORE')
 
-// Viewport scale factor: keeps terrain height proportional to the grid width
-// at 1× vertical exaggeration. verticalExaggeration multiplies on top.
-const ELEV_BASE_SCALE = 0.25
+// At 1× vertical exaggeration, terrain height range equals terrain width in
+// world units (1:1). verticalExaggeration is the sole drama control.
+const ELEV_BASE_SCALE = 1.0
 
 // --- 3D Projection ------------------------------------------------------------
 
@@ -117,7 +117,7 @@ function drawExploreCanvas(
   ctx.fillRect(0, 0, W, H)
 
   const cx = W / 2
-  const cy = H / 2 + H * 0.05  // slightly below center for better framing
+  const cy = H / 2 + H * 0.15  // pushed down so taller terrain stays in frame
 
   // Scale responds to orbitRadius — scroll-zoom moves terrain closer/further
   const scale = (Math.min(W, H) * 0.62) * (DEFAULT_ORBIT_RADIUS / orbitRadius)

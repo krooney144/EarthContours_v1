@@ -44,7 +44,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showTownLabels: false,        // Off by default per briefing
   showContourLines: true,
   contourAnimation: true,       // Slow pulse on by default
-  verticalExaggeration: 1.5,   // 1.5× default per briefing
+  verticalExaggeration: 1,     // 1× = real scale (no exaggeration baseline)
 
   // Appearance
   appName: 'Earth Contours',   // Two-word brand name
