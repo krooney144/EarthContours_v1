@@ -174,7 +174,9 @@
 
 .peakLabel3D {
   position: absolute;
-  transform: translateX(-50%);
+  /* translateY lifts the whole div so the dot (last child) centres on sy.
+     -100% moves the bottom to sy; +2.5px offsets the dot's half-height. */
+  transform: translateX(-50%) translateY(calc(-100% + 2.5px));
   display: flex;
   flex-direction: column;
   align-items: center;
