@@ -86,11 +86,67 @@ Transitions use zoom animation stored in `uiStore`.
 - **SCAN**: Ray-height-field algorithm — casts rays per screen column, colors by elevation angle. Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location.
 - **EXPLORE**: Marching squares — contour lines at elevation thresholds, projected via free-roam orbit camera.
   - Navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to
-  - `elevScale = verticalExaggeration` (no hidden 0.25× compression; 1× = uncompressed)
-  - Peak labels use real `project3D()` with lat/lng from `simulatedData.ts` (not fake trig)
-  - Pulsing gold dot renders at MAP-selected location using `locationStore.mode === 'exploring'`
-  - `cameraStore.orbitPanX/orbitPanZ` control terrain pan offset; `orbitRadius` controls zoom scale
+  - **ENU metre-space** (v1.1): all world coords in metres; `verticalExaggeration` is the ONLY modifier of Y
+  - Peak labels and contour lines share `computeENULayout()` so they always match
+  - Teal dot renders at MAP-selected location using `locationStore.mode === 'exploring'`
+  - `cameraStore.orbitPanX/orbitPanZ` = pan as fraction of terrain width/depth [-0.5, 0.5]
+  - `cameraStore.orbitRadius` = camera distance from pivot in **metres**; auto-set by `initOrbitCamera(terrainWidth_m)`
 - **MAP**: Carto Dark Matter tile fetching on Canvas with overlay graphics (peaks, rivers). Tap to `setExploreLocation(lat, lng)` — syncs EXPLORE and SCAN.
+
+---
+
+## EXPLORE Coordinate System (ENU — v1.1)
+
+All world coordinates in EXPLORE are in a local **ENU (East-North-Up)** frame centred on the loaded region's geographic centre (`lat0, lon0`):
+
+```
+lat0 = (bounds.north + bounds.south) / 2
+lon0 = (bounds.east  + bounds.west ) / 2
+
+MPD_LAT = 111 132 m/°            (nearly constant)
+MPD_LON = 111 320 × cos(lat0°)   (shrinks toward poles)
+
+x_m = (col/(w-1) − 0.5) × terrainWidth_m  − pivotX_m   ← east/west
+z_m = (row/(h-1) − 0.5) × terrainDepth_m  − pivotZ_m   ← south (z+ = south in grid)
+y_m = (elevation_m − minElevation_m) × verticalExaggeration  ← up
+
+scale  = pixels/metre = min(W,H) × 0.62 / orbitRadius
+pivot  = (panX × terrainWidth_m,  panZ × terrainDepth_m)   in metres
+```
+
+**Rule:** nothing else ever multiplies or divides elevation. At 1×, 1 m of terrain = 1 m of world Y.
+
+---
+
+## Predefined Terrain Regions (`src/data/regions.ts`)
+
+Regions are hand-tuned geographic chunks sized for visual quality, **not political borders**.
+
+| Region | ID | Approx size | Notes |
+|--------|----|-------------|-------|
+| Colorado Rockies | `colorado-rockies` | ~220×250 km | 53 14ers; default region |
+| Alaska Range | `alaska-range` | ~255×220 km | Denali 6190 m |
+| Washington Cascades | `wa-cascades` | ~230×220 km | Rainier 4392 m |
+
+**Adding regions:** Add an entry in `src/data/regions.ts`. Target ≤300 km/side (flat-earth error < 0.2%). Regions may overlap — tiles are cached by z/x/y so shared tiles auto-reuse. Update `DEFAULT_REGION_ID` in `constants.ts` if needed.
+
+**Flat-earth accuracy:** 50 km → <1 m error; 150 km → <10 m; 300 km → <50 m. Fine for all current regions.
+
+---
+
+## Camera System (orbit around pivot)
+
+`cameraStore` orbit camera fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `orbitRadius` | metres | Camera distance from pivot — zoom = change this |
+| `orbitDefaultRadius` | metres | Set by `initOrbitCamera(terrainWidth_m)` — reference for pan sensitivity |
+| `orbitPanX/Z` | fraction [-0.5, 0.5] | Pivot offset as fraction of terrain width/depth |
+| `orbitTheta` | radians | Horizontal orbit angle |
+| `orbitPhi` | radians | Vertical tilt (0.1 = top-down, 1.45 = side-on) |
+
+`initOrbitCamera(terrainWidth_m)` is called from `ExploreScreen` whenever `meshData` changes. It sets `orbitRadius = terrainWidth_m × 0.8` so the full terrain is visible at load. No auto-rotation.
 
 ---
 
@@ -148,6 +204,7 @@ Transitions use zoom animation stored in `uiStore`.
 | 1 (done) | MVP — procedural terrain, Canvas/SVG rendering |
 | 2 (done) | Real AWS Terrarium DEM tiles; fixed elevation loader stack-overflow bug |
 | 2.5 (done) | EXPLORE fixes: correct vertical exaggeration (removed hidden 0.25×), real peak label coordinates via project3D(), free-roam pan/zoom/tilt/fly-to navigation, MAP→EXPLORE location sync with pulsing pin |
+| v1.1 (done) | ENU metre-space coordinate system: 1 m X = 1 m Z = 1 m Y; real physical terrain proportions; `orbitRadius` in metres; `initOrbitCamera` auto-computes from terrain bounds; `worldWidth_km` computed from actual bounds; 3 named regions in `regions.ts`; exaggeration options 1/2/4/10/20× |
 | 3 | GPS + DeviceOrientation for true AR, Three.js WebGL renderer |
 | Future | Museum exhibit mode (7680×1080 triple ultra-wide) |
 

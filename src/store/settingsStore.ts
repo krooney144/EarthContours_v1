@@ -44,7 +44,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showTownLabels: false,        // Off by default per briefing
   showContourLines: true,
   contourAnimation: true,       // Slow pulse on by default
-  verticalExaggeration: 1,     // 1× = real scale (no exaggeration baseline)
+  verticalExaggeration: 4,     // 4× default — real mountains visible without being overwhelming
 
   // Appearance
   appName: 'Earth Contours',   // Two-word brand name
@@ -224,6 +224,26 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'earthcontours-settings',      // localStorage key
+      version: 2,                          // bump when persisted shape changes
+      /**
+       * Migration: snap old verticalExaggeration values to the new set.
+       * v1 options were 1 | 1.5 | 2 | 3 | 4 | 5
+       * v2 options are  1 | 2   | 4 | 10 | 20
+       * Snap rule: pick the nearest valid value.
+       */
+      migrate: (persisted: unknown, fromVersion: number) => {
+        const state = persisted as Record<string, unknown>
+        if (fromVersion < 2 && typeof state.verticalExaggeration === 'number') {
+          const VALID: VerticalExaggeration[] = [1, 2, 4, 10, 20]
+          const old = state.verticalExaggeration as number
+          const snapped = VALID.reduce((best, v) =>
+            Math.abs(v - old) < Math.abs(best - old) ? v : best
+          )
+          log.info('Migrating verticalExaggeration', { from: old, to: snapped })
+          state.verticalExaggeration = snapped
+        }
+        return state as unknown as AppSettings
+      },
       storage: createJSONStorage(() => {   // Use localStorage
         try {
           return localStorage

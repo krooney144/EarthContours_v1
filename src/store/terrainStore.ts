@@ -24,7 +24,7 @@ import { loadRegionElevation } from '../data/elevationLoader'
 import { generateSimulatedTerrain } from '../data/simulatedTerrain'
 import { COLORADO_PEAKS, ALASKA_PEAKS, COLORADO_RIVERS, ALASKA_RIVERS } from '../data/simulatedData'
 import { REGIONS } from '../data/regions'
-import { TERRAIN_GRID_SIZE, TERRAIN_WORLD_KM } from '../core/constants'
+import { TERRAIN_GRID_SIZE, ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../core/constants'
 
 const log = createLogger('STORE:TERRAIN')
 
@@ -130,15 +130,27 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
         isReal: isRealElevation,
       })
 
+      // Compute real physical dimensions from the region's lat/lng bounds
+      // using the ENU flat-earth approximation (< 0.2 % error for ≤ 300 km chunks).
+      const lat0 = (region.bounds.north + region.bounds.south) / 2
+      const worldWidth_km  = (region.bounds.east  - region.bounds.west)  * ENU_M_PER_DEG_LON_AT_LAT(lat0) / 1000
+      const worldDepth_km  = (region.bounds.north - region.bounds.south) * ENU_M_PER_DEG_LAT / 1000
+
+      log.info('Terrain physical dimensions', {
+        worldWidth_km:  worldWidth_km.toFixed(1),
+        worldDepth_km:  worldDepth_km.toFixed(1),
+        lat0: lat0.toFixed(3),
+      })
+
       const meshData: TerrainMeshData = {
         width: TERRAIN_GRID_SIZE,
         height: TERRAIN_GRID_SIZE,
         elevations,
         minElevation_m: minElev,
         maxElevation_m: maxElev,
-        worldWidth_km: TERRAIN_WORLD_KM,
-        worldDepth_km: TERRAIN_WORLD_KM,
-        bounds: region.bounds,  // Geographic bounds for lat/lng↔grid conversion
+        worldWidth_km,
+        worldDepth_km,
+        bounds: region.bounds,
       }
 
       // ── Phase 4: Contour elevations ────────────────────────────────────────
