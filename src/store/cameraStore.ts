@@ -116,7 +116,8 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
     const { heading_deg, pitch_deg } = get()
 
     // normalizeAngle keeps heading in 0–360 range
-    const newHeading = normalizeAngle(heading_deg + deltaX * HEADING_SENSITIVITY)
+    // Negate deltaX: drag right → view pans right → heading decreases (like scrolling a panoramic photo)
+    const newHeading = normalizeAngle(heading_deg - deltaX * HEADING_SENSITIVITY)
     // Clamp pitch so you can't flip upside down (-80° to 80°)
     const newPitch = clamp(pitch_deg - deltaY * PITCH_SENSITIVITY, -80, 80)
 
