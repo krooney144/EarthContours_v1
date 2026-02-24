@@ -83,7 +83,7 @@ Transitions use zoom animation stored in `uiStore`.
 
 ## Rendering Per Screen
 
-- **SCAN**: Ray-height-field algorithm — casts rays per screen column, colors by elevation angle. Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location.
+- **SCAN**: Logarithmic ray-height-field — casts rays per screen column with 1.5% step growth (100m→120km, ~476 steps). Bilinear elevation sampling, Earth curvature + atmospheric refraction correction, and NW-45° hill shading via finite-difference surface normals. Peak labels shown up to 80km. See `CLAUDE/phase-2-scan-overhaul.md` for the Phase 2 multi-zoom tile plan (z12 near, z8 distant, Web Worker precomputation). Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location.
 - **EXPLORE**: Marching squares — contour lines at elevation thresholds, projected via free-roam orbit camera.
   - Navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to
   - **ENU metre-space** (v1.1): all world coords in metres; `verticalExaggeration` is the ONLY modifier of Y
@@ -205,7 +205,8 @@ Regions are hand-tuned geographic chunks sized for visual quality, **not politic
 | 2 (done) | Real AWS Terrarium DEM tiles; fixed elevation loader stack-overflow bug |
 | 2.5 (done) | EXPLORE fixes: correct vertical exaggeration (removed hidden 0.25×), real peak label coordinates via project3D(), free-roam pan/zoom/tilt/fly-to navigation, MAP→EXPLORE location sync with pulsing pin |
 | v1.1 (done) | ENU metre-space coordinate system: 1 m X = 1 m Z = 1 m Y; real physical terrain proportions; `orbitRadius` in metres; `initOrbitCamera` auto-computes from terrain bounds; `worldWidth_km` computed from actual bounds; 3 named regions in `regions.ts`; exaggeration options 1/2/4/10/20× |
-| 3 | GPS + DeviceOrientation for true AR, Three.js WebGL renderer |
+| v1.2 (done) | SCAN Phase 1 quality overhaul: bilinear elevation sampling, logarithmic ray steps (476 steps 100m→120km), Earth curvature + refraction correction, NW-45° hill shading from finite-difference normals; expanded peak data (Colorado +6, Alaska +5, Cascades 11); Cascades region peak data in terrainStore; Phase 2 plan in `CLAUDE/phase-2-scan-overhaul.md` |
+| 3 | SCAN Phase 2 (see CLAUDE/phase-2-scan-overhaul.md): multi-zoom tiles z12→z8, Web Worker SkylineData precomputation, peak ridgeline visibility, 250km range; then GPS + DeviceOrientation for true AR |
 | Future | Museum exhibit mode (7680×1080 triple ultra-wide) |
 
 ---

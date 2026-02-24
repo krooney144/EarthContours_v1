@@ -22,7 +22,7 @@ import { createLogger } from '../core/logger'
 import { TerrainLoadError } from '../core/errors'
 import { loadRegionElevation } from '../data/elevationLoader'
 import { generateSimulatedTerrain } from '../data/simulatedTerrain'
-import { COLORADO_PEAKS, ALASKA_PEAKS, COLORADO_RIVERS, ALASKA_RIVERS } from '../data/simulatedData'
+import { COLORADO_PEAKS, ALASKA_PEAKS, CASCADES_PEAKS, COLORADO_RIVERS, ALASKA_RIVERS } from '../data/simulatedData'
 import { REGIONS } from '../data/regions'
 import { TERRAIN_GRID_SIZE, ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../core/constants'
 
@@ -82,7 +82,10 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
     try {
       // ── Phase 1: Peak & river data ─────────────────────────────────────────
       set({ loadingProgress: 5, loadingMessage: 'Loading peak data...' })
-      const peaks  = regionId === 'colorado-rockies' ? COLORADO_PEAKS : ALASKA_PEAKS
+      const peaks =
+        regionId === 'colorado-rockies' ? COLORADO_PEAKS :
+        regionId === 'wa-cascades'      ? CASCADES_PEAKS :
+        ALASKA_PEAKS
       const rivers = regionId === 'colorado-rockies' ? COLORADO_RIVERS : ALASKA_RIVERS
       log.info('Peak/river data loaded', { peaks: peaks.length, rivers: rivers.length })
       set({ peaks, rivers, waterBodies: [], loadingProgress: 15 })

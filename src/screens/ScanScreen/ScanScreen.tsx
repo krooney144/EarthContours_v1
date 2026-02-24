@@ -58,11 +58,34 @@ const log = createLogger('SCREEN:SCAN')
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const HFOV       = 70       // Horizontal field of view (degrees)
-const VFOV       = 60       // Vertical field of view (degrees)
-const MAX_DIST   = 35_000   // Max render distance (meters)
-const RAY_STEPS  = 120      // Depth samples per column (higher = smoother silhouette)
-const DEG_TO_RAD = Math.PI / 180
+const HFOV         = 70          // Horizontal field of view (degrees)
+const VFOV         = 60          // Vertical field of view (degrees)
+const MAX_DIST     = 120_000     // Max render distance (metres) — typical region extent
+const MAX_PEAK_DIST = 80_000     // Max distance for peak label rendering (metres)
+const EARTH_R      = 6_371_000   // Earth radius (metres) — for curvature correction
+const REFRACTION_K = 0.13        // Standard atmospheric refraction coefficient
+const DEG_TO_RAD   = Math.PI / 180
+
+// Pre-computed logarithmic ray-march distances, far→near order.
+// 1.5% step growth from 100m → 120km: ~476 steps.
+// This gives fine detail near the viewer (2m steps at 100m) and
+// coarser sampling far away (1.8km steps at 120km), matching human visual acuity.
+const RAY_DISTANCES: Float32Array = (() => {
+  const arr: number[] = []
+  let d = 100
+  while (d <= MAX_DIST) {
+    arr.push(d)
+    d *= 1.015
+  }
+  arr.reverse()  // Process far→near so nearer terrain paints over farther
+  return new Float32Array(arr)
+})()
+
+// NW sun at 45° altitude — standard cartographic illumination convention.
+// Light direction in ENU (East-North-Up): from surface toward the sun.
+// Azimuth 315° (NW), altitude 45°: x=-0.5 (west), y=0.707 (up), z=0.5 (north)
+// Vector is already unit-length: sqrt(0.25 + 0.5 + 0.25) = 1.0
+const LIGHT_ENU = [-0.5, 0.707, 0.5] as const
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -86,16 +109,67 @@ interface PeakScreenPos {
 // ─── Grid Sampler ─────────────────────────────────────────────────────────────
 
 /**
- * Nearest-neighbor elevation lookup from a loaded terrain mesh.
- * Fast enough for real-time per-column ray marching.
+ * Bilinear-interpolated elevation lookup from the loaded terrain mesh.
+ * Blends the 4 surrounding grid cells to produce smooth, staircase-free values.
+ * Used for both the ray-height-field silhouette and hill-shade normal computation.
  */
-function sampleMeshAt(lat: number, lng: number, mesh: TerrainMeshData): number {
+function sampleMeshBilinear(lat: number, lng: number, mesh: TerrainMeshData): number {
   const { bounds, width, height, elevations } = mesh
-  const col = Math.round((lng - bounds.west)  / (bounds.east  - bounds.west)  * (width  - 1))
-  const row = Math.round((bounds.north - lat) / (bounds.north - bounds.south) * (height - 1))
-  const c = Math.max(0, Math.min(width  - 1, col))
-  const r = Math.max(0, Math.min(height - 1, row))
-  return elevations[r * width + c] ?? 0
+  const nx = (lng - bounds.west)  / (bounds.east  - bounds.west)
+  const ny = (bounds.north - lat) / (bounds.north - bounds.south)
+
+  // Clamp to valid grid range — returns edge value for out-of-bounds coordinates
+  const sx = Math.max(0, Math.min(width  - 1, nx * (width  - 1)))
+  const sy = Math.max(0, Math.min(height - 1, ny * (height - 1)))
+
+  const x0 = Math.floor(sx), x1 = Math.min(x0 + 1, width  - 1)
+  const y0 = Math.floor(sy), y1 = Math.min(y0 + 1, height - 1)
+  const fx = sx - x0, fy = sy - y0
+
+  return (
+    elevations[y0 * width + x0] * (1 - fx) * (1 - fy) +
+    elevations[y0 * width + x1] * fx       * (1 - fy) +
+    elevations[y1 * width + x0] * (1 - fx) * fy +
+    elevations[y1 * width + x1] * fx       * fy
+  )
+}
+
+// ─── Hill Shading ─────────────────────────────────────────────────────────────
+
+/**
+ * Compute hill-shade intensity at a terrain point using finite-difference surface normals.
+ *
+ * Algorithm:
+ *   1. Sample elevation at four neighbours (~500m step at mid-latitudes)
+ *   2. Compute central differences → rise-over-run in east and north directions
+ *   3. Derive ENU surface normal: n = (-dzdx, 1, -dzdy) — points upward from surface
+ *   4. Dot with pre-computed NW-45° sun direction → shade in [0, 1]
+ *
+ * Returns 0.0 (fully shadowed) to 1.0 (fully lit).
+ */
+function computeHillShade(lat: number, lng: number, mesh: TerrainMeshData): number {
+  const STEP    = 0.005  // ~500m at mid-latitudes — safe step for 860m/px grid
+  const cosLat  = Math.cos(lat * DEG_TO_RAD)
+  const dx_m    = STEP * 111_320 * cosLat   // metres per STEP east–west
+  const dy_m    = STEP * 111_132             // metres per STEP north–south
+
+  const eE = sampleMeshBilinear(lat,          lng + STEP, mesh)
+  const eW = sampleMeshBilinear(lat,          lng - STEP, mesh)
+  const eN = sampleMeshBilinear(lat + STEP,   lng,        mesh)
+  const eS = sampleMeshBilinear(lat - STEP,   lng,        mesh)
+
+  // Central differences: elevation change per metre in each horizontal direction
+  const dzdx = (eE - eW) / (2 * dx_m)   // east slope
+  const dzdy = (eN - eS) / (2 * dy_m)   // north slope
+
+  // Surface normal (ENU: x=east, y=up, z=north) — un-normalised
+  // For surface y = f(x,z): n = (-df/dx, 1, -df/dz)
+  const nx = -dzdx, ny = 1.0, nz = -dzdy
+  const mag = Math.sqrt(nx * nx + ny * ny + nz * nz)
+
+  // Dot with NW 45° sun direction; clamp negative (shadowed) side to 0
+  const shade = (nx * LIGHT_ENU[0] + ny * LIGHT_ENU[1] + nz * LIGHT_ENU[2]) / mag
+  return Math.max(0, shade)
 }
 
 // ─── First-Person Projection ──────────────────────────────────────────────────
@@ -185,7 +259,7 @@ function drawScanCanvas(
   const W = canvas.width
   const H = canvas.height
 
-  const groundElev = sampleMeshAt(activeLat, activeLng, mesh)
+  const groundElev = sampleMeshBilinear(activeLat, activeLng, mesh)
   const eyeElev    = groundElev + eyeHeight_m
 
   const pitchRad = pitch_deg * DEG_TO_RAD
@@ -203,40 +277,57 @@ function drawScanCanvas(
   ctx.fillStyle = skyGrad
   ctx.fillRect(0, 0, W, H)
 
-  // ── 2. Terrain silhouette — ray-height-field ─────────────────────────────────
+  // ── 2. Terrain silhouette — logarithmic ray-height-field ─────────────────────
   //
-  // March from far to near in each screen column. For each new visible
-  // terrain slice, fill it with an ocean-depth color scaled by distance.
-  // Near = bright saturated teal; far = dark muted navy.
+  // For each screen column:
+  //   - Walk outward from viewer using pre-computed logarithmic step sizes
+  //     (1.5% growth from 100m → 120km, ~476 steps processed far→near)
+  //   - Apply Earth curvature + atmospheric refraction correction at each sample
+  //   - Fill newly-visible terrain slices with distance + hill-shade colour
+  //   - Hill shade: NW 45° sun, finite-difference surface normals from the grid
 
   for (let col = 0; col < W; col++) {
     const bearingDeg = heading_deg + (col / W - 0.5) * HFOV
     const bearingRad = bearingDeg * DEG_TO_RAD
-    const sinB = Math.sin(bearingRad)
-    const cosB = Math.cos(bearingRad)
+    const sinB       = Math.sin(bearingRad)
+    const cosB       = Math.cos(bearingRad)
 
-    let maxTerrainY = H  // lowest drawn pixel so far (start at bottom)
+    let maxTerrainY = H  // lowest visible pixel for this column (starts at bottom)
 
-    for (let step = RAY_STEPS; step >= 1; step--) {
-      const dist       = (step / RAY_STEPS) * MAX_DIST
-      const sampleLat  = activeLat + (cosB * dist) / 111_320
-      const sampleLng  = activeLng + (sinB * dist) / (111_320 * cosLat)
+    for (let i = 0; i < RAY_DISTANCES.length; i++) {
+      const dist = RAY_DISTANCES[i]  // far→near order (far steps first)
 
-      const terrainElev = sampleMeshAt(sampleLat, sampleLng, mesh)
-      const elevDiff    = terrainElev - eyeElev
-      const angleRad    = Math.atan2(elevDiff, dist)
-      const screenY     = horizonY - angleRad * (H / vfovRad)
+      // Flat-earth approximation for sample position — accurate to ≪ 1 grid pixel at 120km
+      const sampleLat = activeLat + (cosB * dist) / 111_320
+      const sampleLng = activeLng + (sinB * dist) / (111_320 * cosLat)
+
+      const rawElev = sampleMeshBilinear(sampleLat, sampleLng, mesh)
+
+      // Earth curvature + atmospheric refraction correction.
+      // Without this, a 50km-away point appears ~196m too high; 120km ~1.1km too high.
+      // Refraction (k=0.13) partially offsets curvature — standard geodetic correction.
+      const curvDrop      = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const effectiveElev = rawElev - curvDrop
+
+      const elevDiff  = effectiveElev - eyeElev
+      const elevAngle = Math.atan2(elevDiff, dist)
+      const screenY   = horizonY - elevAngle * (H / vfovRad)
 
       if (screenY < maxTerrainY) {
-        // This step is newly visible — fill the slice
-        const nearFrac = 1 - step / RAY_STEPS   // 0=far/dark, 1=near/bright
+        // Newly visible slice — compute hill shade at this ridgeline point
+        const shade = computeHillShade(sampleLat, sampleLng, mesh)
 
-        // Ocean-depth ramp: deep navy (far) → bright teal (near)
-        // Uses a soft gamma so the mid-range isn't too flat
-        const g = Math.pow(nearFrac, 0.75)
-        const r = Math.round(  8 + g * (40  -  8))
-        const gr= Math.round( 35 + g * (140 - 35))
-        const b = Math.round( 55 + g * (155 - 55))
+        // Distance fraction: 0 = far/dark, 1 = near/bright
+        const nearFrac = Math.max(0, 1 - dist / MAX_DIST)
+        const g        = Math.pow(nearFrac, 0.75)
+
+        // Hill shade scale: 0.40 in full shadow → 1.00 in full sun
+        // Keeps shadows deep (navy) and lit faces bright (teal) without blowing out
+        const shadeScale = 0.40 + shade * 0.60
+
+        const r  = Math.round(( 8 + g * 32)  * shadeScale)
+        const gr = Math.round((35 + g * 105) * shadeScale)
+        const b  = Math.round((55 + g * 100) * (0.60 + shadeScale * 0.40))
 
         ctx.fillStyle = `rgb(${r},${gr},${b})`
         ctx.fillRect(col, Math.round(screenY), 1, Math.round(maxTerrainY - screenY) + 1)
@@ -350,8 +441,8 @@ function drawScanCanvas(
     // Cull if horizontally outside view (with small margin)
     const { screenX, screenY, horizDist } = projected
     if (screenX < -50 || screenX > W + 50) continue
-    // Only show within reasonable range
-    if (horizDist > MAX_DIST) continue
+    // Only show peaks within label range (80km — useful visibility limit)
+    if (horizDist > MAX_PEAK_DIST) continue
 
     const bearing   = calculateBearing(
       { lat: activeLat, lng: activeLng },
@@ -561,7 +652,7 @@ const ScanScreen: React.FC = () => {
   // ── Ground elevation for HUD ───────────────────────────────────────────────
 
   const groundElev = meshData
-    ? sampleMeshAt(activeLat, activeLng, meshData)
+    ? sampleMeshBilinear(activeLat, activeLng, meshData)
     : 0
 
   return (
@@ -704,7 +795,7 @@ const PeakLabel: React.FC<{
   units: 'imperial' | 'metric'
   canvasH: number
 }> = ({ pos, units, canvasH }) => {
-  const MAX_LABEL_DIST_KM = MAX_DIST / 1000
+  const MAX_LABEL_DIST_KM = MAX_PEAK_DIST / 1000  // fade peaks over 80km range
   const distFade  = Math.max(0.25, 1 - Math.pow(pos.dist_km / MAX_LABEL_DIST_KM, 0.5))
   const isNearTop = pos.screenY < canvasH * 0.22
 
