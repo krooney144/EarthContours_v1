@@ -1,4 +1,8 @@
-# Phase 2 — SCAN Screen Engineering Overhaul (Next Steps)
+# Phase 2 — SCAN Screen Engineering Overhaul
+
+> **Status: COMPLETE (v1.3)**
+> P2.1 ScanTileCache, P2.2 SkylineWorker, and P2.4 OSM peaks are all implemented and live.
+> See "Phase 2 Implementation Notes" section at the bottom for what was actually built.
 
 **Why this split exists:** Phase 1 delivers the highest-impact rendering fixes that work within the
 existing region-grid architecture (bilinear sampling, logarithmic rays, curvature, hill shading,
@@ -25,7 +29,7 @@ to 250km and unlock per-layer shading at true DEM resolution.
 
 ## Phase 2 Tasks (in priority order)
 
-### P2.1 — Multi-Resolution Tile Cache for SCAN (`src/data/ScanTileCache.ts`)
+### P2.1 — Multi-Resolution Tile Cache for SCAN (`src/data/ScanTileCache.ts`) ✅ DONE
 
 **Why:** The existing region grid is 256×256 pixels over ~220km → 860m/pixel effective resolution.
 PeakFinder-quality nearby ridgelines require z12/z13 tiles (~28m/pixel). Beyond the region extent,
@@ -119,7 +123,7 @@ function sampleBestAvailable(lat, lng, dist, mesh, tileCache): number {
 
 ---
 
-### P2.2 — Web Worker for Skyline Precomputation
+### P2.2 — Web Worker for Skyline Precomputation ✅ DONE
 
 **Why:** With 250km range and ~476 ray samples per column, computing all 360°/0.5° = 720 azimuth
 columns takes ~340,000 elevation samples. At 60fps this is negligible, but with the async tile
@@ -173,7 +177,7 @@ Pre-warm with a low-resolution pass (2° steps) first, then refine to 0.5°.
 
 ---
 
-### P2.3 — Peak Visibility Against Ridgeline
+### P2.3 — Peak Visibility Against Ridgeline (Session 3)
 
 **Why:** Currently, peak labels appear whenever a peak is geometrically within the FOV, even if
 it's actually behind a ridge. PeakFinder shows peaks only when they're on or near the ridgeline.
@@ -207,7 +211,7 @@ function isPeakVisible(
 
 ---
 
-### P2.4 — OpenStreetMap Peak Data Integration
+### P2.4 — OpenStreetMap Peak Data Integration ✅ DONE
 
 **Why:** The current 30 Colorado + 13 Alaska peaks are hardcoded. For any arbitrary viewpoint
 (Viewpoint Selection feature), we need real worldwide peak data.
@@ -251,7 +255,7 @@ export async function fetchPeaksInBounds(bounds: Bounds): Promise<Peak[]> {
 
 ---
 
-### P2.5 — Viewpoint Selection (Anywhere on Earth)
+### P2.5 — Viewpoint Selection (Session 3 — partially enabled)
 
 **Why:** The user explicitly requested this: "Via the menu option 'Viewpoint selection' you can
 discover any mountain landscape from a random location in the world."
@@ -320,3 +324,79 @@ ScanScreen
 The Phase 1 improvements are immediately visible in the app. Phase 2 improvements are significant
 but require more infrastructure work. Prioritize P2.1 (tile cache) + P2.2 (Web Worker) as a unit —
 they're tightly coupled.
+
+---
+
+## Phase 2 Implementation Notes (v1.3 — completed 2026-02-24)
+
+### What was built
+
+**`src/data/ScanTileCache.ts`** (new)
+- `distanceToZoom(distM)`: z13 (<5km), z11 (<20km), z10 (<80km), z9 (<150km), z8 (250km)
+- `ScanTileCache` class: decoded `Float32Array` grids keyed `"z/x/y"`, deduplication via `pending` Map
+- `sampleBilinear(lat, lng, zoom)` → `number | null` (null = tile not yet loaded, caller falls back)
+- `prefetchForViewer(lat, lng)` → parallel fetch of z13(5km) + z11(20km) + z8(250km) areas
+- Reuses `loadElevationTile()` / `decodeTerrarium()` from `elevationLoader.ts`
+
+**`src/data/peakLoader.ts`** (new)
+- `fetchPeaksNear(lat, lng, radiusKm)` → Overpass API → `Peak[]` sorted by elevation desc
+- IndexedDB cache keyed by 0.1°-rounded bounding box string; 24h TTL
+- Handles `ele` tag formats: `"4399"`, `"4399 m"`, `"14440 ft"` — converts ft → m automatically
+- On Overpass failure returns `[]`; ScanScreen falls back to hardcoded `terrainStore` peaks
+
+**`src/workers/skylineWorker.ts`** (new)
+- `/// <reference lib="webworker" />` for correct TypeScript types
+- Worker-safe tile loading: `createImageBitmap(blob)` + `OffscreenCanvas` (no DOM `Image`)
+- Phase 1: prefetch z13/z11/z9/z8 tiles for viewer location
+- Phase 2: 720-azimuth (0.5°/step) logarithmic ray march per azimuth — max-slope sweep
+- Accurate finite-difference hill shade computed at final ridgeline point only (not every step)
+- Returns `SkylineData` via transferable `ArrayBuffer` zero-copy: `postMessage(data, [buf1, buf2, buf3])`
+- Progress: `{type:'progress', phase, progress}` messages update the HUD loading bar
+
+**`src/core/types.ts`** (additive)
+- `SkylineData`: `angles`, `distances`, `shading` Float32Arrays + `resolution`, `numAzimuths`, `computedAt`
+- `SkylineRequest`: viewer position + mesh data + resolution + maxRange
+
+**`src/store/cameraStore.ts`** (additive)
+- `setFov(fov)` → clamp to [15, 100]
+- `applyFovScale(scale)` → `fov = clamp(fov × scale, 15, 100)` — used by pinch gesture handler
+
+**`src/screens/ScanScreen/ScanScreen.tsx`** (major rewrite)
+- `MAX_DIST = 250_000` m (was 120,000)
+- `sampleBestAvailable()`: tries ScanTileCache at distance-appropriate zoom, falls back to mesh
+- `cheapDirectionalShade(bearingDeg)`: O(1) bearing-based shade — `0.4 + cos(bearing−315°)×0.3 + 0.3`
+  - Replaces finite-difference hill shade in the real-time ray march (mobile perf requirement)
+  - Worker still computes accurate shade offline for the QUICK path
+- `drawFromSkyline()`: O(W) render — reads `SkylineData.angles/distances/shading`, no elevation lookups
+- `drawScanCanvas()`: routes to `drawFromSkyline` (QUICK) or full ray march (FULL) based on `skylineData`
+- Sky: 6-stop gradient `#000810` → `#0f2c42` + 80 deterministic stars in upper 45%
+- Horizon glow: 24px gradient + 1px crisp line
+- Pinch zoom: `handleTouchStart/Move/End` → `applyFovScale(prevDist/newDist)`
+- OSM peaks: `fetchPeaksNear(lat, lng, 130)` on location change; preferred over hardcoded if non-empty
+- Peak labels include Earth curvature correction in `projectFirstPerson()`
+- `PitchIndicator` component: vertical gauge, marker top% = `50 − (pitch_deg/80)×50`
+- Loading progress bar during tile prefetch + worker computation
+- FOV badge showing current FOV during and after pinch
+- HUD "250KM" green badge when skyline is ready
+
+**`src/screens/ScanScreen/ScanScreen.module.css`** (additions)
+- `.loadingOverlay`, `.loadingBar`, `.loadingFill` — progress display
+- `.pitchIndicator`, `.pitchTrack`, `.pitchMarker`, `.pitchZero`, `.pitchLabel`
+- `.fovBadge`, `.hudReady` (green 250KM indicator)
+- Enhanced `.peakDot` pulse animation, `.peakCard` backdrop blur
+
+### Mobile performance decisions
+- **No live hill shade**: User explicitly required smooth phone performance. The ray march path uses
+  `cheapDirectionalShade(bearingDeg)` (one cosine per column, not 4 elevation lookups per hit).
+  The QUICK path reads accurate shade precomputed by the worker.
+- **QUICK path O(W)**: Once `SkylineData` is ready, each frame is just a column-by-column array read.
+  No elevation sampling at all during pan/heading changes after the first precompute.
+- **Worker isolation**: All heavy precomputation runs in `skylineWorker.ts`. Main thread stays responsive.
+
+### What's next (Session 3)
+- **P2.3 Peak ridgeline visibility**: `SkylineData.angles` is available — compare peak elevation angle
+  to ridgeline angle at that azimuth to filter occluded summits
+- **P2.5 Worldwide viewpoints**: OSM peaks (P2.4) + ScanTileCache (P2.1) already enable arbitrary
+  locations; wire up a "Change Viewpoint" button in SCAN or MAP
+- **Session 3**: Real GPS (`navigator.geolocation`), `DeviceOrientationEvent` magnetometer for
+  heading, HTTPS deployment for camera AR overlay

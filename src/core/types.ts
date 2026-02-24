@@ -249,3 +249,43 @@ export interface ContourLine {
   elevation_m: number
   points: Array<{ x: number; y: number; z: number }>  // 3D world space points
 }
+
+// ─── SCAN Phase 2 — Skyline Precomputation ────────────────────────────────────
+
+/**
+ * Pre-computed 360° terrain skyline for the SCAN screen.
+ * Produced by `skylineWorker.ts` — the worker sends this via postMessage
+ * (with transferable ArrayBuffers) once per viewpoint change.
+ *
+ * Indexing:
+ *   aziIdx = Math.round(((bearingDeg % 360 + 360) % 360) * resolution) % numAzimuths
+ */
+export interface SkylineData {
+  /** Maximum elevation angle (radians) at each azimuth — the ridgeline silhouette */
+  angles:      Float32Array
+  /** Distance to ridgeline in metres */
+  distances:   Float32Array
+  /** NW-45° hill shade at ridgeline [0–1] */
+  shading:     Float32Array
+  /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
+  resolution:  number
+  /** Total azimuth steps = 360 × resolution */
+  numAzimuths: number
+  computedAt:  { lat: number; lng: number; elev: number; timestamp: number }
+}
+
+/**
+ * Message sent from the main thread to the skyline worker to start computation.
+ * `meshElevations` is a copied Float32Array so both threads own independent data.
+ */
+export interface SkylineRequest {
+  viewerLat:      number
+  viewerLng:      number
+  viewerElev:     number
+  meshElevations: Float32Array
+  meshWidth:      number
+  meshHeight:     number
+  meshBounds:     { north: number; south: number; east: number; west: number }
+  resolution:     number
+  maxRange:       number
+}

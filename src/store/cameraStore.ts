@@ -78,6 +78,10 @@ interface CameraStore {
   resetOrbitCamera: () => void
   /** Get the current height in feet (for display) */
   getHeightFt: () => number
+  /** Set SCAN field-of-view directly (clamped 15°–100°) — used by pinch zoom */
+  setFov: (fov: number) => void
+  /** Apply a relative FOV scale factor (> 1 = wider, < 1 = narrower) */
+  applyFovScale: (scale: number) => void
 }
 
 // ─── Store Implementation ─────────────────────────────────────────────────────
@@ -273,5 +277,18 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
 
   getHeightFt: () => {
     return Math.round(metersToFeet(get().height_m))
+  },
+
+  setFov: (fov) => {
+    const clamped = clamp(fov, 15, 100)
+    log.debug('FOV set', { fov: clamped.toFixed(1) })
+    set({ fov: clamped })
+  },
+
+  applyFovScale: (scale) => {
+    const { fov } = get()
+    const newFov = clamp(fov * scale, 15, 100)
+    log.debug('FOV scaled', { scale: scale.toFixed(3), oldFov: fov.toFixed(1), newFov: newFov.toFixed(1) })
+    set({ fov: newFov })
   },
 }))

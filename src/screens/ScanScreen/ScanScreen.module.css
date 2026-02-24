@@ -1,14 +1,21 @@
 /**
- * SCAN Screen — AR first-person terrain view
+ * SCAN Screen — AR first-person terrain view  (Phase 2)
  *
  * Layout (top to bottom):
  * 1. Compass strip (fixed at top)
- * 2. Terrain viewport (drag area, full screen)
- *    - Peak labels inside the viewport
- *    - Height slider on the right edge
+ * 2. Terrain viewport (drag area, fills screen)
+ *    - Canvas: sky + terrain + contour lines
+ *    - Peak labels (HTML overlay)
+ *    - Loading overlay (during tile prefetch + skyline computation)
+ *    - Pitch indicator (left edge)
+ *    - FOV badge (bottom-left, appears during pinch)
+ *    - Height slider (right edge)
+ *    - Drag hint (fades after first drag)
  * 3. HUD bar (fixed above nav)
  * 4. Nav bar (handled by App.tsx)
  */
+
+/* ── Screen Shell ───────────────────────────────────────────────────────────── */
 
 .screen {
   position: relative;
@@ -34,11 +41,11 @@
   border-bottom: 1px solid var(--ec-border);
   overflow: hidden;
   z-index: var(--z-compass);
-  pointer-events: none; /* Drag goes to the viewport below */
+  pointer-events: none;
   flex-shrink: 0;
 }
 
-/* Center notch/arrow that the compass scrolls under */
+/* Center notch / marker */
 .compassNotch {
   position: absolute;
   top: 0;
@@ -49,7 +56,6 @@
   z-index: 2;
   pointer-events: none;
 }
-
 .compassNotch::before {
   content: '▾';
   position: absolute;
@@ -60,7 +66,6 @@
   font-size: 14px;
   text-shadow: var(--shadow-glow);
 }
-
 .compassNotch::after {
   content: '';
   position: absolute;
@@ -72,7 +77,7 @@
   box-shadow: var(--shadow-glow);
 }
 
-/* The scrollable track — offset by heading so current direction is center */
+/* Scrollable track */
 .compassTrack {
   position: absolute;
   top: 0;
@@ -80,11 +85,9 @@
   height: 100%;
   display: flex;
   align-items: center;
-  /* transform applied inline via React based on heading */
   will-change: transform;
 }
 
-/* Individual direction label */
 .compassItem {
   width: 56px;
   display: flex;
@@ -101,10 +104,7 @@
   font-weight: 600;
   letter-spacing: 0.1em;
   color: var(--ec-text-muted);
-  transition: color var(--transition-fast), text-shadow var(--transition-fast);
 }
-
-/* Cardinal directions (N/S/E/W) are brighter */
 .compassLabel.cardinal {
   color: var(--ec-foam);
   font-size: var(--text-sm);
@@ -116,13 +116,11 @@
   height: 4px;
   background: var(--ec-navy);
 }
-
 .compassTick.cardinalTick {
   height: 6px;
   background: var(--ec-mid);
 }
 
-/* Heading degree display in compass */
 .headingDegrees {
   position: absolute;
   top: 6px;
@@ -133,27 +131,25 @@
   color: var(--ec-glow);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.05em;
-  background: rgba(0,0,0,0.3);
+  background: rgba(0, 0, 0, 0.35);
   padding: 1px 6px;
   border-radius: var(--radius-full);
+  white-space: nowrap;
 }
 
 /* ── Terrain Viewport ──────────────────────────────────────────────────────── */
 
-/* The draggable area that shows the "AR" terrain */
 .viewport {
   position: absolute;
   inset: 0;
   cursor: grab;
   overflow: hidden;
-  touch-action: none; /* Prevent browser scroll/zoom on touch drag */
+  touch-action: none;
 }
-
 .viewport:active {
   cursor: grabbing;
 }
 
-/* Simulated terrain — in Session 2 this is a Three.js <canvas> */
 .terrainCanvas {
   position: absolute;
   inset: 0;
@@ -161,35 +157,127 @@
   height: 100%;
 }
 
-/* Terrain gradient background for the MVP visual */
-.terrainBg {
+/* ── Loading Overlay ───────────────────────────────────────────────────────── */
+/* Shown during tile prefetch and skyline precomputation */
+
+.loadingOverlay {
   position: absolute;
-  inset: 0;
-  /* Simulate sky → horizon → terrain gradient */
-  background: linear-gradient(
-    180deg,
-    #060f1a 0%,        /* sky - dark */
-    #0a2035 25%,       /* sky gradient */
-    #0d2a45 48%,       /* horizon */
-    #0e3951 50%,       /* horizon line */
-    #112a3d 52%,       /* near terrain */
-    #124B6B 65%,       /* mid terrain */
-    #0d3248 85%,       /* far terrain */
-    #0a2234 100%       /* foreground */
-  );
+  top: 56px;              /* below compass strip */
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  z-index: var(--z-overlay);
+  pointer-events: none;
 }
 
-/* Contour line overlay on terrain */
-.contourOverlay {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
+.loadingBar {
+  width: 160px;
+  height: 2px;
+  background: rgba(132, 209, 219, 0.15);
+  border-radius: var(--radius-full);
   overflow: hidden;
+}
+
+.loadingFill {
+  height: 100%;
+  background: linear-gradient(to right, var(--ec-ocean), var(--ec-glow));
+  border-radius: var(--radius-full);
+  transition: width 0.3s ease-out;
+  box-shadow: 0 0 6px var(--ec-glow);
+}
+
+.loadingLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: rgba(8, 20, 35, 0.6);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+}
+
+/* ── Pitch Indicator ───────────────────────────────────────────────────────── */
+/* Vertical level gauge on the left edge */
+
+.pitchIndicator {
+  position: absolute;
+  left: var(--space-3);
+  top: 72px;                           /* below compass */
+  bottom: calc(var(--ec-nav-height) + 60px);  /* above HUD */
+  width: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-overlay);
+  pointer-events: none;
+  gap: var(--space-2);
+}
+
+.pitchTrack {
+  flex: 1;
+  width: 2px;
+  background: rgba(132, 209, 219, 0.12);
+  border-radius: var(--radius-full);
+  position: relative;
+  margin: var(--space-2) 0;
+}
+
+.pitchMarker {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 10px;
+  background: var(--ec-glow);
+  border-radius: 50%;
+  box-shadow: var(--shadow-glow);
+  transition: top 0.05s linear;
+}
+
+/* Zero-pitch crosshair — thin horizontal line at the mid-point */
+.pitchZero {
+  position: absolute;
+  top: 50%;
+  left: -3px;
+  right: -3px;
+  height: 1px;
+  background: rgba(132, 209, 219, 0.25);
+}
+
+.pitchLabel {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+/* ── FOV Badge ─────────────────────────────────────────────────────────────── */
+/* Small FOV indicator, visible so user knows current zoom level */
+
+.fovBadge {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height) + 64px);
+  left: var(--space-3);
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+  background: rgba(8, 20, 35, 0.5);
+  padding: 2px 6px;
+  border-radius: var(--radius-full);
 }
 
 /* ── Peak Labels ───────────────────────────────────────────────────────────── */
 
-/* Container for all peak labels — sits above the terrain */
 .peakLabelsLayer {
   position: absolute;
   inset: 0;
@@ -197,48 +285,45 @@
   z-index: var(--z-overlay);
 }
 
-/*
- * Individual peak label group.
- * Default layout (top to bottom): card → line → dot
- * The `top` CSS property is set inline so the DOT aligns with the peak position.
- * For peaks near the top of the viewport, `.peakLabelFlipped` reverses the stack.
- */
 .peakLabel {
   position: absolute;
   display: flex;
-  flex-direction: column;  /* card → line → dot, top to bottom */
+  flex-direction: column;
   align-items: center;
   pointer-events: none;
-  transform: translateX(-50%);  /* Center on the peak's X coordinate */
+  transform: translateX(-50%);
   transition: opacity 0.3s ease;
 }
 
-/* Flipped: dot at top, card below (used when peak is near viewport top) */
+/* Flipped variant: dot at top, card below (for peaks near the top of the viewport) */
 .peakLabelFlipped {
-  /* Flex direction stays column; JSX order is reversed to dot → line → card */
+  /* JSX already reverses the child order for this variant */
 }
 
 .peakCard {
-  background: rgba(13, 30, 46, 0.88);
+  background: rgba(10, 22, 38, 0.90);
   border: 1px solid var(--ec-border-active);
   border-radius: var(--radius-md);
-  padding: var(--space-2) var(--space-3);
+  padding: 5px 10px 4px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
   box-shadow: var(--shadow-card), var(--shadow-glow);
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   white-space: nowrap;
+  min-width: 72px;
 }
 
 .peakName {
   font-family: var(--font-display);
   font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.1em;
+  font-weight: 700;
+  letter-spacing: 0.09em;
   color: var(--ec-foam);
-  text-shadow: 0 0 8px rgba(132, 209, 219, 0.5);
+  text-shadow: 0 0 10px rgba(132, 209, 219, 0.55);
+  text-transform: uppercase;
 }
 
 .peakElev {
@@ -246,38 +331,41 @@
   font-size: var(--text-xs);
   color: var(--ec-glow);
   font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 
 .peakBearing {
   font-family: var(--font-body);
   font-size: 9px;
   color: var(--ec-text-muted);
-  text-transform: uppercase;
   letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
-/* Vertical line connecting card to dot */
+/* Vertical connector line — bright at card end, fades toward dot */
 .peakLine {
   width: 1px;
-  height: 40px;
-  /* Bright at top (card end), fades toward dot */
-  background: linear-gradient(to bottom, var(--ec-glow), rgba(132, 209, 219, 0.15));
-  box-shadow: 0 0 4px var(--ec-glow);
+  height: 38px;
+  background: linear-gradient(to bottom, rgba(132, 209, 219, 0.6), rgba(132, 209, 219, 0.08));
+  box-shadow: 0 0 4px rgba(132, 209, 219, 0.3);
 }
-
-/* Flipped gradient: bright at bottom (dot end), fades toward card */
 .peakLineDown {
-  background: linear-gradient(to top, var(--ec-glow), rgba(132, 209, 219, 0.15));
+  background: linear-gradient(to top, rgba(132, 209, 219, 0.6), rgba(132, 209, 219, 0.08));
 }
 
-/* Glowing dot at the peak position */
+/* Glowing dot pinned to the projected peak position */
 .peakDot {
   width: 8px;
   height: 8px;
   background: var(--ec-glow);
   border-radius: 50%;
-  box-shadow: var(--shadow-glow);
-  animation: pulse-glow 2s ease-in-out infinite;
+  box-shadow: 0 0 8px var(--ec-glow), 0 0 16px rgba(132, 209, 219, 0.3);
+  animation: pulse-glow 2.5s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 6px var(--ec-glow); opacity: 1; }
+  50%       { box-shadow: 0 0 14px var(--ec-glow), 0 0 24px rgba(132, 209, 219, 0.4); opacity: 0.85; }
 }
 
 /* ── Height Slider ─────────────────────────────────────────────────────────── */
@@ -285,8 +373,8 @@
 .heightSlider {
   position: absolute;
   right: var(--space-3);
-  top: 72px;  /* below compass */
-  bottom: calc(var(--ec-nav-height) + 60px);  /* above HUD */
+  top: 72px;
+  bottom: calc(var(--ec-nav-height) + 60px);
   width: 36px;
   display: flex;
   flex-direction: column;
@@ -334,7 +422,6 @@
   border-radius: 50%;
   box-shadow: var(--shadow-glow);
   cursor: ns-resize;
-  /* The thumb moves up/down — applied inline via React */
 }
 
 .heightSliderValue {
@@ -391,7 +478,13 @@
   white-space: nowrap;
 }
 
-/* Secondary sub-label below value — e.g. "AGL" under the VIEWPT reading */
+/* Ready indicator — shown when 250km skyline is available */
+.hudReady {
+  color: var(--ec-success);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
 .hudSubLabel {
   font-family: var(--font-display);
   font-size: 8px;
@@ -411,7 +504,7 @@
 
 .dragHint {
   position: absolute;
-  bottom: calc(var(--ec-nav-height) + 60px);
+  bottom: calc(var(--ec-nav-height) + 64px);
   left: 50%;
   transform: translateX(-50%);
   font-family: var(--font-body);
@@ -423,6 +516,9 @@
   pointer-events: none;
   z-index: var(--z-overlay);
   letter-spacing: 0.08em;
+  background: rgba(8, 20, 35, 0.5);
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
 }
 
 .dragHint.hidden {

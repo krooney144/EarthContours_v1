@@ -12,12 +12,12 @@ EarthContours renders geographic elevation data across the United States in thre
 
 | Screen | Description |
 |--------|-------------|
-| **SCAN** | AR first-person view — Comanche-style ray-height-field renderer, shows peaks/rivers in your heading direction |
+| **SCAN** | AR first-person panorama — PeakFinder-style silhouette renderer, 250 km range, pre-computed 360° skyline via Web Worker, worldwide OSM peak labels, pinch-to-zoom FOV, topo contour lines, ocean-depth palette |
 | **EXPLORE** | 3D terrain explorer — free-roam pan/zoom/orbit, real peak label projection, location pin from MAP |
 | **MAP** | Dark topographic map — Carto Dark Matter tiles on Canvas, with peak/river overlays |
 | **SETTINGS** | User preferences — units, labels, performance, data resolution |
 
-Elevation data comes from **AWS Terrarium RGB-encoded DEM tiles** (public dataset, no API key). Procedural terrain (Gaussian + sine waves) is kept as a Tier 4 offline fallback. Real Colorado/Alaska peak coordinates are used for POI overlays.
+Elevation data comes from **AWS Terrarium RGB-encoded DEM tiles** (public dataset, no API key). Procedural terrain (Gaussian + sine waves) is kept as a Tier 5 offline fallback. Real Colorado/Alaska/Cascades peak coordinates are included, with live OSM Overpass peak loading for any worldwide viewpoint.
 
 ---
 
@@ -58,7 +58,7 @@ EarthContours_v1/
 │   ├── App.tsx                    # Root component, routing, splash, error boundaries
 │   ├── main.tsx                   # React root init
 │   ├── screens/
-│   │   ├── ScanScreen/            # AR first-person terrain view
+│   │   ├── ScanScreen/            # AR first-person panorama — Phase 2 full implementation
 │   │   ├── ExploreScreen/         # 3D orbit + contour lines
 │   │   ├── MapScreen/             # Topographic tile map
 │   │   └── SettingsScreen/        # User preferences
@@ -71,25 +71,31 @@ EarthContours_v1/
 │   ├── store/
 │   │   ├── uiStore.ts             # Screen routing & transition animations
 │   │   ├── settingsStore.ts       # Persisted user preferences
-│   │   ├── cameraStore.ts         # AR + orbit camera state
+│   │   ├── cameraStore.ts         # AR + orbit camera state (fov, setFov, applyFovScale)
 │   │   ├── locationStore.ts       # GPS & explore location
 │   │   └── terrainStore.ts        # Elevation mesh, peaks, rivers
 │   ├── core/
-│   │   ├── types.ts               # TypeScript interfaces
+│   │   ├── types.ts               # TypeScript interfaces (incl. SkylineData, SkylineRequest)
 │   │   ├── utils.ts               # Pure utility functions
 │   │   ├── constants.ts           # Timings, defaults, breakpoints
 │   │   ├── logger.ts              # Namespace-scoped color logger
 │   │   └── errors.ts              # Custom error classes (recoverable vs fatal)
 │   ├── data/
-│   │   ├── regions.ts             # Region metadata (Colorado, Alaska)
-│   │   ├── simulatedData.ts       # 53 real Colorado/Alaska peak coords
-│   │   ├── simulatedTerrain.ts    # Procedural terrain generator
-│   │   └── elevationLoader.ts     # 4-tier elevation fallback loader
+│   │   ├── regions.ts             # Region metadata (Colorado, Alaska, Cascades)
+│   │   ├── simulatedData.ts       # Real Colorado/Alaska/Cascades peak coords
+│   │   ├── simulatedTerrain.ts    # Procedural terrain generator (Tier 5 fallback)
+│   │   ├── elevationLoader.ts     # 4-tier elevation fallback loader
+│   │   ├── ScanTileCache.ts       # Multi-zoom tile cache (z8–z13) for SCAN 250km range
+│   │   └── peakLoader.ts          # OSM Overpass peak fetcher with 24h IndexedDB cache
+│   ├── workers/
+│   │   └── skylineWorker.ts       # Web Worker — 360° skyline precomputation (720 azimuths)
 │   ├── renderer/
-│   │   └── TerrainRenderer.ts     # Three.js scaffold (Session 2)
+│   │   └── TerrainRenderer.ts     # Three.js scaffold (future WebGL)
 │   └── styles/
 │       ├── global.css             # CSS reset + app-wide styles
 │       └── palette.css            # Ocean-depth CSS variable palette
+├── CLAUDE/
+│   └── phase-2-scan-overhaul.md   # Phase 2 engineering plan + implementation notes
 ├── public/
 │   └── Favicon3.svg
 ├── index.html
@@ -114,7 +120,7 @@ EarthContours_v1/
 **Active data source (as of Session 2):** AWS Terrarium tiles (Tier 4). Mount Elbert test region (39.1°N, 106.4°W) should show max elevation ~4400m (14,440 ft). Open the browser console and filter for `ELEVATION LOAD` or `TERRAIN SOURCE` to see which tier is active at runtime.
 
 **Rendering approaches per screen:**
-- SCAN: Ray-height-field (casts rays per screen column, colors by elevation). Subscribes to `locationStore.activeLat/activeLng` — re-centers automatically when MAP sets explore location.
+- SCAN: Two-path renderer. **QUICK path** (O(W)/frame): reads pre-computed `SkylineData` from a background Web Worker — instant silhouette draw with per-azimuth hill shade. **FULL path**: logarithmic ray-height-field (1.5% step growth, 100m→250km, ~595 steps) reading from `ScanTileCache` (z8–z13 multi-zoom AWS Terrarium tiles). Earth curvature + refraction correction applied at every sample. Mobile-optimised: per-column directional shade (O(1), no finite-difference lookups) keeps frame time below 4ms. Pinch-zoom changes FOV 15°–100°. OSM Overpass peak labels worldwide with 24h cache. Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location.
 - EXPLORE: Marching squares (extracts contour line segments at elevation thresholds). Free-roam navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to. Peak labels use real `project3D()` projection from actual lat/lng. Pulsing gold location pin appears when MAP sets an explore point.
 - MAP: Canvas tile fetching with overlay graphics. Tap anywhere to set the explore location (synced to EXPLORE and SCAN via `locationStore`).
 
@@ -131,6 +137,9 @@ EarthContours_v1/
 | **1 (done)** | MVP — procedural terrain, Canvas/SVG rendering, mock data |
 | **2 (done)** | Real AWS Terrarium DEM tiles, fixed elevation loader, real Colorado terrain |
 | **2.5 (done)** | EXPLORE fixes: correct vertical exaggeration, real peak label coordinates, free-roam navigation (pan/zoom/tilt/fly-to), MAP→EXPLORE location sync with pulsing pin |
+| **v1.1 (done)** | ENU metre-space coordinate system; `orbitRadius` in metres; 3 named regions (Colorado, Alaska, Cascades) |
+| **v1.2 (done)** | SCAN Phase 1: bilinear sampling, logarithmic rays (476 steps), Earth curvature + refraction, hill shading, 120km range |
+| **v1.3 (done)** | SCAN Phase 2: `ScanTileCache` (z8–z13 multi-zoom), `skylineWorker` (720-azimuth precomputation), OSM Overpass peaks (worldwide, 24h cache), pinch-zoom FOV (15°–100°), pitch indicator, 250km range, O(1) mobile shading |
 | **3** | Real GPS, DeviceOrientation/magnetometer for true AR, Three.js WebGL renderer |
 | **Future** | Museum exhibit mode (7680×1080 triple ultra-wide) |
 

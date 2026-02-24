@@ -7,15 +7,15 @@ Quick reference for any Claude Code session in this repo.
 ## What This Project Is
 
 A **terrain visualization web app** (React + TypeScript + Vite) for exploring US elevation data.
-- **Session 2** — real AWS Terrarium DEM tiles active; procedural terrain kept as Tier 5 fallback.
+- **v1.3** — SCAN Phase 2 complete: 250km skyline worker, multi-zoom tile cache, OSM peaks, pinch zoom, pitch indicator.
 - Mobile-first, state-based routing (no URL changes), native app feel.
-- 4 screens: SCAN (AR first-person), EXPLORE (3D orbit), MAP (topo tiles), SETTINGS.
+- 4 screens: SCAN (AR first-person panorama), EXPLORE (3D orbit), MAP (topo tiles), SETTINGS.
 
 ---
 
 ## Branch
 
-Active development branch: `claude/fix-explore-screen-issues-FYjik`
+Active development branch: `claude/update-scan-feature-W1uNa`
 
 ---
 
@@ -70,20 +70,31 @@ Transitions use zoom animation stored in `uiStore`.
 | File | Purpose |
 |------|---------|
 | `src/App.tsx` | Root component — splash, routing, layouts, error boundaries |
-| `src/core/types.ts` | All TypeScript interfaces |
+| `src/core/types.ts` | All TypeScript interfaces (incl. `SkylineData`, `SkylineRequest`) |
 | `src/core/constants.ts` | Magic numbers (timings, breakpoints, defaults) |
 | `src/core/logger.ts` | `createLogger(namespace)` — colored, timestamped logs |
 | `src/core/errors.ts` | Custom error classes (recoverable vs fatal) |
 | `src/data/elevationLoader.ts` | 4-tier elevation fallback (IndexedDB → local → AWS → procedural) |
+| `src/data/ScanTileCache.ts` | Multi-zoom tile cache (z8–z13) for SCAN 250km range |
+| `src/data/peakLoader.ts` | OSM Overpass peak loader with 24h IndexedDB cache |
 | `src/data/simulatedTerrain.ts` | Procedural terrain (Gaussian peaks + sine waves) |
-| `src/data/simulatedData.ts` | 53 real Colorado/Alaska peak coords |
-| `src/renderer/TerrainRenderer.ts` | Three.js scaffold (Session 2 work) |
+| `src/data/simulatedData.ts` | Real Colorado/Alaska/Cascades peak coords |
+| `src/workers/skylineWorker.ts` | Web Worker — 360° skyline precomputation (720 azimuths) |
+| `src/renderer/TerrainRenderer.ts` | Three.js scaffold (future WebGL) |
 
 ---
 
 ## Rendering Per Screen
 
-- **SCAN**: Logarithmic ray-height-field — casts rays per screen column with 1.5% step growth (100m→120km, ~476 steps). Bilinear elevation sampling, Earth curvature + atmospheric refraction correction, and NW-45° hill shading via finite-difference surface normals. Peak labels shown up to 80km. See `CLAUDE/phase-2-scan-overhaul.md` for the Phase 2 multi-zoom tile plan (z12 near, z8 distant, Web Worker precomputation). Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location.
+- **SCAN** (v1.3 — Phase 2 complete): Two-path renderer.
+  - **QUICK path** (O(W)/frame): reads pre-computed `SkylineData` from `skylineWorker.ts` — instant silhouette from 720-azimuth precomputed skyline with per-azimuth hill shade
+  - **FULL path**: logarithmic ray march (1.5% growth, 100m→250km, ~595 steps) using `ScanTileCache` (z8–z13 multi-zoom AWS Terrarium tiles); `sampleBestAvailable()` picks zoom from distance
+  - `cheapDirectionalShade(bearingDeg)` = O(1) cosine per column (no live finite-difference normals — mobile perf)
+  - `fetchPeaksNear(lat, lng, 130)` fetches worldwide OSM peaks on location change; falls back to hardcoded peaks
+  - `applyFovScale(scale)` changes FOV via pinch gesture (15°–100°)
+  - `PitchIndicator` component on left edge; loading progress bar; FOV badge
+  - Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location
+  - See `CLAUDE/phase-2-scan-overhaul.md` for full implementation notes
 - **EXPLORE**: Marching squares — contour lines at elevation thresholds, projected via free-roam orbit camera.
   - Navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to
   - **ENU metre-space** (v1.1): all world coords in metres; `verticalExaggeration` is the ONLY modifier of Y
@@ -204,10 +215,11 @@ Regions are hand-tuned geographic chunks sized for visual quality, **not politic
 | 1 (done) | MVP — procedural terrain, Canvas/SVG rendering |
 | 2 (done) | Real AWS Terrarium DEM tiles; fixed elevation loader stack-overflow bug |
 | 2.5 (done) | EXPLORE fixes: correct vertical exaggeration (removed hidden 0.25×), real peak label coordinates via project3D(), free-roam pan/zoom/tilt/fly-to navigation, MAP→EXPLORE location sync with pulsing pin |
-| v1.1 (done) | ENU metre-space coordinate system: 1 m X = 1 m Z = 1 m Y; real physical terrain proportions; `orbitRadius` in metres; `initOrbitCamera` auto-computes from terrain bounds; `worldWidth_km` computed from actual bounds; 3 named regions in `regions.ts`; exaggeration options 1/2/4/10/20× |
-| v1.2 (done) | SCAN Phase 1 quality overhaul: bilinear elevation sampling, logarithmic ray steps (476 steps 100m→120km), Earth curvature + refraction correction, NW-45° hill shading from finite-difference normals; expanded peak data (Colorado +6, Alaska +5, Cascades 11); Cascades region peak data in terrainStore; Phase 2 plan in `CLAUDE/phase-2-scan-overhaul.md` |
-| 3 | SCAN Phase 2 (see CLAUDE/phase-2-scan-overhaul.md): multi-zoom tiles z12→z8, Web Worker SkylineData precomputation, peak ridgeline visibility, 250km range; then GPS + DeviceOrientation for true AR |
-| Future | Museum exhibit mode (7680×1080 triple ultra-wide) |
+| v1.1 (done) | ENU metre-space coordinate system: 1 m X = 1 m Z = 1 m Y; real physical terrain proportions; `orbitRadius` in metres; `initOrbitCamera` auto-computes from terrain bounds; 3 named regions in `regions.ts`; exaggeration options 1/2/4/10/20× |
+| v1.2 (done) | SCAN Phase 1: bilinear sampling, logarithmic ray steps (476 steps 100m→120km), Earth curvature + refraction, NW-45° hill shading; expanded peak data (Colorado +6, Alaska +5, Cascades 11) |
+| v1.3 (done) | SCAN Phase 2: `ScanTileCache` (z8–z13 multi-zoom), `skylineWorker` (720-azimuth precomputation), OSM Overpass peaks (worldwide, 24h cache), pinch-zoom FOV (15°–100°), pitch indicator, 250km range, O(1) mobile shading |
+| 3 | Real GPS (`navigator.geolocation`), `DeviceOrientationEvent` heading for true AR, peak ridgeline visibility (P2.3), worldwide viewpoint selection (P2.5), HTTPS deployment for camera overlay |
+| Future | Three.js WebGL renderer; museum exhibit mode (7680×1080 triple ultra-wide) |
 
 ---
 
