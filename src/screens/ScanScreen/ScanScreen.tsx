@@ -328,22 +328,27 @@ function drawScanCanvas(
 
   const peakPositions: PeakScreenPos[] = []
 
-  // Filter to visible peaks, then take top ~15 by elevation to prevent label clutter
+  // Filter to visible peaks, then take top 8 by elevation to prevent label clutter
   const visiblePeaks = skylineData
     ? peaks.filter(p => isPeakVisible(p, activeLat, activeLng, eyeElev, heading_deg, hfov, skylineData))
     : peaks.filter(p => {
-        // Without skyline, just check FOV + distance (basic filter)
+        // Without skyline, check FOV + distance
         const cosLat = Math.cos(activeLat * DEG_TO_RAD)
         const dx = (p.lng - activeLng) * 111_320 * cosLat
         const dy = (p.lat - activeLat) * 111_132
         const dist = Math.sqrt(dx * dx + dy * dy)
-        return dist <= MAX_PEAK_DIST && dist > 100
+        if (dist > MAX_PEAK_DIST || dist < 100) return false
+        const bearing = ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360
+        let angleDiff = bearing - heading_deg
+        if (angleDiff > 180) angleDiff -= 360
+        if (angleDiff < -180) angleDiff += 360
+        return Math.abs(angleDiff) <= hfov * 0.6
       })
 
-  // Sort by elevation descending, take top 15
+  // Sort by elevation descending, take top 8
   const topPeaks = visiblePeaks
     .sort((a, b) => b.elevation_m - a.elevation_m)
-    .slice(0, 15)
+    .slice(0, 8)
 
   for (const peak of topPeaks) {
     const projected = projectFirstPerson(
@@ -374,6 +379,11 @@ function drawScanCanvas(
       // ridgeline position vs geometric position — dot sits at the ridge, never floating in sky
       screenY = Math.max(ridgeScreenY, screenY)
     }
+
+    // Skip if too close horizontally to an already-added label (prevents cluster overlap).
+    // topPeaks is sorted by elevation desc so the more prominent label was added first.
+    const minSpacing = W * 0.10
+    if (peakPositions.some(p => Math.abs(p.screenX - screenX) < minSpacing)) continue
 
     peakPositions.push({
       id:          peak.id,
@@ -420,6 +430,9 @@ const ScanScreen: React.FC = () => {
   // Phase 2 infrastructure
   const skylineWorker  = useRef<Worker | null>(null)
   const rafRef         = useRef<number>(0)
+  // Ref mirror of skylineData — lets the location-change effect read the latest
+  // skyline without adding it to the dependency array (avoids re-triggering on completion).
+  const skylineDataRef = useRef<SkylineData | null>(null)
 
   const [showDragHint, setShowDragHint]       = useState(true)
   const [peakPositions, setPeakPositions]     = useState<PeakScreenPos[]>([])
@@ -454,7 +467,9 @@ const ScanScreen: React.FC = () => {
           lat: skyline.computedAt.lat.toFixed(4),
           lng: skyline.computedAt.lng.toFixed(4),
         })
-        setSkylineData(skyline as SkylineData)
+        const newSkyline = skyline as SkylineData
+        setSkylineData(newSkyline)
+        skylineDataRef.current = newSkyline   // keep ref in sync for Option 2 distance check
         setIsSkylineComputing(false)
         setSkylineProgress(1)
       }
@@ -475,8 +490,22 @@ const ScanScreen: React.FC = () => {
   useEffect(() => {
     if (!meshData) return
 
-    // Clear stale skyline so loading overlay shows while worker computes
-    setSkylineData(null)
+    // ── Option 2: skip recompute for tiny moves (< 1.5 km) ─────────────────────
+    // The ridgeline is virtually identical within 1.5 km, no need to re-ray-march.
+    const prev = skylineDataRef.current
+    if (prev) {
+      const cosLat = Math.cos(activeLat * DEG_TO_RAD)
+      const dx = (activeLng - prev.computedAt.lng) * 111_320 * cosLat
+      const dy = (activeLat - prev.computedAt.lat) * 111_132
+      if (Math.sqrt(dx * dx + dy * dy) < 1500) {
+        log.debug('Skyline recompute skipped — move < 1.5 km')
+        return
+      }
+    }
+
+    // ── Option 1: stale-while-revalidate ────────────────────────────────────────
+    // DO NOT clear skylineData here — old panorama stays visible while the worker
+    // recomputes in background. Progress bar still shows; canvas swaps on completion.
     setSkylineProgress(0)
 
     const worker = skylineWorker.current
@@ -554,8 +583,9 @@ const ScanScreen: React.FC = () => {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    // Reset transform without reallocating the pixel buffer
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    // Identity transform — drawScanCanvas works in physical pixels (canvas.width/height)
+    // so we must not scale the ctx. Peak positions are divided by dpr after returning.
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
 
     const rawPos = drawScanCanvas(
       canvas, meshData,

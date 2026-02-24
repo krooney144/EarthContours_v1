@@ -7,6 +7,7 @@ Quick reference for any Claude Code session in this repo.
 ## What This Project Is
 
 A **terrain visualization web app** (React + TypeScript + Vite) for exploring US elevation data.
+- **v1.4.1** — SCAN bugfixes: DPR coordinate mismatch (horizon was rendering at canvas bottom at dpr>1 due to `setTransform` vs physical-pixel mismatch), stale-while-revalidate skyline (old panorama visible while worker recomputes), skip recompute for moves < 1.5 km, peak label improvements (max 8, FOV-gated fallback filter, horizontal deduplication at 10% canvas-width spacing).
 - **v1.4** — SCAN performance overhaul: worker-only rendering (no main-thread ray march), canvas RAF gating, ridgeline peak filtering, peak dot snap to ridgeline, natural drag direction.
 - Mobile-first, state-based routing (no URL changes), native app feel.
 - 4 screens: SCAN (AR first-person panorama), EXPLORE (3D orbit), MAP (topo tiles), SETTINGS.
@@ -86,11 +87,14 @@ Transitions use zoom animation stored in `uiStore`.
 
 ## Rendering Per Screen
 
-- **SCAN** (v1.4 — worker-only rendering):
+- **SCAN** (v1.4.1 — worker-only rendering + bugfixes):
   - **Single rendering path** — QUICK path only: reads pre-computed `SkylineData` from `skylineWorker.ts` (O(W)/frame). Main thread shows sky + "Computing panorama…" loading overlay until worker completes. No main-thread ray march.
   - **No double tile fetching** — only the worker fetches AWS Terrarium tiles via `ScanTileCache`. Main thread does not prefetch tiles.
   - **Canvas RAF gating** — `resizeCanvas()` only runs on ResizeObserver; `redrawCanvas()` is gated through `requestAnimationFrame` to collapse rapid pointer events into one draw per frame.
-  - **Peak visibility filter** — `isPeakVisible()` checks each peak's elevation angle against the ridgeline angle in `skylineData.angles`. Only peaks above the ridge are shown; max 15 most prominent per view.
+  - **Physical-pixel coordinate system** — `ctx.setTransform(1,0,0,1,0,0)` (identity); `drawScanCanvas` works in `canvas.width/height` (physical pixels). Peak positions divided by `dpr` only when converting to HTML overlay CSS coords. Using `setTransform(dpr,...)` here caused the horizon to render at the canvas bottom at dpr>1.
+  - **Stale-while-revalidate** — on location change, old skyline stays visible while worker recomputes in background; `skylineDataRef` mirrors state so the effect can read it without a stale closure. Progress bar still shows during recompute.
+  - **Skip recompute for moves < 1.5 km** — checks distance from `skylineData.computedAt` before posting to worker; ridgeline is visually identical at that scale.
+  - **Peak visibility filter** — `isPeakVisible()` checks each peak's elevation angle against the ridgeline angle in `skylineData.angles`. Only peaks above the ridge are shown; max 8 most prominent per view. Fallback filter (no skyline) also applies FOV check. Horizontal deduplication: peaks within 10% of canvas width of a higher-elevation label are skipped.
   - **Peak dot snapped to ridgeline** — `screenY` overridden to ridgeline Y from skyline data so dots sit on the terrain silhouette, not floating in sky.
   - **Natural drag direction** — `applyARDrag` negates deltaX so drag right → view pans right (heading decreases), matching PeakFinder behaviour.
   - `fetchPeaksNear(lat, lng, 130)` fetches worldwide OSM peaks on location change; falls back to hardcoded peaks
@@ -221,6 +225,7 @@ Regions are hand-tuned geographic chunks sized for visual quality, **not politic
 | v1.2 (done) | SCAN Phase 1: bilinear sampling, logarithmic ray steps (476 steps 100m→120km), Earth curvature + refraction, NW-45° hill shading; expanded peak data (Colorado +6, Alaska +5, Cascades 11) |
 | v1.3 (done) | SCAN Phase 2: `ScanTileCache` (z8–z13 multi-zoom), `skylineWorker` (720-azimuth precomputation), OSM Overpass peaks (worldwide, 24h cache), pinch-zoom FOV (15°–100°), pitch indicator, 250km range, O(1) mobile shading |
 | v1.4 (done) | SCAN performance overhaul: worker-only rendering (removed main-thread ray march + double tile fetch), canvas RAF gating + ResizeObserver-only resize, ridgeline peak visibility filter (max 15), peak dot snap to ridgeline Y, natural drag direction (negated deltaX) |
+| v1.4.1 (done) | SCAN bugfixes: DPR coordinate mismatch fixed (horizon now correct at dpr>1), stale-while-revalidate skyline, skip recompute for moves < 1.5 km, peak labels max 8 + FOV-gated fallback + horizontal deduplication |
 | 3 | Real GPS (`navigator.geolocation`), `DeviceOrientationEvent` heading for true AR, worldwide viewpoint selection, HTTPS deployment for camera overlay |
 | Future | Three.js WebGL renderer; museum exhibit mode (7680×1080 triple ultra-wide) |
 
