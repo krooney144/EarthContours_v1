@@ -7,7 +7,7 @@ Quick reference for any Claude Code session in this repo.
 ## What This Project Is
 
 A **terrain visualization web app** (React + TypeScript + Vite) for exploring US elevation data.
-- **v1.3** — SCAN Phase 2 complete: 250km skyline worker, multi-zoom tile cache, OSM peaks, pinch zoom, pitch indicator.
+- **v1.4** — SCAN performance overhaul: worker-only rendering (no main-thread ray march), canvas RAF gating, ridgeline peak filtering, peak dot snap to ridgeline, natural drag direction.
 - Mobile-first, state-based routing (no URL changes), native app feel.
 - 4 screens: SCAN (AR first-person panorama), EXPLORE (3D orbit), MAP (topo tiles), SETTINGS.
 
@@ -15,7 +15,7 @@ A **terrain visualization web app** (React + TypeScript + Vite) for exploring US
 
 ## Branch
 
-Active development branch: `claude/update-scan-feature-W1uNa`
+Active development branch: `claude/fix-scan-performance-OKa7Z`
 
 ---
 
@@ -86,15 +86,17 @@ Transitions use zoom animation stored in `uiStore`.
 
 ## Rendering Per Screen
 
-- **SCAN** (v1.3 — Phase 2 complete): Two-path renderer.
-  - **QUICK path** (O(W)/frame): reads pre-computed `SkylineData` from `skylineWorker.ts` — instant silhouette from 720-azimuth precomputed skyline with per-azimuth hill shade
-  - **FULL path**: logarithmic ray march (1.5% growth, 100m→250km, ~595 steps) using `ScanTileCache` (z8–z13 multi-zoom AWS Terrarium tiles); `sampleBestAvailable()` picks zoom from distance
-  - `cheapDirectionalShade(bearingDeg)` = O(1) cosine per column (no live finite-difference normals — mobile perf)
+- **SCAN** (v1.4 — worker-only rendering):
+  - **Single rendering path** — QUICK path only: reads pre-computed `SkylineData` from `skylineWorker.ts` (O(W)/frame). Main thread shows sky + "Computing panorama…" loading overlay until worker completes. No main-thread ray march.
+  - **No double tile fetching** — only the worker fetches AWS Terrarium tiles via `ScanTileCache`. Main thread does not prefetch tiles.
+  - **Canvas RAF gating** — `resizeCanvas()` only runs on ResizeObserver; `redrawCanvas()` is gated through `requestAnimationFrame` to collapse rapid pointer events into one draw per frame.
+  - **Peak visibility filter** — `isPeakVisible()` checks each peak's elevation angle against the ridgeline angle in `skylineData.angles`. Only peaks above the ridge are shown; max 15 most prominent per view.
+  - **Peak dot snapped to ridgeline** — `screenY` overridden to ridgeline Y from skyline data so dots sit on the terrain silhouette, not floating in sky.
+  - **Natural drag direction** — `applyARDrag` negates deltaX so drag right → view pans right (heading decreases), matching PeakFinder behaviour.
   - `fetchPeaksNear(lat, lng, 130)` fetches worldwide OSM peaks on location change; falls back to hardcoded peaks
   - `applyFovScale(scale)` changes FOV via pinch gesture (15°–100°)
   - `PitchIndicator` component on left edge; loading progress bar; FOV badge
   - Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location
-  - See `CLAUDE/phase-2-scan-overhaul.md` for full implementation notes
 - **EXPLORE**: Marching squares — contour lines at elevation thresholds, projected via free-roam orbit camera.
   - Navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to
   - **ENU metre-space** (v1.1): all world coords in metres; `verticalExaggeration` is the ONLY modifier of Y
@@ -218,7 +220,8 @@ Regions are hand-tuned geographic chunks sized for visual quality, **not politic
 | v1.1 (done) | ENU metre-space coordinate system: 1 m X = 1 m Z = 1 m Y; real physical terrain proportions; `orbitRadius` in metres; `initOrbitCamera` auto-computes from terrain bounds; 3 named regions in `regions.ts`; exaggeration options 1/2/4/10/20× |
 | v1.2 (done) | SCAN Phase 1: bilinear sampling, logarithmic ray steps (476 steps 100m→120km), Earth curvature + refraction, NW-45° hill shading; expanded peak data (Colorado +6, Alaska +5, Cascades 11) |
 | v1.3 (done) | SCAN Phase 2: `ScanTileCache` (z8–z13 multi-zoom), `skylineWorker` (720-azimuth precomputation), OSM Overpass peaks (worldwide, 24h cache), pinch-zoom FOV (15°–100°), pitch indicator, 250km range, O(1) mobile shading |
-| 3 | Real GPS (`navigator.geolocation`), `DeviceOrientationEvent` heading for true AR, peak ridgeline visibility (P2.3), worldwide viewpoint selection (P2.5), HTTPS deployment for camera overlay |
+| v1.4 (done) | SCAN performance overhaul: worker-only rendering (removed main-thread ray march + double tile fetch), canvas RAF gating + ResizeObserver-only resize, ridgeline peak visibility filter (max 15), peak dot snap to ridgeline Y, natural drag direction (negated deltaX) |
+| 3 | Real GPS (`navigator.geolocation`), `DeviceOrientationEvent` heading for true AR, worldwide viewpoint selection, HTTPS deployment for camera overlay |
 | Future | Three.js WebGL renderer; museum exhibit mode (7680×1080 triple ultra-wide) |
 
 ---

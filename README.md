@@ -12,7 +12,7 @@ EarthContours renders geographic elevation data across the United States in thre
 
 | Screen | Description |
 |--------|-------------|
-| **SCAN** | AR first-person panorama — PeakFinder-style silhouette renderer, 250 km range, pre-computed 360° skyline via Web Worker, worldwide OSM peak labels, pinch-to-zoom FOV, topo contour lines, ocean-depth palette |
+| **SCAN** | AR first-person panorama — PeakFinder-style silhouette renderer, 250 km range, worker-only rendering (no main-thread ray march), ridgeline peak visibility filter, natural drag panning, ocean-depth palette |
 | **EXPLORE** | 3D terrain explorer — free-roam pan/zoom/orbit, real peak label projection, location pin from MAP |
 | **MAP** | Dark topographic map — Carto Dark Matter tiles on Canvas, with peak/river overlays |
 | **SETTINGS** | User preferences — units, labels, performance, data resolution |
@@ -120,7 +120,7 @@ EarthContours_v1/
 **Active data source (as of Session 2):** AWS Terrarium tiles (Tier 4). Mount Elbert test region (39.1°N, 106.4°W) should show max elevation ~4400m (14,440 ft). Open the browser console and filter for `ELEVATION LOAD` or `TERRAIN SOURCE` to see which tier is active at runtime.
 
 **Rendering approaches per screen:**
-- SCAN: Two-path renderer. **QUICK path** (O(W)/frame): reads pre-computed `SkylineData` from a background Web Worker — instant silhouette draw with per-azimuth hill shade. **FULL path**: logarithmic ray-height-field (1.5% step growth, 100m→250km, ~595 steps) reading from `ScanTileCache` (z8–z13 multi-zoom AWS Terrarium tiles). Earth curvature + refraction correction applied at every sample. Mobile-optimised: per-column directional shade (O(1), no finite-difference lookups) keeps frame time below 4ms. Pinch-zoom changes FOV 15°–100°. OSM Overpass peak labels worldwide with 24h cache. Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location.
+- SCAN (v1.4): **Single rendering path** — QUICK path only. Worker precomputes a 720-azimuth 360° skyline (tiles + ray march in background). Main thread shows sky + "Computing panorama…" progress overlay until worker completes, then snaps to the full panorama — O(W) per frame during panning. No main-thread ray march, no double tile fetching. Canvas resize is gated to ResizeObserver only; redraws are gated through `requestAnimationFrame` to cap at 60fps. Peak visibility is filtered through ridgeline angles — only peaks above the ridge are shown (max 15). Peak dots snap to ridgeline Y position. Drag direction is natural (drag right = pan right). Pinch-zoom changes FOV 15°–100°. OSM Overpass peak labels worldwide with 24h cache. Subscribes to `locationStore.activeLat/activeLng` — re-centers when MAP sets explore location.
 - EXPLORE: Marching squares (extracts contour line segments at elevation thresholds). Free-roam navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to. Peak labels use real `project3D()` projection from actual lat/lng. Pulsing gold location pin appears when MAP sets an explore point.
 - MAP: Canvas tile fetching with overlay graphics. Tap anywhere to set the explore location (synced to EXPLORE and SCAN via `locationStore`).
 
@@ -140,6 +140,7 @@ EarthContours_v1/
 | **v1.1 (done)** | ENU metre-space coordinate system; `orbitRadius` in metres; 3 named regions (Colorado, Alaska, Cascades) |
 | **v1.2 (done)** | SCAN Phase 1: bilinear sampling, logarithmic rays (476 steps), Earth curvature + refraction, hill shading, 120km range |
 | **v1.3 (done)** | SCAN Phase 2: `ScanTileCache` (z8–z13 multi-zoom), `skylineWorker` (720-azimuth precomputation), OSM Overpass peaks (worldwide, 24h cache), pinch-zoom FOV (15°–100°), pitch indicator, 250km range, O(1) mobile shading |
+| **v1.4 (done)** | SCAN performance overhaul: worker-only rendering (removed main-thread ray march + double tile fetch), canvas RAF gating + ResizeObserver-only resize, ridgeline peak visibility filter (max 15), peak dot snap to ridgeline Y, natural drag direction |
 | **3** | Real GPS, DeviceOrientation/magnetometer for true AR, Three.js WebGL renderer |
 | **Future** | Museum exhibit mode (7680×1080 triple ultra-wide) |
 

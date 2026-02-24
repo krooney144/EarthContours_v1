@@ -1,34 +1,22 @@
 /**
- * EarthContours — SCAN Screen  (Phase 2)
+ * EarthContours — SCAN Screen  (v1.4)
  *
  * First-person terrain panorama with PeakFinder-style aesthetics.
  *
- * ── Rendering modes ──────────────────────────────────────────────────────────
- *
- *  QUICK (skyline available):
- *    Reads pre-computed SkylineData from the Web Worker — O(W) per frame.
- *    Silhouette rendered from ridgeline angles; smooth 60-fps panning.
- *
- *  FULL (fallback / high-quality):
- *    Per-column logarithmic ray march using ScanTileCache for multi-zoom tiles.
- *    Runs automatically when SkylineData is stale or unavailable.
+ * ── Rendering architecture ───────────────────────────────────────────────────
+ *  Worker computes a 720-azimuth 360° skyline in background (tiles + ray march).
+ *  Main thread shows sky + loading overlay while worker runs, then snaps to the
+ *  full panorama on worker completion — O(W) per frame during panning (QUICK path).
  *
  * ── Layers (painter's order) ─────────────────────────────────────────────────
  *   1  Sky gradient   — deep void → atmospheric haze with horizon glow
- *   2  Terrain fill   — silhouette fill from ridgeline to bottom (distance-shaded)
- *   3  Contour lines  — marching squares projected into first-person space
- *   4  Horizon glow   — thin teal line at the horizon
- *   5  Peak labels    — HTML overlay anchored to projected peak positions
+ *   2  Terrain fill   — silhouette fill from ridgeline to bottom (worker skyline)
+ *   3  Horizon glow   — thin teal line at the horizon
+ *   4  Peak labels    — HTML overlay; only visible ridgeline peaks, max 15
  *
- * ── Phase 2 additions ────────────────────────────────────────────────────────
- *   • ScanTileCache   — multi-zoom tiles (z8→z13) for 250 km range
- *   • skylineWorker   — Web Worker precomputes 360° ridgeline in background
- *   • peakLoader      — live OSM Overpass peaks for any viewpoint worldwide
- *   • Dynamic FOV     — pinch zoom changes field of view (15°–100°)
- *   • Pitch indicator — vertical level gauge on left edge
- *   • Curvature in    — Earth curvature applied to peak label projections
- *     peak labels
- *   • Loading overlay — "Computing panorama…" progress during worker computation
+ * ── Peak visibility ──────────────────────────────────────────────────────────
+ *   isPeakVisible() compares peak elevation angle against skyline ridgeline angle
+ *   at that azimuth. Dots are snapped to the ridgeline Y so they sit on the ridge.
  *
  * ── Projection math (ENU → screen) ──────────────────────────────────────────
  *   dx_east  = (lng − viewerLng) × 111 320 × cos(viewerLat)
@@ -53,8 +41,6 @@ import {
   formatElevation, calculateBearing,
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
-import { marchingSquares } from '../../renderer/marchingSquares'
-import { ScanTileCache, distanceToZoom } from '../../data/ScanTileCache'
 import { fetchPeaksNear }                from '../../data/peakLoader'
 import type { Peak, TerrainMeshData, SkylineData, SkylineRequest } from '../../core/types'
 import styles from './ScanScreen.module.css'
@@ -70,19 +56,6 @@ const EARTH_R           = 6_371_000  // Earth radius (m)
 const REFRACTION_K      = 0.13       // Atmospheric refraction coefficient
 const DEG_TO_RAD        = Math.PI / 180
 const SKYLINE_RESOLUTION = 2         // 0.5° per step = 720 azimuths for full 360°
-
-// Pre-computed logarithmic ray distances, far→near (250 km).
-// ~595 steps at 1.5% growth from 100 m → 250 km.
-const RAY_DISTANCES: Float32Array = (() => {
-  const arr: number[] = []
-  let d = 100
-  while (d <= MAX_DIST) {
-    arr.push(d)
-    d *= 1.015
-  }
-  arr.reverse()
-  return new Float32Array(arr)
-})()
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -125,42 +98,6 @@ function sampleMeshBilinear(lat: number, lng: number, mesh: TerrainMeshData): nu
     elevations[y1 * width + x0] * (1 - fx) * fy +
     elevations[y1 * width + x1] * fx       * fy
   )
-}
-
-/** Best-available elevation: ScanTileCache at appropriate zoom, then mesh fallback. */
-function sampleBestAvailable(
-  lat: number, lng: number, dist: number,
-  mesh: TerrainMeshData,
-  tileCache: ScanTileCache,
-): number {
-  const zoom = distanceToZoom(dist)
-  if (zoom >= 11) {
-    const hi = tileCache.sampleBilinear(lat, lng, zoom)
-    if (hi !== null) return hi
-  } else {
-    const hi = tileCache.sampleBilinear(lat, lng, zoom)
-    if (hi !== null) return hi
-  }
-  return sampleMeshBilinear(lat, lng, mesh)
-}
-
-// ─── Cheap Directional Shade ──────────────────────────────────────────────────
-
-/**
- * O(1) bearing-based shade for the full ray-march path.
- *
- * Sun is from NW (315°) at 45° altitude.  Terrain faces pointing toward SE–S–E
- * are lit (shade → 1.0); faces pointing toward NW are in shadow (shade → 0.4).
- *
- * This avoids the 4 extra elevation lookups of finite-difference normals and
- * runs smoothly at 60 fps on mobile while still conveying 3-D depth.
- * The skyline worker computes accurate finite-difference hill shade offline.
- */
-function cheapDirectionalShade(bearingDeg: number): number {
-  const SUN_BEARING = 315  // NW
-  const cosAngle = Math.cos((bearingDeg - SUN_BEARING) * DEG_TO_RAD)
-  // Map [-1, 1] → [0.4, 1.0]
-  return 0.4 + cosAngle * 0.3 + 0.3
 }
 
 // ─── First-Person Projection ──────────────────────────────────────────────────
@@ -226,6 +163,50 @@ function terrainColor(dist: number, shade: number): [number, number, number] {
   return [r, gr, b]
 }
 
+// ─── Peak Visibility Check ────────────────────────────────────────────────────
+
+/**
+ * Check if a peak is visible above the terrain ridgeline.
+ * Uses pre-computed SkylineData to compare the peak's elevation angle
+ * against the maximum terrain angle at that azimuth.
+ */
+function isPeakVisible(
+  peak: Peak,
+  viewerLat: number, viewerLng: number, viewerElev: number,
+  heading_deg: number, hfov: number,
+  skyline: SkylineData,
+): boolean {
+  const cosLat = Math.cos(viewerLat * DEG_TO_RAD)
+  const dx = (peak.lng - viewerLng) * 111_320 * cosLat
+  const dy = (peak.lat - viewerLat) * 111_132
+  const dist = Math.sqrt(dx * dx + dy * dy)
+
+  if (dist > MAX_PEAK_DIST || dist < 100) return false
+
+  // Bearing from viewer to peak
+  const bearing = ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360
+
+  // Check if peak is within the current FOV (with margin)
+  let angleDiff = bearing - heading_deg
+  if (angleDiff > 180) angleDiff -= 360
+  if (angleDiff < -180) angleDiff += 360
+  if (Math.abs(angleDiff) > hfov * 0.6) return false  // outside FOV
+
+  // Earth curvature correction
+  const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+  const peakAngle = Math.atan2(peak.elevation_m - curvDrop - viewerElev, dist)
+
+  // Ridgeline angle at this azimuth from skyline data
+  const normBearing = ((bearing % 360) + 360) % 360
+  const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
+  const ridgeAngle = skyline.angles[aziIdx]
+
+  // Peak is visible if its elevation angle is at or above the ridgeline.
+  // Allow a small tolerance (0.15°) so peaks right at the ridge still show.
+  const tolerance = 0.15 * DEG_TO_RAD
+  return peakAngle >= ridgeAngle - tolerance
+}
+
 // ─── Quick Render (SkylineData) ───────────────────────────────────────────────
 
 /**
@@ -270,8 +251,6 @@ function drawFromSkyline(
 function drawScanCanvas(
   canvas: HTMLCanvasElement,
   mesh: TerrainMeshData,
-  tileCache: ScanTileCache,
-  contourElevations: number[],
   peaks: Peak[],
   heading_deg: number,
   pitch_deg: number,
@@ -279,7 +258,6 @@ function drawScanCanvas(
   activeLat: number,
   activeLng: number,
   hfov: number,
-  showContours: boolean,
   skylineData: SkylineData | null,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
@@ -295,7 +273,6 @@ function drawScanCanvas(
   const vfovRad  = VFOV * DEG_TO_RAD
   const hfovRad  = hfov * DEG_TO_RAD
   const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
-  const cosLat   = Math.cos(activeLat * DEG_TO_RAD)
 
   // ── 1. Sky gradient ─────────────────────────────────────────────────────────
   // Multi-stop gradient from deep void (top) through ocean navy to horizon haze.
@@ -329,101 +306,13 @@ function drawScanCanvas(
   ctx.restore()
 
   // ── 2. Terrain silhouette ────────────────────────────────────────────────────
-
   if (skylineData) {
-    // QUICK PATH — read pre-computed ridgeline angles (O(W) per frame)
     drawFromSkyline(ctx, skylineData, heading_deg, pitch_deg, hfov, W, H)
-  } else {
-    // FULL PATH — per-column logarithmic ray march with multi-zoom tile cache.
-    // Hill shade uses a cheap O(1) directional approximation (no extra elevation
-    // lookups) so it runs smoothly at 60 fps on mobile.
-    for (let col = 0; col < W; col++) {
-      const bearingDeg = heading_deg + (col / W - 0.5) * hfov
-      const bearingRad = bearingDeg * DEG_TO_RAD
-      const sinB = Math.sin(bearingRad)
-      const cosB = Math.cos(bearingRad)
-
-      // Compute shade once per column (it only depends on bearing direction)
-      const colShade = cheapDirectionalShade(bearingDeg)
-
-      let maxTerrainY = H
-
-      for (let i = 0; i < RAY_DISTANCES.length; i++) {
-        const dist = RAY_DISTANCES[i]
-
-        const sampleLat = activeLat + (cosB * dist) / 111_132
-        const sampleLng = activeLng + (sinB * dist) / (111_320 * cosLat)
-
-        const rawElev  = sampleBestAvailable(sampleLat, sampleLng, dist, mesh, tileCache)
-        const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-        const effElev  = rawElev - curvDrop
-
-        const elevAngle = Math.atan2(effElev - eyeElev, dist)
-        const screenY   = horizonY - elevAngle * (H / vfovRad)
-
-        if (screenY < maxTerrainY) {
-          const [r, gr, b] = terrainColor(dist, colShade)
-          ctx.fillStyle = `rgb(${r},${gr},${b})`
-          ctx.fillRect(col, Math.round(screenY), 1, Math.round(maxTerrainY - screenY) + 1)
-          maxTerrainY = screenY
-        }
-      }
-    }
   }
+  // else: no terrain drawn — loading overlay shows "Computing panorama..."
 
-  // ── 3. Contour lines — marching squares + first-person projection ────────────
-
-  if (showContours && contourElevations.length > 0) {
-    const { elevations, width, height, bounds, minElevation_m, maxElevation_m } = mesh
-    const elevRange = maxElevation_m - minElevation_m || 1
-    const latRange  = bounds.north - bounds.south
-    const lngRange  = bounds.east  - bounds.west
-
-    for (const elev of contourElevations) {
-      const t       = (elev - minElevation_m) / elevRange
-      const isIndex = elev % 500 === 0
-
-      // Ocean-depth tint: low = dark navy, high = bright teal
-      const cr = Math.round(14  + t * (132 - 14))
-      const cg = Math.round(75  + t * (209 - 75))
-      const cb = Math.round(107 + t * (219 - 107))
-
-      const segments = marchingSquares(elevations, width, height, elev)
-
-      for (const seg of segments) {
-        const lat1 = bounds.north - seg.y1 * latRange
-        const lng1 = bounds.west  + seg.x1 * lngRange
-        const lat2 = bounds.north - seg.y2 * latRange
-        const lng2 = bounds.west  + seg.x2 * lngRange
-
-        const p1 = projectFirstPerson(lat1, lng1, elev, activeLat, activeLng, eyeElev, heading_deg, pitch_deg, hfov, W, H)
-        const p2 = projectFirstPerson(lat2, lng2, elev, activeLat, activeLng, eyeElev, heading_deg, pitch_deg, hfov, W, H)
-        if (!p1 || !p2) continue
-
-        if (p1.screenX < -W && p2.screenX < -W) continue
-        if (p1.screenX > W * 2 && p2.screenX > W * 2) continue
-        if (p1.screenY < -H && p2.screenY < -H) continue
-        if (p1.screenY > H * 2 && p2.screenY > H * 2) continue
-
-        const avgDist     = (p1.horizDist + p2.horizDist) * 0.5
-        const depthT      = Math.max(0, 1 - Math.pow(avgDist / MAX_DIST, 0.65))
-        const baseOpacity = isIndex ? 0.72 : 0.40
-        const opacity     = depthT * baseOpacity
-        if (opacity < 0.03) continue
-
-        const blueShift = (1 - depthT) * 40
-        ctx.beginPath()
-        ctx.strokeStyle = `rgba(${Math.max(0, cr - blueShift).toFixed(0)},${Math.max(0, cg - blueShift * 0.3).toFixed(0)},${Math.min(255, cb + blueShift * 0.5).toFixed(0)},${opacity.toFixed(3)})`
-        ctx.lineWidth = isIndex ? 1.5 : 0.9
-        ctx.moveTo(p1.screenX, p1.screenY)
-        ctx.lineTo(p2.screenX, p2.screenY)
-        ctx.stroke()
-      }
-    }
-  }
-
-  // ── 4. Horizon glow ──────────────────────────────────────────────────────────
-  // Soft teal glow centred on the horizon line — stronger than Phase 1 version
+  // ── 3. Horizon glow ──────────────────────────────────────────────────────────
+  // Soft teal glow centred on the horizon line
   const glowGrad = ctx.createLinearGradient(0, horizonY - 12, 0, horizonY + 12)
   glowGrad.addColorStop(0,   'rgba(132, 209, 219, 0)')
   glowGrad.addColorStop(0.5, 'rgba(132, 209, 219, 0.22)')
@@ -439,7 +328,24 @@ function drawScanCanvas(
 
   const peakPositions: PeakScreenPos[] = []
 
-  for (const peak of peaks) {
+  // Filter to visible peaks, then take top ~15 by elevation to prevent label clutter
+  const visiblePeaks = skylineData
+    ? peaks.filter(p => isPeakVisible(p, activeLat, activeLng, eyeElev, heading_deg, hfov, skylineData))
+    : peaks.filter(p => {
+        // Without skyline, just check FOV + distance (basic filter)
+        const cosLat = Math.cos(activeLat * DEG_TO_RAD)
+        const dx = (p.lng - activeLng) * 111_320 * cosLat
+        const dy = (p.lat - activeLat) * 111_132
+        const dist = Math.sqrt(dx * dx + dy * dy)
+        return dist <= MAX_PEAK_DIST && dist > 100
+      })
+
+  // Sort by elevation descending, take top 15
+  const topPeaks = visiblePeaks
+    .sort((a, b) => b.elevation_m - a.elevation_m)
+    .slice(0, 15)
+
+  for (const peak of topPeaks) {
     const projected = projectFirstPerson(
       peak.lat, peak.lng, peak.elevation_m,
       activeLat, activeLng, eyeElev,
@@ -447,9 +353,27 @@ function drawScanCanvas(
     )
     if (!projected) continue
 
-    const { screenX, screenY, horizDist } = projected
+    let { screenX, screenY, horizDist } = projected
     if (screenX < -50 || screenX > W + 50) continue
     if (horizDist > MAX_PEAK_DIST) continue
+
+    // Snap dot to ridgeline Y position when skyline data is available
+    if (skylineData) {
+      const bearing = calculateBearing(
+        { lat: activeLat, lng: activeLng },
+        { lat: peak.lat, lng: peak.lng },
+      )
+      const normBearing = ((bearing % 360) + 360) % 360
+      const aziIdx = Math.round(normBearing * skylineData.resolution) % skylineData.numAzimuths
+      const ridgeAngle = skylineData.angles[aziIdx]
+
+      const vfovRad = VFOV * DEG_TO_RAD
+      const ridgeScreenY = horizonY - ridgeAngle * (H / vfovRad)
+
+      // Use the lower screen position (higher pixel Y = lower in image) of:
+      // ridgeline position vs geometric position — dot sits at the ridge, never floating in sky
+      screenY = Math.max(ridgeScreenY, screenY)
+    }
 
     peakPositions.push({
       id:          peak.id,
@@ -466,7 +390,7 @@ function drawScanCanvas(
     heading:      heading_deg.toFixed(1),
     pitch:        pitch_deg.toFixed(1),
     hfov:         hfov.toFixed(1),
-    mode:         skylineData ? 'quick/skyline' : 'full/raycast',
+    mode:         skylineData ? 'quick/skyline' : 'loading',
     visiblePeaks: peakPositions.length,
   })
 
@@ -481,8 +405,8 @@ const ScanScreen: React.FC = () => {
     applyARDrag, setHeightFromSlider, applyFovScale,
   } = useCameraStore()
   const { activeLat, activeLng }               = useLocationStore()
-  const { peaks, meshData, contourElevations } = useTerrainStore()
-  const { units, showPeakLabels, showContourLines } = useSettingsStore()
+  const { peaks, meshData } = useTerrainStore()
+  const { units, showPeakLabels } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -494,15 +418,14 @@ const ScanScreen: React.FC = () => {
   })
 
   // Phase 2 infrastructure
-  const scanTileCache  = useRef<ScanTileCache>(new ScanTileCache())
   const skylineWorker  = useRef<Worker | null>(null)
+  const rafRef         = useRef<number>(0)
 
   const [showDragHint, setShowDragHint]       = useState(true)
   const [peakPositions, setPeakPositions]     = useState<PeakScreenPos[]>([])
   const [canvasCSSSize, setCanvasCSSSize]     = useState({ w: 0, h: 0 })
   const [skylineData, setSkylineData]         = useState<SkylineData | null>(null)
   const [osmPeaks, setOsmPeaks]               = useState<Peak[]>([])
-  const [isPrefetching, setIsPrefetching]     = useState(false)
   const [isSkylineComputing, setIsSkylineComputing] = useState(false)
   const [skylineProgress, setSkylineProgress] = useState(0)
 
@@ -546,21 +469,16 @@ const ScanScreen: React.FC = () => {
     return () => { worker.terminate() }
   }, [])
 
-  // ── Tile prefetch + skyline computation on location change ──────────────────
+  // ── Skyline computation on location change ────────────────────────────────
+  // Only the worker fetches tiles — main thread shows loading state until done.
 
   useEffect(() => {
     if (!meshData) return
 
-    // Clear stale skyline immediately so we fall back to ray march
+    // Clear stale skyline so loading overlay shows while worker computes
     setSkylineData(null)
     setSkylineProgress(0)
 
-    // 1. Prefetch tiles on main thread (for real-time ray march)
-    setIsPrefetching(true)
-    scanTileCache.current.prefetchForViewer(activeLat, activeLng)
-      .finally(() => setIsPrefetching(false))
-
-    // 2. Launch worker for full 250km skyline
     const worker = skylineWorker.current
     if (!worker) return
 
@@ -603,55 +521,89 @@ const ScanScreen: React.FC = () => {
     return () => { cancelled = true }
   }, [activeLat, activeLng])
 
+  // ── Canvas sizing (only on resize) ────────────────────────────────────────
+
+  const resizeCanvas = useCallback(() => {
+    const canvas = terrainCanvasRef.current
+    if (!canvas) return
+
+    const rect = canvas.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return
+
+    const dpr  = window.devicePixelRatio || 1
+    const newW = Math.round(rect.width  * dpr)
+    const newH = Math.round(rect.height * dpr)
+
+    // Only reallocate the pixel buffer if the size actually changed
+    if (canvas.width !== newW || canvas.height !== newH) {
+      canvas.width  = newW
+      canvas.height = newH
+    }
+
+    setCanvasCSSSize({ w: rect.width, h: rect.height })
+  }, [])
+
   // ── Terrain canvas draw ────────────────────────────────────────────────────
 
   const redrawCanvas = useCallback(() => {
     const canvas = terrainCanvasRef.current
     if (!canvas || !meshData) return
-
-    const rect = canvas.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) return
+    if (canvas.width === 0 || canvas.height === 0) return
 
     const dpr = window.devicePixelRatio || 1
-    canvas.width  = Math.round(rect.width  * dpr)
-    canvas.height = Math.round(rect.height * dpr)
     const ctx = canvas.getContext('2d')
-    if (ctx) ctx.scale(dpr, dpr)
+    if (!ctx) return
 
-    setCanvasCSSSize({ w: rect.width, h: rect.height })
+    // Reset transform without reallocating the pixel buffer
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
     const rawPos = drawScanCanvas(
-      canvas, meshData, scanTileCache.current,
-      contourElevations, activePeaks,
+      canvas, meshData,
+      activePeaks,
       heading_deg, pitch_deg, height_m,
       activeLat, activeLng,
-      fov, showContourLines, skylineData,
+      fov, skylineData,
     )
 
-    const currentDpr = window.devicePixelRatio || 1
     setPeakPositions(rawPos.map(p => ({
       ...p,
-      screenX: p.screenX / currentDpr,
-      screenY: p.screenY / currentDpr,
+      screenX: p.screenX / dpr,
+      screenY: p.screenY / dpr,
     })))
   }, [
     heading_deg, pitch_deg, height_m, fov,
     activeLat, activeLng,
-    meshData, contourElevations, activePeaks,
-    showContourLines, skylineData,
+    meshData, activePeaks,
+    skylineData,
   ])
 
-  useEffect(() => { redrawCanvas() }, [redrawCanvas])
+  // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
+  useEffect(() => {
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(() => {
+      redrawCanvas()
+    })
+    return () => cancelAnimationFrame(rafRef.current)
+  }, [redrawCanvas])
 
   // ── Resize observer ────────────────────────────────────────────────────────
 
   useEffect(() => {
     const canvas = terrainCanvasRef.current
     if (!canvas) return
-    const observer = new ResizeObserver(redrawCanvas)
+
+    const handleResize = () => {
+      resizeCanvas()
+      redrawCanvas()
+    }
+
+    // Initial size
+    handleResize()
+
+    const observer = new ResizeObserver(handleResize)
     observer.observe(canvas)
     return () => observer.disconnect()
-  }, [redrawCanvas])
+  }, [resizeCanvas, redrawCanvas])
 
   // ── Pointer drag (heading + pitch) ────────────────────────────────────────
 
@@ -749,12 +701,10 @@ const ScanScreen: React.FC = () => {
 
   // ── Loading state ─────────────────────────────────────────────────────────
 
-  const isLoading = isPrefetching || isSkylineComputing
-  const loadingLabel = isPrefetching
-    ? 'Loading tiles…'
-    : isSkylineComputing
-      ? `Computing panorama… ${Math.round(skylineProgress * 100)}%`
-      : ''
+  const isLoading = isSkylineComputing
+  const loadingLabel = isSkylineComputing
+    ? `Computing panorama… ${Math.round(skylineProgress * 100)}%`
+    : ''
 
   return (
     <div className={styles.screen}>
@@ -904,7 +854,7 @@ const ScanScreen: React.FC = () => {
 
 // ─── Sub-Components ───────────────────────────────────────────────────────────
 
-const LABEL_STACK_HEIGHT = 98
+const LABEL_STACK_HEIGHT = 75
 
 const PeakLabel: React.FC<{
   pos: PeakScreenPos
