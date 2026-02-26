@@ -868,6 +868,65 @@ const ScanScreen: React.FC = () => {
               />
             </div>
             <span className={styles.loadingLabel}>{loadingLabel}</span>
+            <span className={styles.loadingLabel} style={{ marginTop: 4 }}>v1.0.4-MVP</span>
+          </div>
+        )}
+
+        {/* DEBUG: Skyline angle stats — TEMPORARY */}
+        {skylineData && (
+          <div style={{
+            position: 'absolute', top: 58, right: 44,
+            color: '#0f0', fontSize: 10, fontFamily: 'monospace',
+            background: 'rgba(0,0,0,0.7)', padding: '6px 10px',
+            borderRadius: 4, zIndex: 9999, lineHeight: 1.5,
+            pointerEvents: 'none',
+          }}>
+            {(() => {
+              const a = skylineData.angles
+              const aN = skylineData.anglesNear
+              const aM = skylineData.anglesMid
+              const aF = skylineData.anglesFar
+              const d = skylineData.distances
+              const s = skylineData.shading
+              const deg = (r: number) => (r * 180 / Math.PI).toFixed(2)
+              const stats = (arr: Float32Array, label: string) => {
+                let min = Infinity, max = -Infinity, sum = 0
+                for (let i = 0; i < arr.length; i++) {
+                  if (arr[i] < min) min = arr[i]
+                  if (arr[i] > max) max = arr[i]
+                  sum += arr[i]
+                }
+                return `${label}: ${deg(min)}° → ${deg(max)}° (avg ${deg(sum / arr.length)}°)`
+              }
+              const distStats = () => {
+                let min = Infinity, max = -Infinity
+                for (let i = 0; i < d.length; i++) {
+                  if (d[i] < min) min = d[i]
+                  if (d[i] > max) max = d[i]
+                }
+                return `dist: ${(min/1000).toFixed(1)}km → ${(max/1000).toFixed(1)}km`
+              }
+              const shadeStats = () => {
+                let min = Infinity, max = -Infinity
+                for (let i = 0; i < s.length; i++) {
+                  if (s[i] < min) min = s[i]
+                  if (s[i] > max) max = s[i]
+                }
+                return `shade: ${min.toFixed(2)} → ${max.toFixed(2)}`
+              }
+              return (
+                <>
+                  <div style={{ color: '#ff0', marginBottom: 2 }}>v1.0.4-MVP SKYLINE DEBUG</div>
+                  <div>{stats(a, 'total')}</div>
+                  <div>{stats(aN, 'near ')}</div>
+                  <div>{stats(aM, 'mid  ')}</div>
+                  <div>{stats(aF, 'far  ')}</div>
+                  <div>{distStats()}</div>
+                  <div>{shadeStats()}</div>
+                  <div>azimuths: {a.length} | res: {skylineData.resolution}</div>
+                </>
+              )
+            })()}
           </div>
         )}
 
