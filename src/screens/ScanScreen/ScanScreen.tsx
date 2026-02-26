@@ -183,55 +183,18 @@ function isPeakVisible(
   const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
   const ridgeAngle = skyline.angles[aziIdx]
 
-  // Peak is visible if its elevation angle is at or near the ridgeline.
-  // Generous tolerance (0.5°) because DEM smoothing in the worker produces
-  // lower ridge angles than catalog peak elevations — peaks that ARE the
-  // ridgeline would otherwise be filtered out.
-  const tolerance = 0.5 * DEG_TO_RAD
+  // Peak is visible if its elevation angle is at or above the ridgeline.
+  // Allow a small tolerance (0.15°) so peaks right at the ridge still show.
+  const tolerance = 0.15 * DEG_TO_RAD
   return peakAngle >= ridgeAngle - tolerance
 }
 
 // ─── Quick Render (SkylineData) ───────────────────────────────────────────────
 
 /**
- * Multi-layer depth rendering using pre-computed SkylineData.
- *
- * Draws three terrain silhouette layers (far → mid → near) with atmospheric
- * perspective — distant terrain is lighter/hazier, near terrain is darker.
- * This creates visible depth even when the ridgeline is relatively uniform.
- *
- * Painter's order: far (lightest) → mid → near (darkest) → ridgeline stroke.
+ * Fast O(W) render using pre-computed SkylineData.
+ * Draws the terrain ridgeline as a clean line with a solid dark fill below.
  */
-
-/** Helper: convert an angle array + azimuth indices into screen Y positions */
-function anglesToScreenYs(
-  angleArr: Float32Array, aziIndices: Uint16Array,
-  horizonY: number, scale: number, W: number, H: number,
-): Float32Array {
-  const ys = new Float32Array(W)
-  for (let col = 0; col < W; col++) {
-    const angle = angleArr[aziIndices[col]]
-    const screenY = Math.round(horizonY - angle * scale)
-    ys[col] = Math.min(H, Math.max(0, screenY))
-  }
-  return ys
-}
-
-/** Helper: fill a silhouette path from a Y array down to the canvas bottom */
-function fillLayer(
-  ctx: CanvasRenderingContext2D,
-  ys: Float32Array, W: number, H: number,
-  color: string,
-): void {
-  ctx.beginPath()
-  ctx.moveTo(0, H)
-  for (let col = 0; col < W; col++) ctx.lineTo(col, ys[col])
-  ctx.lineTo(W, H)
-  ctx.closePath()
-  ctx.fillStyle = color
-  ctx.fill()
-}
-
 function drawFromSkyline(
   ctx: CanvasRenderingContext2D,
   skyline: SkylineData,
@@ -245,55 +208,47 @@ function drawFromSkyline(
   const vfovRad  = VFOV * DEG_TO_RAD
   const pitchRad = pitch_deg * DEG_TO_RAD
   const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
-  const scale    = H / vfovRad   // pixels per radian
 
-  // ── Pre-compute azimuth indices for each canvas column ──────────────────────
-  const aziIndices = new Uint16Array(W)
+  // ── Solid dark fill below ridgeline ────────────────────────────────────────
+  ctx.beginPath()
+  ctx.moveTo(0, H)
   for (let col = 0; col < W; col++) {
     const bearingDeg = heading_deg + (col / W - 0.5) * hfov
     const normBearing = ((bearingDeg % 360) + 360) % 360
-    aziIndices[col] = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
+    const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
+    const ridgeAngle = skyline.angles[aziIdx]
+    const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
+    ctx.lineTo(col, Math.min(H, Math.max(0, screenY)))
   }
+  ctx.lineTo(W, H)
+  ctx.closePath()
+  ctx.fillStyle = '#06111d'
+  ctx.fill()
 
-  // ── Build screen-Y arrays for each depth layer ──────────────────────────────
-  const ysFar   = anglesToScreenYs(skyline.anglesFar,   aziIndices, horizonY, scale, W, H)
-  const ysMid   = anglesToScreenYs(skyline.anglesMid,   aziIndices, horizonY, scale, W, H)
-  const ysNear  = anglesToScreenYs(skyline.anglesNear,  aziIndices, horizonY, scale, W, H)
-  const ysTotal = anglesToScreenYs(skyline.angles,       aziIndices, horizonY, scale, W, H)
-
-  // ── Draw depth layers (far → near, painter's order) ────────────────────────
-  // Far layer: lightest — atmospheric haze blends with sky
-  fillLayer(ctx, ysFar,  W, H, '#122838')  // hazy dark blue
-  // Mid layer: medium depth
-  fillLayer(ctx, ysMid,  W, H, '#0c1e2e')  // deeper navy
-  // Near layer: darkest foreground terrain
-  fillLayer(ctx, ysNear, W, H, '#061420')  // near-black
-  // Overall max — catches any edge cases where bands overlap slightly
-  fillLayer(ctx, ysTotal, W, H, '#050e18')
-
-  // ── Per-column shading variation along the ridgeline ────────────────────────
-  // Uses hill shade data to add brightness variation: lit slopes glow faintly
-  for (let col = 0; col < W; col++) {
-    const y = ysTotal[col]
-    if (y >= H) continue
-    const shade = skyline.shading[aziIndices[col]]
-    if (shade < 0.3) continue  // skip dark (east-facing) slopes
-    const alpha = shade * 0.12  // subtle glow
-    ctx.fillStyle = `rgba(132, 209, 219, ${alpha.toFixed(3)})`
-    ctx.fillRect(col, y, 1, Math.min(8, H - y))  // 8px glow band below ridge
-  }
-
-  // ── Ridgeline stroke ────────────────────────────────────────────────────────
+  // ── Ridgeline stroke ───────────────────────────────────────────────────────
   ctx.beginPath()
   let started = false
   for (let col = 0; col < W; col++) {
-    const y = ysTotal[col]
-    if (y >= H) { started = false; continue }
-    if (!started) { ctx.moveTo(col, y); started = true }
-    else          { ctx.lineTo(col, y) }
+    const bearingDeg = heading_deg + (col / W - 0.5) * hfov
+    const normBearing = ((bearingDeg % 360) + 360) % 360
+    const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
+    const ridgeAngle = skyline.angles[aziIdx]
+    const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
+
+    if (screenY >= H) {
+      started = false
+      continue
+    }
+    const y = Math.max(0, screenY)
+    if (!started) {
+      ctx.moveTo(col, y)
+      started = true
+    } else {
+      ctx.lineTo(col, y)
+    }
   }
-  ctx.strokeStyle = 'rgba(132, 209, 219, 0.9)'
-  ctx.lineWidth = 2.0
+  ctx.strokeStyle = 'rgba(132, 209, 219, 0.8)'
+  ctx.lineWidth = 1.5
   ctx.stroke()
 }
 
@@ -883,48 +838,23 @@ const ScanScreen: React.FC = () => {
           }}>
             {(() => {
               const a = skylineData.angles
-              const aN = skylineData.anglesNear
-              const aM = skylineData.anglesMid
-              const aF = skylineData.anglesFar
               const d = skylineData.distances
-              const s = skylineData.shading
               const deg = (r: number) => (r * 180 / Math.PI).toFixed(2)
-              const stats = (arr: Float32Array, label: string) => {
-                let min = Infinity, max = -Infinity, sum = 0
-                for (let i = 0; i < arr.length; i++) {
-                  if (arr[i] < min) min = arr[i]
-                  if (arr[i] > max) max = arr[i]
-                  sum += arr[i]
-                }
-                return `${label}: ${deg(min)}° → ${deg(max)}° (avg ${deg(sum / arr.length)}°)`
-              }
-              const distStats = () => {
-                let min = Infinity, max = -Infinity
-                for (let i = 0; i < d.length; i++) {
-                  if (d[i] < min) min = d[i]
-                  if (d[i] > max) max = d[i]
-                }
-                return `dist: ${(min/1000).toFixed(1)}km → ${(max/1000).toFixed(1)}km`
-              }
-              const shadeStats = () => {
-                let min = Infinity, max = -Infinity
-                for (let i = 0; i < s.length; i++) {
-                  if (s[i] < min) min = s[i]
-                  if (s[i] > max) max = s[i]
-                }
-                return `shade: ${min.toFixed(2)} → ${max.toFixed(2)}`
+              let aMin = Infinity, aMax = -Infinity, aSum = 0
+              let dMin = Infinity, dMax = -Infinity
+              for (let i = 0; i < a.length; i++) {
+                if (a[i] < aMin) aMin = a[i]
+                if (a[i] > aMax) aMax = a[i]
+                aSum += a[i]
+                if (d[i] < dMin) dMin = d[i]
+                if (d[i] > dMax) dMax = d[i]
               }
               return (
                 <>
-                  <div style={{ color: '#ff0', marginBottom: 2 }}>v1.0.4-MVP SKYLINE DEBUG</div>
-                  <div>{stats(a, 'total')}</div>
-                  <div>{stats(aN, 'near ')}</div>
-                  <div>{stats(aM, 'mid  ')}</div>
-                  <div>{stats(aF, 'far  ')}</div>
-                  <div>{distStats()}</div>
-                  <div>{shadeStats()}</div>
-                  <div>azimuths: {a.length} | res: {skylineData.resolution}</div>
-                  <div>elevCorr: viewer@{skylineData.computedAt.elev.toFixed(0)}m</div>
+                  <div style={{ color: '#ff0', marginBottom: 2 }}>v1.0.4-MVP DEBUG</div>
+                  <div>angles: {deg(aMin)}° → {deg(aMax)}° (avg {deg(aSum / a.length)}°)</div>
+                  <div>dist: {(dMin/1000).toFixed(1)}km → {(dMax/1000).toFixed(1)}km</div>
+                  <div>viewer: {skylineData.computedAt.elev.toFixed(0)}m</div>
                 </>
               )
             })()}
