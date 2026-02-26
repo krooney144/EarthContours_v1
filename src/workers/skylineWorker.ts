@@ -271,7 +271,7 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
   // ── Phase 2: Build log-step distance array (far→near) ─────────────────────
 
   const logDists: number[] = []
-  let d = 100
+  let d = 500
   while (d <= maxRange) {
     logDists.push(d)
     d *= 1.015
@@ -317,6 +317,10 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev   = rawElev - curvDrop
       const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
+
+      // Sanity clamp: skip angles > 60° — physically impossible for normal terrain.
+      // Catches any remaining tile decode errors or boundary artefacts.
+      if (elevAngle > Math.PI / 3) continue
 
       // Per-band max angle tracking
       if (dist <= NEAR_MAX) {
