@@ -257,6 +257,17 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
 
   self.postMessage({ type: 'progress', phase: 'tiles', progress: 1, tilesLoaded: tileCacheW.size })
 
+  // ── Fix elevation source mismatch ─────────────────────────────────────────
+  // The main thread computes viewerElev from the coarse region mesh (~860m/px).
+  // The worker samples nearby terrain from z13 tiles (~19m/px). In mountain
+  // valleys the mesh smooths the canyon to ~1535m while tiles show ~3000m nearby,
+  // creating 86° "cliff" angles at 100m. Re-sample the viewer's ground from
+  // the same tile source so both sides agree.
+  const meshGround = sampleMeshGrid(viewerLat, viewerLng, meshElevations, meshWidth, meshHeight, meshBounds)
+  const tileGround = sampleBest(viewerLat, viewerLng, 13, meshElevations, meshWidth, meshHeight, meshBounds)
+  const elevCorrection = tileGround - meshGround
+  const correctedViewerElev = viewerElev + elevCorrection
+
   // ── Phase 2: Build log-step distance array (far→near) ─────────────────────
 
   const logDists: number[] = []
@@ -305,7 +316,7 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       // Earth curvature + atmospheric refraction correction
       const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev   = rawElev - curvDrop
-      const elevAngle = Math.atan2(effElev - viewerElev, dist)
+      const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
 
       // Per-band max angle tracking
       if (dist <= NEAR_MAX) {
@@ -354,7 +365,7 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     computedAt: {
       lat:       viewerLat,
       lng:       viewerLng,
-      elev:      viewerElev,
+      elev:      correctedViewerElev,
       timestamp: Date.now(),
     },
   }

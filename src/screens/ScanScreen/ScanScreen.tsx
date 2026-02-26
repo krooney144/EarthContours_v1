@@ -924,6 +924,7 @@ const ScanScreen: React.FC = () => {
                   <div>{distStats()}</div>
                   <div>{shadeStats()}</div>
                   <div>azimuths: {a.length} | res: {skylineData.resolution}</div>
+                  <div>elevCorr: viewer@{skylineData.computedAt.elev.toFixed(0)}m</div>
                 </>
               )
             })()}
