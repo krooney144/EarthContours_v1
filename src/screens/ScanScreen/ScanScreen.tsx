@@ -183,9 +183,11 @@ function isPeakVisible(
   const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
   const ridgeAngle = skyline.angles[aziIdx]
 
-  // Peak is visible if its elevation angle is at or above the ridgeline.
-  // Allow a small tolerance (0.15°) so peaks right at the ridge still show.
-  const tolerance = 0.15 * DEG_TO_RAD
+  // Peak is visible if its elevation angle is at or near the ridgeline.
+  // Generous tolerance (0.5°) because DEM smoothing in the worker produces
+  // lower ridge angles than catalog peak elevations — peaks that ARE the
+  // ridgeline would otherwise be filtered out.
+  const tolerance = 0.5 * DEG_TO_RAD
   return peakAngle >= ridgeAngle - tolerance
 }
 
@@ -210,37 +212,46 @@ function drawFromSkyline(
   const pitchRad = pitch_deg * DEG_TO_RAD
   const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
 
-  // ── Solid dark fill below ridgeline ────────────────────────────────────────
-  ctx.beginPath()
-  ctx.moveTo(0, H)
+  // ── Ground fill below ridgeline ─────────────────────────────────────────────
+  // Find the topmost ridgeline pixel to anchor the gradient
+  let minRidgeY = H
+  const ridgeYs = new Float32Array(W)
   for (let col = 0; col < W; col++) {
     const bearingDeg = heading_deg + (col / W - 0.5) * hfov
     const normBearing = ((bearingDeg % 360) + 360) % 360
     const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
     const ridgeAngle = skyline.angles[aziIdx]
     const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
-    ctx.lineTo(col, Math.min(H, Math.max(0, screenY)))
+    const clamped = Math.min(H, Math.max(0, screenY))
+    ridgeYs[col] = clamped
+    if (clamped < minRidgeY) minRidgeY = clamped
+  }
+
+  ctx.beginPath()
+  ctx.moveTo(0, H)
+  for (let col = 0; col < W; col++) {
+    ctx.lineTo(col, ridgeYs[col])
   }
   ctx.lineTo(W, H)
   ctx.closePath()
-  ctx.fillStyle = '#06111d'
+
+  // Gradient from subtle teal at ridgeline to near-black at bottom
+  const groundGrad = ctx.createLinearGradient(0, minRidgeY, 0, H)
+  groundGrad.addColorStop(0,   '#0a1e2e')   // teal-tinted dark at ridge edge
+  groundGrad.addColorStop(0.4, '#060f1a')   // transition
+  groundGrad.addColorStop(1,   '#020810')   // near-black at bottom
+  ctx.fillStyle = groundGrad
   ctx.fill()
 
   // ── Ridgeline stroke ───────────────────────────────────────────────────────
   ctx.beginPath()
   let started = false
   for (let col = 0; col < W; col++) {
-    const bearingDeg = heading_deg + (col / W - 0.5) * hfov
-    const normBearing = ((bearingDeg % 360) + 360) % 360
-    const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
-    const ridgeAngle = skyline.angles[aziIdx]
-    const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
-
-    if (screenY >= H) {
+    const y = ridgeYs[col]
+    if (y >= H) {
       started = false
       continue
     }
-    const y = Math.max(0, screenY)
     if (!started) {
       ctx.moveTo(col, y)
       started = true
@@ -248,7 +259,7 @@ function drawFromSkyline(
       ctx.lineTo(col, y)
     }
   }
-  ctx.strokeStyle = 'rgba(132, 209, 219, 0.8)'
+  ctx.strokeStyle = 'rgba(132, 209, 219, 0.85)'
   ctx.lineWidth = 1.5
   ctx.stroke()
 }
