@@ -194,10 +194,44 @@ function isPeakVisible(
 // ─── Quick Render (SkylineData) ───────────────────────────────────────────────
 
 /**
- * Fast O(W) render using pre-computed SkylineData.
- * Draws the terrain ridgeline as a clean line with a solid dark fill below.
- * No distance/shade colouring — lines only.
+ * Multi-layer depth rendering using pre-computed SkylineData.
+ *
+ * Draws three terrain silhouette layers (far → mid → near) with atmospheric
+ * perspective — distant terrain is lighter/hazier, near terrain is darker.
+ * This creates visible depth even when the ridgeline is relatively uniform.
+ *
+ * Painter's order: far (lightest) → mid → near (darkest) → ridgeline stroke.
  */
+
+/** Helper: convert an angle array + azimuth indices into screen Y positions */
+function anglesToScreenYs(
+  angleArr: Float32Array, aziIndices: Uint16Array,
+  horizonY: number, scale: number, W: number, H: number,
+): Float32Array {
+  const ys = new Float32Array(W)
+  for (let col = 0; col < W; col++) {
+    const angle = angleArr[aziIndices[col]]
+    const screenY = Math.round(horizonY - angle * scale)
+    ys[col] = Math.min(H, Math.max(0, screenY))
+  }
+  return ys
+}
+
+/** Helper: fill a silhouette path from a Y array down to the canvas bottom */
+function fillLayer(
+  ctx: CanvasRenderingContext2D,
+  ys: Float32Array, W: number, H: number,
+  color: string,
+): void {
+  ctx.beginPath()
+  ctx.moveTo(0, H)
+  for (let col = 0; col < W; col++) ctx.lineTo(col, ys[col])
+  ctx.lineTo(W, H)
+  ctx.closePath()
+  ctx.fillStyle = color
+  ctx.fill()
+}
+
 function drawFromSkyline(
   ctx: CanvasRenderingContext2D,
   skyline: SkylineData,
@@ -211,56 +245,55 @@ function drawFromSkyline(
   const vfovRad  = VFOV * DEG_TO_RAD
   const pitchRad = pitch_deg * DEG_TO_RAD
   const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
+  const scale    = H / vfovRad   // pixels per radian
 
-  // ── Ground fill below ridgeline ─────────────────────────────────────────────
-  // Find the topmost ridgeline pixel to anchor the gradient
-  let minRidgeY = H
-  const ridgeYs = new Float32Array(W)
+  // ── Pre-compute azimuth indices for each canvas column ──────────────────────
+  const aziIndices = new Uint16Array(W)
   for (let col = 0; col < W; col++) {
     const bearingDeg = heading_deg + (col / W - 0.5) * hfov
     const normBearing = ((bearingDeg % 360) + 360) % 360
-    const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
-    const ridgeAngle = skyline.angles[aziIdx]
-    const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
-    const clamped = Math.min(H, Math.max(0, screenY))
-    ridgeYs[col] = clamped
-    if (clamped < minRidgeY) minRidgeY = clamped
+    aziIndices[col] = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
   }
 
-  ctx.beginPath()
-  ctx.moveTo(0, H)
+  // ── Build screen-Y arrays for each depth layer ──────────────────────────────
+  const ysFar   = anglesToScreenYs(skyline.anglesFar,   aziIndices, horizonY, scale, W, H)
+  const ysMid   = anglesToScreenYs(skyline.anglesMid,   aziIndices, horizonY, scale, W, H)
+  const ysNear  = anglesToScreenYs(skyline.anglesNear,  aziIndices, horizonY, scale, W, H)
+  const ysTotal = anglesToScreenYs(skyline.angles,       aziIndices, horizonY, scale, W, H)
+
+  // ── Draw depth layers (far → near, painter's order) ────────────────────────
+  // Far layer: lightest — atmospheric haze blends with sky
+  fillLayer(ctx, ysFar,  W, H, '#122838')  // hazy dark blue
+  // Mid layer: medium depth
+  fillLayer(ctx, ysMid,  W, H, '#0c1e2e')  // deeper navy
+  // Near layer: darkest foreground terrain
+  fillLayer(ctx, ysNear, W, H, '#061420')  // near-black
+  // Overall max — catches any edge cases where bands overlap slightly
+  fillLayer(ctx, ysTotal, W, H, '#050e18')
+
+  // ── Per-column shading variation along the ridgeline ────────────────────────
+  // Uses hill shade data to add brightness variation: lit slopes glow faintly
   for (let col = 0; col < W; col++) {
-    ctx.lineTo(col, ridgeYs[col])
+    const y = ysTotal[col]
+    if (y >= H) continue
+    const shade = skyline.shading[aziIndices[col]]
+    if (shade < 0.3) continue  // skip dark (east-facing) slopes
+    const alpha = shade * 0.12  // subtle glow
+    ctx.fillStyle = `rgba(132, 209, 219, ${alpha.toFixed(3)})`
+    ctx.fillRect(col, y, 1, Math.min(8, H - y))  // 8px glow band below ridge
   }
-  ctx.lineTo(W, H)
-  ctx.closePath()
 
-  // Gradient from subtle teal at ridgeline to near-black at bottom
-  const groundGrad = ctx.createLinearGradient(0, minRidgeY, 0, H)
-  groundGrad.addColorStop(0,   '#0a1e2e')   // teal-tinted dark at ridge edge
-  groundGrad.addColorStop(0.4, '#060f1a')   // transition
-  groundGrad.addColorStop(1,   '#020810')   // near-black at bottom
-  ctx.fillStyle = groundGrad
-  ctx.fill()
-
-  // ── Ridgeline stroke ───────────────────────────────────────────────────────
+  // ── Ridgeline stroke ────────────────────────────────────────────────────────
   ctx.beginPath()
   let started = false
   for (let col = 0; col < W; col++) {
-    const y = ridgeYs[col]
-    if (y >= H) {
-      started = false
-      continue
-    }
-    if (!started) {
-      ctx.moveTo(col, y)
-      started = true
-    } else {
-      ctx.lineTo(col, y)
-    }
+    const y = ysTotal[col]
+    if (y >= H) { started = false; continue }
+    if (!started) { ctx.moveTo(col, y); started = true }
+    else          { ctx.lineTo(col, y) }
   }
-  ctx.strokeStyle = 'rgba(132, 209, 219, 0.85)'
-  ctx.lineWidth = 1.5
+  ctx.strokeStyle = 'rgba(132, 209, 219, 0.9)'
+  ctx.lineWidth = 2.0
   ctx.stroke()
 }
 

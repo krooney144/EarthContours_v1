@@ -61,6 +61,12 @@ export interface SkylineRequest {
 export interface SkylineData {
   /** Max elevation angle (radians) at each azimuth step */
   angles:      Float32Array
+  /** Near-field max elevation angle — terrain 0–10 km */
+  anglesNear:  Float32Array
+  /** Mid-field max elevation angle — terrain 10–50 km */
+  anglesMid:   Float32Array
+  /** Far-field max elevation angle — terrain 50–250 km */
+  anglesFar:   Float32Array
   /** Distance to ridgeline (metres) */
   distances:   Float32Array
   /** Hill shade at ridgeline [0–1] */
@@ -263,9 +269,17 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
 
   // ── Phase 3: Compute 360° skyline ─────────────────────────────────────────
 
-  const angles    = new Float32Array(numAzimuths)
-  const distances = new Float32Array(numAzimuths)
-  const shading   = new Float32Array(numAzimuths)
+  const angles     = new Float32Array(numAzimuths)
+  const anglesNear = new Float32Array(numAzimuths)
+  const anglesMid  = new Float32Array(numAzimuths)
+  const anglesFar  = new Float32Array(numAzimuths)
+  const distances  = new Float32Array(numAzimuths)
+  const shading    = new Float32Array(numAzimuths)
+
+  // Distance band thresholds (metres)
+  const NEAR_MAX =  10_000  // 0–10 km
+  const MID_MAX  =  50_000  // 10–50 km
+  // Far = 50 km–maxRange
 
   for (let ai = 0; ai < numAzimuths; ai++) {
     const azDeg  = ai / resolution
@@ -274,6 +288,9 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     const cosA   = Math.cos(azRad)
 
     let maxAngle  = -Math.PI / 2  // start below horizon
+    let maxNear   = -Math.PI / 2
+    let maxMid    = -Math.PI / 2
+    let maxFar    = -Math.PI / 2
     let ridgeDist = maxRange / 2
     let ridgeLat  = viewerLat
     let ridgeLng  = viewerLng
@@ -290,6 +307,16 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       const effElev   = rawElev - curvDrop
       const elevAngle = Math.atan2(effElev - viewerElev, dist)
 
+      // Per-band max angle tracking
+      if (dist <= NEAR_MAX) {
+        if (elevAngle > maxNear) maxNear = elevAngle
+      } else if (dist <= MID_MAX) {
+        if (elevAngle > maxMid) maxMid = elevAngle
+      } else {
+        if (elevAngle > maxFar) maxFar = elevAngle
+      }
+
+      // Overall max (for ridgeline + peak visibility)
       if (elevAngle > maxAngle) {
         maxAngle  = elevAngle
         ridgeDist = dist
@@ -302,9 +329,12 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     const ridgeZoom = distToZoom(ridgeDist)
     const shade = hillShade(ridgeLat, ridgeLng, ridgeZoom, meshElevations, meshWidth, meshHeight, meshBounds)
 
-    angles[ai]    = maxAngle  // allow negative (sub-horizon) angles for visible terrain dips
-    distances[ai] = ridgeDist
-    shading[ai]   = shade
+    angles[ai]     = maxAngle
+    anglesNear[ai] = maxNear
+    anglesMid[ai]  = maxMid
+    anglesFar[ai]  = maxFar
+    distances[ai]  = ridgeDist
+    shading[ai]    = shade
 
     // Progress every 45 azimuths (~12.5° increments)
     if (ai % 45 === 0) {
@@ -314,6 +344,9 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
 
   const skyline: SkylineData = {
     angles,
+    anglesNear,
+    anglesMid,
+    anglesFar,
     distances,
     shading,
     resolution,
@@ -329,6 +362,9 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
   // Transfer ArrayBuffers (zero-copy) to main thread
   self.postMessage(
     { type: 'complete', skyline },
-    [angles.buffer, distances.buffer, shading.buffer],
+    [
+      angles.buffer, anglesNear.buffer, anglesMid.buffer, anglesFar.buffer,
+      distances.buffer, shading.buffer,
+    ],
   )
 }
