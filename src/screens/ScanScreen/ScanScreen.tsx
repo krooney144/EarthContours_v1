@@ -144,24 +144,6 @@ function projectFirstPerson(
   return { screenX, screenY, horizDist }
 }
 
-// ─── Terrain Color ────────────────────────────────────────────────────────────
-
-/**
- * Map (distance, hill-shade) → RGB terrain color from the ocean-depth palette.
- *
- * Near/lit  → reef/glow range  (teal, ~rgb(68,155,175))
- * Far/dark  → abyss/void range (deep navy, ~rgb(8,35,55))
- */
-function terrainColor(dist: number, shade: number): [number, number, number] {
-  const nearFrac   = Math.max(0, 1 - dist / MAX_DIST)
-  const g          = Math.pow(nearFrac, 0.75)
-  const shadeScale = 0.40 + shade * 0.60
-
-  const r  = Math.round(( 8 + g *  60) * shadeScale)
-  const gr = Math.round((35 + g * 120) * shadeScale)
-  const b  = Math.round((55 + g * 120) * (0.55 + shadeScale * 0.45))
-  return [r, gr, b]
-}
 
 // ─── Peak Visibility Check ────────────────────────────────────────────────────
 
@@ -211,8 +193,8 @@ function isPeakVisible(
 
 /**
  * Fast O(W) render using pre-computed SkylineData.
- * Draws the terrain silhouette by reading pre-computed ridgeline angles.
- * Used while panning — the smooth 60-fps path.
+ * Draws the terrain ridgeline as a clean line with a solid dark fill below.
+ * No distance/shade colouring — lines only.
  */
 function drawFromSkyline(
   ctx: CanvasRenderingContext2D,
@@ -228,22 +210,47 @@ function drawFromSkyline(
   const pitchRad = pitch_deg * DEG_TO_RAD
   const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
 
+  // ── Solid dark fill below ridgeline ────────────────────────────────────────
+  ctx.beginPath()
+  ctx.moveTo(0, H)
   for (let col = 0; col < W; col++) {
     const bearingDeg = heading_deg + (col / W - 0.5) * hfov
     const normBearing = ((bearingDeg % 360) + 360) % 360
     const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
-
     const ridgeAngle = skyline.angles[aziIdx]
-    const ridgeDist  = skyline.distances[aziIdx]
-    const shade      = skyline.shading[aziIdx]
-
     const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
-    if (screenY >= H) continue  // ridgeline below viewport — nothing to draw
-
-    const [r, gr, b] = terrainColor(ridgeDist, shade)
-    ctx.fillStyle = `rgb(${r},${gr},${b})`
-    ctx.fillRect(col, Math.max(0, screenY), 1, H - Math.max(0, screenY))
+    ctx.lineTo(col, Math.min(H, Math.max(0, screenY)))
   }
+  ctx.lineTo(W, H)
+  ctx.closePath()
+  ctx.fillStyle = '#06111d'
+  ctx.fill()
+
+  // ── Ridgeline stroke ───────────────────────────────────────────────────────
+  ctx.beginPath()
+  let started = false
+  for (let col = 0; col < W; col++) {
+    const bearingDeg = heading_deg + (col / W - 0.5) * hfov
+    const normBearing = ((bearingDeg % 360) + 360) % 360
+    const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
+    const ridgeAngle = skyline.angles[aziIdx]
+    const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
+
+    if (screenY >= H) {
+      started = false
+      continue
+    }
+    const y = Math.max(0, screenY)
+    if (!started) {
+      ctx.moveTo(col, y)
+      started = true
+    } else {
+      ctx.lineTo(col, y)
+    }
+  }
+  ctx.strokeStyle = 'rgba(132, 209, 219, 0.8)'
+  ctx.lineWidth = 1.5
+  ctx.stroke()
 }
 
 // ─── Full Canvas Draw ─────────────────────────────────────────────────────────
@@ -717,12 +724,16 @@ const ScanScreen: React.FC = () => {
     sliderDragRef.current.isDragging = false
   }, [])
 
-  // ── Compass offset (uses dynamic fov) ─────────────────────────────────────
+  // ── FOV-aware compass sizing ──────────────────────────────────────────────
+  // Each compass item = 22.5°. Scale item width so that FOV degrees = viewport width.
+  const compassItemWidth = typeof window !== 'undefined'
+    ? window.innerWidth * 22.5 / fov
+    : COMPASS_ITEM_WIDTH
 
   const compassOffset = (() => {
-    const headingIndex   = heading_deg / 22.5
+    const headingIndex    = heading_deg / 22.5
     const centerItemIndex = headingIndex + 16
-    return -(centerItemIndex * COMPASS_ITEM_WIDTH)
+    return -(centerItemIndex * compassItemWidth)
   })()
 
   // ── Ground elevation for HUD ─────────────────────────────────────────────
@@ -757,7 +768,7 @@ const ScanScreen: React.FC = () => {
             COMPASS_DIRECTIONS.map((dir, dirIndex) => {
               const isCardinal = ['N', 'S', 'E', 'W'].includes(dir)
               return (
-                <div key={`${loop}-${dirIndex}`} className={styles.compassItem}>
+                <div key={`${loop}-${dirIndex}`} className={styles.compassItem} style={{ width: `${compassItemWidth}px` }}>
                   <span className={`${styles.compassLabel} ${isCardinal ? styles.cardinal : ''}`}>
                     {dir}
                   </span>
