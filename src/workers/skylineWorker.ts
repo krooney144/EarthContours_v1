@@ -302,7 +302,7 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     const ridgeZoom = distToZoom(ridgeDist)
     const shade = hillShade(ridgeLat, ridgeLng, ridgeZoom, meshElevations, meshWidth, meshHeight, meshBounds)
 
-    angles[ai]    = Math.max(0, maxAngle)  // clamp to horizon (negative = sub-horizon)
+    angles[ai]    = maxAngle  // allow negative (sub-horizon) angles for visible terrain dips
     distances[ai] = ridgeDist
     shading[ai]   = shade
 
