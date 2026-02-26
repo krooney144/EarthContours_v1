@@ -263,6 +263,12 @@ export interface ContourLine {
 export interface SkylineData {
   /** Maximum elevation angle (radians) at each azimuth — the ridgeline silhouette */
   angles:      Float32Array
+  /** Near-field max elevation angle — terrain 0–10 km */
+  anglesNear:  Float32Array
+  /** Mid-field max elevation angle — terrain 10–50 km */
+  anglesMid:   Float32Array
+  /** Far-field max elevation angle — terrain 50–250 km */
+  anglesFar:   Float32Array
   /** Distance to ridgeline in metres */
   distances:   Float32Array
   /** NW-45° hill shade at ridgeline [0–1] */
