@@ -281,14 +281,15 @@ function projectFirstPerson(
 
 /**
  * Check if a peak is visible above the terrain ridgeline.
- * Uses pre-computed SkylineData to compare the peak's elevation angle
- * against the maximum terrain angle at that azimuth.
+ * Uses re-projected overall angles (AGL-aware, includes high-res near bands)
+ * when available, falling back to the worker-baked angles.
  */
 function isPeakVisible(
   peak: Peak,
   viewerLat: number, viewerLng: number, viewerElev: number,
   heading_deg: number, hfov: number,
   skyline: SkylineData,
+  projected: ProjectedBands | null,
 ): boolean {
   const cosLat = Math.cos(viewerLat * DEG_TO_RAD)
   const dx = (peak.lng - viewerLng) * 111_320 * cosLat
@@ -310,10 +311,9 @@ function isPeakVisible(
   const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
   const peakAngle = Math.atan2(peak.elevation_m - curvDrop - viewerElev, dist)
 
-  // Ridgeline angle at this azimuth from skyline data
-  const normBearing = ((bearing % 360) + 360) % 360
-  const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
-  const ridgeAngle = skyline.angles[aziIdx]
+  // Ridgeline angle — uses re-projected angles (AGL-aware, includes high-res
+  // near-band contributions) with interpolation. Falls back to worker-baked.
+  const ridgeAngle = skylineAngleAt(skyline, bearing, projected)
 
   // Peak is visible if its elevation angle is at or above the ridgeline.
   // Allow a small tolerance (0.15°) so peaks right at the ridge still show.
@@ -618,7 +618,7 @@ function drawScanCanvas(
   const peakPositions: PeakScreenPos[] = []
 
   const visiblePeaks = skylineData
-    ? peaks.filter(p => isPeakVisible(p, activeLat, activeLng, eyeElev, heading_deg, hfov, skylineData))
+    ? peaks.filter(p => isPeakVisible(p, activeLat, activeLng, eyeElev, heading_deg, hfov, skylineData, projectedBands))
     : peaks.filter(p => {
         const cosLat = Math.cos(activeLat * DEG_TO_RAD)
         const dx = (p.lng - activeLng) * 111_320 * cosLat
@@ -647,24 +647,18 @@ function drawScanCanvas(
     if (screenX < -50 || screenX > W + 50) continue
     if (horizDist > MAX_PEAK_DIST) continue
 
-    // Snap dot to the visible ridgeline — use per-band angles (same data the
-    // renderer draws) instead of the coarser overall array.  Take the max
-    // across all bands so the dot sits on whichever band is topmost at this
-    // bearing, matching exactly what's painted on screen.
+    // Snap dot to the overall ridgeline (AGL-aware, includes high-res near
+    // bands).  Uses the same interpolated angle that isPeakVisible checks
+    // against, so the dot sits on the drawn ridgeline.  Upward-only: if the
+    // peak's true position is above the ridge, keep its real screen Y.
     if (skylineData) {
       const bearing = calculateBearing(
         { lat: activeLat, lng: activeLng },
         { lat: peak.lat, lng: peak.lng },
       )
-      let maxBandAngle = -Math.PI / 2
-      for (let bi = 0; bi < skylineData.bands.length; bi++) {
-        const a = bandAngleAt(skylineData, bi, bearing, projectedBands)
-        if (a > maxBandAngle) maxBandAngle = a
-      }
-      // Only snap if the ridgeline has data at this bearing
-      if (maxBandAngle > -Math.PI / 2 + 0.001) {
-        const ridgePos = project(bearing, maxBandAngle, cam)
-        // Snap upward only — if peak's true position is above the ridge, keep it
+      const ridgeAngle = skylineAngleAt(skylineData, bearing, projectedBands)
+      if (ridgeAngle > -Math.PI / 2 + 0.001) {
+        const ridgePos = project(bearing, ridgeAngle, cam)
         screenY = Math.min(screenY, ridgePos.y)
       }
     }
