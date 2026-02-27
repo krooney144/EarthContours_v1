@@ -531,7 +531,7 @@ function drawScanCanvas(
 
   // ── 2b. DEBUG: Per-band ridgeline overlay (distinct colors) ─────────────────
   if (skylineData) {
-    const bandColors = ['#ff3333', '#33ff33', '#3399ff']  // near=red, mid=green, far=blue
+    const bandColors = ['#ff3333', '#ff9933', '#33ff33', '#3399ff', '#cc33ff']  // near=red, med-near=orange, mid=green, med-far=blue, far=purple
     const numBands = skylineData.bands.length
     for (let bi = 0; bi < numBands; bi++) {
       ctx.beginPath()
@@ -1145,10 +1145,12 @@ const ScanScreen: React.FC = () => {
 
                   <div style={{ color: '#8cf', marginTop: 3 }}>BANDS ({bandStats.length}) — center angles</div>
                   {bandStats.map((bs, i) => {
-                    const colors = ['#f33', '#3f3', '#39f']
+                    const colors = ['#f33', '#f93', '#3f3', '#39f', '#c3f']
+                    const bandCfg = DEPTH_BANDS[i]
+                    const rangeStr = bandCfg ? `[${(bandCfg.minDist/1000).toFixed(0)}–${(bandCfg.maxDist/1000).toFixed(0)}km]` : ''
                     return (
                       <div key={bs.label} style={{ color: bs.active === 0 ? '#666' : colors[i] || '#0f0' }}>
-                        {bs.label}: {bs.active}/{skylineData.numAzimuths} az
+                        {bs.label} {rangeStr}: {bs.active}/{skylineData.numAzimuths} az
                         {bs.active > 0 && (
                           <>
                             {' '}∠{(bs.centerAngle * 180 / Math.PI).toFixed(2)}°

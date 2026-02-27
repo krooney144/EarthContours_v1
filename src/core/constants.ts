@@ -36,8 +36,8 @@ export const PREVIEW_BREAKPOINT_PX = 900
 /** Default eye height above ground in meters (300ft ≈ 91m) */
 export const DEFAULT_HEIGHT_M = 91.44
 
-/** Maximum eye height in meters (2000ft ≈ 610m) */
-export const MAX_HEIGHT_M = 609.6
+/** Maximum eye height in meters (5000ft ≈ 1524m) */
+export const MAX_HEIGHT_M = 1524
 
 /** Minimum eye height in meters (10ft ≈ 3m) */
 export const MIN_HEIGHT_M = 3.048

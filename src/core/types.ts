@@ -269,11 +269,13 @@ export interface DepthBandConfig {
   maxDist: number
 }
 
-/** Default 3-band configuration.  Array-driven so adding bands later is trivial. */
+/** 5-band configuration for troubleshooting depth layers. */
 export const DEPTH_BANDS: DepthBandConfig[] = [
-  { label: 'near', minDist: 0,      maxDist: 12_000  },
-  { label: 'mid',  minDist: 8_000,  maxDist: 60_000  },
-  { label: 'far',  minDist: 50_000, maxDist: 300_000 },
+  { label: 'near',     minDist: 0,       maxDist: 8_000   },   // 0–8 km
+  { label: 'med-near', minDist: 6_000,   maxDist: 20_000  },   // 6–20 km
+  { label: 'mid',      minDist: 15_000,  maxDist: 50_000  },   // 15–50 km
+  { label: 'med-far',  minDist: 40_000,  maxDist: 120_000 },   // 40–120 km
+  { label: 'far',      minDist: 100_000, maxDist: 300_000 },   // 100–300 km
 ]
 
 /**
