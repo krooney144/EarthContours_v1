@@ -295,6 +295,10 @@ export interface SkylineBand {
   slopeX:     Float32Array
   /** Surface gradient dz/dz (north) at ridgeline — for future contour fragments */
   slopeZ:     Float32Array
+  /** GPS latitude of the ridgeline point for each azimuth (for peak matching) */
+  ridgeLats:  Float32Array
+  /** GPS longitude of the ridgeline point for each azimuth (for peak matching) */
+  ridgeLngs:  Float32Array
   /** Azimuth resolution for this band (steps per degree). Defaults to SkylineData.resolution. */
   resolution: number
   /** Number of azimuth samples in this band's arrays = 360 × resolution */
