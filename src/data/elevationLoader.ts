@@ -426,8 +426,39 @@ export async function loadRegionElevation(
 
   onProgress(0.92)
 
+  // ── Compute crop rectangle — clip to exact region bounds ──────────────────
+  // The stitched grid extends beyond the region bounds by the 0.5° margin
+  // (plus tile-alignment overshoot).  Downsample only the sub-rectangle that
+  // corresponds to the declared region bounds so the output 256×256 grid
+  // covers exactly what meshData.bounds says — GPS ↔ grid index alignment.
+  const scale = Math.pow(2, z)
+  const worldXForLng = (lng: number) => (lng + 180) / 360 * 256 * scale
+  const worldYForLat = (lat: number) => {
+    const latRad = (lat * Math.PI) / 180
+    return (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * 256 * scale
+  }
+  const originX = tileX0 * 256  // world-pixel X of stitched grid left edge
+  const originY = tileY0 * 256  // world-pixel Y of stitched grid top edge
+
+  const cropLeft   = worldXForLng(west)  - originX
+  const cropRight  = worldXForLng(east)  - originX
+  const cropTop    = worldYForLat(north) - originY
+  const cropBottom = worldYForLat(south) - originY
+
+  log.debug('Crop rectangle (region bounds within stitched grid)', {
+    cropLeft:   cropLeft.toFixed(1),
+    cropRight:  cropRight.toFixed(1),
+    cropTop:    cropTop.toFixed(1),
+    cropBottom: cropBottom.toFixed(1),
+    stitchedW,
+    stitchedH,
+  })
+
   // ── Downsample to target gridSize using bilinear interpolation ─────────────
-  const output = downsampleBilinear(stitchedElevations, stitchedW, stitchedH, gridSize, gridSize)
+  const output = downsampleBilinear(
+    stitchedElevations, stitchedW, stitchedH, gridSize, gridSize,
+    cropLeft, cropTop, cropRight, cropBottom,
+  )
 
   onProgress(1.0)
   endTiming()
@@ -457,22 +488,25 @@ export async function loadRegionElevation(
  * Downsample a large elevation grid to a smaller target size.
  * Uses bilinear interpolation for smooth, artifact-free results.
  *
- * Bilinear interpolation: instead of just picking the nearest pixel,
- * we blend the 4 surrounding pixels based on how close we are to each.
- * This prevents the "staircase" artifacts you'd get with nearest-neighbor.
+ * When crop coordinates are provided, the output grid maps to the
+ * specified sub-rectangle of the source instead of the full extent.
+ * This lets us stitch tiles with a margin (for interpolation at edges)
+ * but output a grid that covers exactly the declared region bounds.
  */
 function downsampleBilinear(
   src: Float32Array,
   srcW: number, srcH: number,
   dstW: number, dstH: number,
+  cropX0 = 0, cropY0 = 0,
+  cropX1 = srcW - 1, cropY1 = srcH - 1,
 ): Float32Array {
   const dst = new Float32Array(dstW * dstH)
 
   for (let dy = 0; dy < dstH; dy++) {
     for (let dx = 0; dx < dstW; dx++) {
-      // Map destination pixel to source coordinates (floating point)
-      const sx = (dx / (dstW - 1)) * (srcW - 1)
-      const sy = (dy / (dstH - 1)) * (srcH - 1)
+      // Map destination pixel to source coordinates within the crop rectangle
+      const sx = cropX0 + (dx / (dstW - 1)) * (cropX1 - cropX0)
+      const sy = cropY0 + (dy / (dstH - 1)) * (cropY1 - cropY0)
 
       const x0 = Math.floor(sx)
       const y0 = Math.floor(sy)
