@@ -60,8 +60,8 @@ const log = createLogger('SCREEN:SCAN')
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const VFOV              = 60          // Vertical field of view (°) — fixed
-const MAX_DIST          = 250_000     // Maximum render distance (m) — Phase 2 upgrade
-const MAX_PEAK_DIST     = 120_000     // Max distance for peak label display (m)
+const MAX_DIST          = 400_000     // Maximum render distance (m) — extended for high-AGL viewing
+const MAX_PEAK_DIST     = 400_000     // Max distance for peak label display (m)
 const EARTH_R           = 6_371_000  // Earth radius (m)
 const REFRACTION_K      = 0.13       // Atmospheric refraction coefficient
 const DEG_TO_RAD        = Math.PI / 180
@@ -85,7 +85,8 @@ interface ProjectedBands {
 
 /**
  * Re-project band elevation angles from raw world data for a new viewer elevation.
- * O(numAzimuths × numBands) ≈ O(2160) — sub-millisecond.
+ * Handles per-band resolution (high-res near bands have more azimuth samples).
+ * Sub-millisecond even with mixed resolutions.
  */
 function reprojectBands(
   skyline: SkylineData,
@@ -98,24 +99,29 @@ function reprojectBands(
 
   for (let bi = 0; bi < bands.length; bi++) {
     const band = bands[bi]
-    const angles = new Float32Array(numAzimuths)
+    const bandAz = band.numAzimuths
+    const bandRes = band.resolution
+    const angles = new Float32Array(bandAz)
 
-    for (let ai = 0; ai < numAzimuths; ai++) {
+    for (let ai = 0; ai < bandAz; ai++) {
       const elev = band.elevations[ai]
       const dist = band.distances[ai]
 
       if (elev === -Infinity || dist <= 0) {
-        angles[ai] = -Math.PI / 2  // No ridge in this band
+        angles[ai] = -Math.PI / 2
         continue
       }
 
-      // Same formula as worker: elevation angle with curvature correction
       const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev  = elev - curvDrop
       angles[ai] = Math.atan2(effElev - viewerElev, dist)
 
-      if (angles[ai] > overallAngles[ai]) {
-        overallAngles[ai] = angles[ai]
+      // Map this high-res azimuth back to the standard-res overall array
+      // For standard-res bands (same resolution), this is 1:1
+      // For high-res bands, multiple high-res samples map to one standard sample
+      const overallIdx = Math.round((ai / bandRes) * skyline.resolution) % numAzimuths
+      if (angles[ai] > overallAngles[overallIdx]) {
+        overallAngles[overallIdx] = angles[ai]
       }
     }
 
@@ -318,7 +324,8 @@ function isPeakVisible(
 /**
  * Look up the ridgeline elevation angle for a given bearing.
  * Uses re-projected overall angles when available (AGL-aware), falls back to
- * worker-baked angles.
+ * worker-baked angles.  Linearly interpolates between adjacent azimuth samples
+ * to eliminate stair-stepping artifacts.
  */
 function skylineAngleAt(
   skyline: SkylineData,
@@ -326,14 +333,19 @@ function skylineAngleAt(
   projected: ProjectedBands | null = null,
 ): number {
   const normBearing = ((bearingDeg % 360) + 360) % 360
-  const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
-  // Use re-projected angles (AGL-aware) when available
-  if (projected) return projected.overallAngles[aziIdx]
-  return skyline.angles[aziIdx]
+  const fracIdx = normBearing * skyline.resolution
+  const idx0 = Math.floor(fracIdx) % skyline.numAzimuths
+  const idx1 = (idx0 + 1) % skyline.numAzimuths
+  const t = fracIdx - Math.floor(fracIdx)
+
+  const arr = projected ? projected.overallAngles : skyline.angles
+  return arr[idx0] * (1 - t) + arr[idx1] * t
 }
 
 /**
  * Look up the per-band elevation angle for a given bearing and band index.
+ * Uses the band's own resolution (high-res near bands have finer azimuth spacing).
+ * Linearly interpolates between adjacent azimuth samples for smooth ridgelines.
  * Returns -PI/2 if no ridge in this band at this azimuth.
  */
 function bandAngleAt(
@@ -342,15 +354,42 @@ function bandAngleAt(
   bearingDeg: number,
   projected: ProjectedBands | null,
 ): number {
-  const normBearing = ((bearingDeg % 360) + 360) % 360
-  const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
-  if (projected) return projected.bandAngles[bandIndex][aziIdx]
-  // Fallback: use the band's raw data with the worker's baked viewer elevation
   const band = skyline.bands[bandIndex]
-  if (band.elevations[aziIdx] === -Infinity) return -Math.PI / 2
-  const dist = band.distances[aziIdx]
-  const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-  return Math.atan2(band.elevations[aziIdx] - curvDrop - skyline.computedAt.elev, dist)
+  const bandRes = band.resolution
+  const bandAz  = band.numAzimuths
+
+  const normBearing = ((bearingDeg % 360) + 360) % 360
+  const fracIdx = normBearing * bandRes
+  const idx0 = Math.floor(fracIdx) % bandAz
+  const idx1 = (idx0 + 1) % bandAz
+  const t = fracIdx - Math.floor(fracIdx)
+
+  const SENTINEL = -Math.PI / 2 + 0.001
+
+  if (projected) {
+    const arr = projected.bandAngles[bandIndex]
+    const a0 = arr[idx0], a1 = arr[idx1]
+    if (a0 <= SENTINEL && a1 <= SENTINEL) return -Math.PI / 2
+    if (a0 <= SENTINEL) return a1
+    if (a1 <= SENTINEL) return a0
+    return a0 * (1 - t) + a1 * t
+  }
+
+  // Fallback: compute from raw data with interpolation
+  if (band.elevations[idx0] === -Infinity && band.elevations[idx1] === -Infinity) return -Math.PI / 2
+
+  const computeAngle = (idx: number) => {
+    if (band.elevations[idx] === -Infinity) return -Math.PI / 2
+    const dist = band.distances[idx]
+    const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+    return Math.atan2(band.elevations[idx] - curvDrop - skyline.computedAt.elev, dist)
+  }
+
+  const a0 = computeAngle(idx0), a1 = computeAngle(idx1)
+  if (a0 <= SENTINEL && a1 <= SENTINEL) return -Math.PI / 2
+  if (a0 <= SENTINEL) return a1
+  if (a1 <= SENTINEL) return a0
+  return a0 * (1 - t) + a1 * t
 }
 
 // ─── Depth Band Visual Parameters ─────────────────────────────────────────────
@@ -783,7 +822,7 @@ const ScanScreen: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false
-    fetchPeaksNear(activeLat, activeLng, 130)
+    fetchPeaksNear(activeLat, activeLng, 400)
       .then(fetched => {
         if (!cancelled) {
           setOsmPeaks(fetched)
@@ -1075,12 +1114,20 @@ const ScanScreen: React.FC = () => {
             pointerEvents: 'none', maxWidth: 280,
           }}>
             {(() => {
-              const deg = (r: number) => (r * 180 / Math.PI).toFixed(2)
-              const horizY = getHorizonY({ heading_deg, pitch_deg, hfov: fov, W: terrainCanvasRef.current?.width || 0, H: terrainCanvasRef.current?.height || 0 })
-              const pxPerDegH = terrainCanvasRef.current ? (terrainCanvasRef.current.width / (fov * DEG_TO_RAD)).toFixed(1) : '?'
-              const pxPerDegV = terrainCanvasRef.current ? (terrainCanvasRef.current.height / (VFOV * DEG_TO_RAD)).toFixed(1) : '?'
+              const canvasW = terrainCanvasRef.current?.width || 0
+              const canvasH = terrainCanvasRef.current?.height || 0
+              const horizY = getHorizonY({ heading_deg, pitch_deg, hfov: fov, W: canvasW, H: canvasH })
+              const pxPerDegH = canvasW ? (canvasW / (fov * DEG_TO_RAD)).toFixed(1) : '?'
+              const pxPerDegV = canvasH ? (canvasH / (VFOV * DEG_TO_RAD)).toFixed(1) : '?'
               const gElev = meshData ? sampleMeshBilinear(activeLat, activeLng, meshData) : 0
               const eyeElev = gElev + height_m
+
+              // Azimuth spacing: how many screen pixels per azimuth sample
+              const pxPerAzStd = canvasW ? (canvasW / (fov * skylineData.resolution)).toFixed(1) : '?'
+              const pxPerAzHi  = canvasW ? (canvasW / (fov * 4)).toFixed(1) : '?'
+
+              // Geometric horizon at current AGL
+              const horizonDist = Math.sqrt(2 * EARTH_R * height_m) / 1000  // km
 
               // Re-projection validation
               let maxAngleDiff = 0
@@ -1093,10 +1140,11 @@ const ScanScreen: React.FC = () => {
               const angleDiffDeg = (maxAngleDiff * 180 / Math.PI).toFixed(4)
               const angleDiffOk = maxAngleDiff < 0.001
 
-              // Per-band stats
+              // Per-band stats (using per-band resolution)
               const bandStats = skylineData.bands.map((band, bi) => {
+                const bandAz = band.numAzimuths
                 let active = 0, eMin = Infinity, eMax = -Infinity, dMin = Infinity, dMax = -Infinity
-                for (let i = 0; i < skylineData.numAzimuths; i++) {
+                for (let i = 0; i < bandAz; i++) {
                   if (band.elevations[i] > -Infinity) {
                     active++
                     if (band.elevations[i] < eMin) eMin = band.elevations[i]
@@ -1105,16 +1153,15 @@ const ScanScreen: React.FC = () => {
                     if (band.distances[i] > dMax) dMax = band.distances[i]
                   }
                 }
-                // Center-of-view angle for this band
-                const centerBearing = heading_deg
-                const normB = ((centerBearing % 360) + 360) % 360
-                const centerIdx = Math.round(normB * skylineData.resolution) % skylineData.numAzimuths
+                // Center-of-view angle for this band (use band's own resolution)
+                const normB = ((heading_deg % 360) + 360) % 360
+                const centerIdx = Math.round(normB * band.resolution) % bandAz
                 const centerAngle = projectedBands
                   ? projectedBands.bandAngles[bi][centerIdx]
                   : (band.elevations[centerIdx] > -Infinity
                     ? Math.atan2(band.elevations[centerIdx] - (band.distances[centerIdx] * band.distances[centerIdx]) / (2 * EARTH_R) * (1 - REFRACTION_K) - skylineData.computedAt.elev, band.distances[centerIdx])
                     : -Math.PI / 2)
-                return { label: DEPTH_BANDS[bi]?.label || `band${bi}`, active, eMin, eMax, dMin, dMax, centerAngle }
+                return { label: DEPTH_BANDS[bi]?.label || `band${bi}`, active, bandAz, bandRes: band.resolution, eMin, eMax, dMin, dMax, centerAngle }
               })
 
               const elevMismatch = projectedBands
@@ -1126,12 +1173,14 @@ const ScanScreen: React.FC = () => {
 
               return (
                 <>
-                  <div style={{ color: '#ff0', marginBottom: 2 }}>v2.0 DEBUG — Layered</div>
+                  <div style={{ color: '#ff0', marginBottom: 2 }}>v2.1 DEBUG — Layered + Interp</div>
 
                   <div style={{ color: '#8cf', marginTop: 3 }}>CAMERA</div>
                   <div>hdg:{heading_deg.toFixed(1)}° pit:{pitch_deg.toFixed(1)}° fov:{fov.toFixed(0)}°</div>
                   <div>horizonY:{horizY.toFixed(0)}px  px/rad H:{pxPerDegH} V:{pxPerDegV}</div>
                   <div>AGL:{height_m.toFixed(0)}m  ground:{gElev.toFixed(0)}m  eye:{eyeElev.toFixed(0)}m</div>
+                  <div>interp:ON  az:{pxPerAzStd}px/std {pxPerAzHi}px/hi</div>
+                  <div>horizon:{horizonDist.toFixed(0)}km (geometric)</div>
 
                   <div style={{ color: '#8cf', marginTop: 3 }}>RE-PROJECTION</div>
                   <div style={{ color: angleDiffOk ? '#0f0' : '#f44' }}>
@@ -1143,14 +1192,15 @@ const ScanScreen: React.FC = () => {
                     Δelev: {elevMismatch.toFixed(0)}m {elevMismatch > 50 ? '⚠ BIG' : ''}
                   </div>
 
-                  <div style={{ color: '#8cf', marginTop: 3 }}>BANDS ({bandStats.length}) — center angles</div>
+                  <div style={{ color: '#8cf', marginTop: 3 }}>BANDS ({bandStats.length})</div>
                   {bandStats.map((bs, i) => {
                     const colors = ['#f33', '#f93', '#3f3', '#39f', '#c3f']
                     const bandCfg = DEPTH_BANDS[i]
                     const rangeStr = bandCfg ? `[${(bandCfg.minDist/1000).toFixed(0)}–${(bandCfg.maxDist/1000).toFixed(0)}km]` : ''
+                    const resLabel = bs.bandRes > SKYLINE_RESOLUTION ? ' hi' : ''
                     return (
                       <div key={bs.label} style={{ color: bs.active === 0 ? '#666' : colors[i] || '#0f0' }}>
-                        {bs.label} {rangeStr}: {bs.active}/{skylineData.numAzimuths} az
+                        {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel}
                         {bs.active > 0 && (
                           <>
                             {' '}∠{(bs.centerAngle * 180 / Math.PI).toFixed(2)}°
@@ -1163,7 +1213,7 @@ const ScanScreen: React.FC = () => {
                   })}
 
                   <div style={{ color: '#8cf', marginTop: 3 }}>PEAKS</div>
-                  <div>total:{totalPeaks} → visible:{peakPositions.length}</div>
+                  <div>total:{totalPeaks} → visible:{peakPositions.length} (r≤{MAX_PEAK_DIST/1000}km)</div>
                   {peakPositions.slice(0, 3).map(p => (
                     <div key={p.id} style={{ color: '#ccc', fontSize: 8 }}>
                       {p.name}: {p.bearing.toFixed(0)}° {p.dist_km.toFixed(0)}km x:{p.screenX.toFixed(0)} y:{p.screenY.toFixed(0)}

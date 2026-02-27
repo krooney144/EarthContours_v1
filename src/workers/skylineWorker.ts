@@ -60,24 +60,27 @@ export interface SkylineRequest {
 
 /** Depth band distance config — mirrors DEPTH_BANDS from types.ts */
 interface BandConfig {
-  label:   string
-  minDist: number
-  maxDist: number
+  label:      string
+  minDist:    number
+  maxDist:    number
+  resolution?: number   // Per-band azimuth resolution override
 }
 
 const DEPTH_BANDS: BandConfig[] = [
-  { label: 'near',     minDist: 0,       maxDist: 8_000   },   // 0–8 km
-  { label: 'med-near', minDist: 6_000,   maxDist: 20_000  },   // 6–20 km
-  { label: 'mid',      minDist: 15_000,  maxDist: 50_000  },   // 15–50 km
-  { label: 'med-far',  minDist: 40_000,  maxDist: 120_000 },   // 40–120 km
-  { label: 'far',      minDist: 100_000, maxDist: 300_000 },   // 100–300 km
+  { label: 'near',     minDist: 0,       maxDist: 8_000,   resolution: 4 },  // 0–8 km   (0.25°)
+  { label: 'med-near', minDist: 7_000,   maxDist: 20_000,  resolution: 4 },  // 7–20 km  (0.25°)
+  { label: 'mid',      minDist: 19_000,  maxDist: 50_000  },                  // 19–50 km (0.5°)
+  { label: 'med-far',  minDist: 48_000,  maxDist: 120_000 },                  // 48–120 km
+  { label: 'far',      minDist: 115_000, maxDist: 400_000 },                  // 115–400 km
 ]
 
 interface SkylineBand {
-  elevations: Float32Array
-  distances:  Float32Array
-  slopeX:     Float32Array
-  slopeZ:     Float32Array
+  elevations:  Float32Array
+  distances:   Float32Array
+  slopeX:      Float32Array
+  slopeZ:      Float32Array
+  resolution:  number      // Steps per degree for this band
+  numAzimuths: number      // 360 × resolution
 }
 
 export interface SkylineData {
@@ -287,8 +290,9 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
   const elevCorrection = tileGround - meshGround
   const correctedViewerElev = viewerElev + elevCorrection
 
-  // ── Phase 2: Build log-step distance array (far→near) ─────────────────────
+  // ── Phase 2: Build log-step distance arrays ─────────────────────────────────
 
+  // Full-range log steps for the standard pass
   const logDists: number[] = []
   let d = 500
   while (d <= maxRange) {
@@ -297,20 +301,50 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
   }
   logDists.reverse()  // far → near so nearer terrain wins
 
-  // ── Phase 3: Compute 360° skyline with depth bands ──────────────────────────
+  // Short-range log steps for the high-res near pass (only to 20km)
+  const HIRES_MAX_DIST = 20_000
+  const hiresLogDists: number[] = []
+  let d2 = 200  // Start closer for near detail
+  while (d2 <= HIRES_MAX_DIST) {
+    hiresLogDists.push(d2)
+    d2 *= 1.01  // Finer distance steps for near bands
+  }
+  hiresLogDists.reverse()
+
+  // Determine which bands are high-res vs standard
+  const HIRES_RESOLUTION = 4  // 0.25° per step
+  const hiresNumAzimuths = Math.round(360 * HIRES_RESOLUTION)
+  const standardBandIndices: number[] = []
+  const hiresBandIndices: number[] = []
+  for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+    if (DEPTH_BANDS[bi].resolution && DEPTH_BANDS[bi].resolution! > resolution) {
+      hiresBandIndices.push(bi)
+    } else {
+      standardBandIndices.push(bi)
+    }
+  }
+
+  // ── Phase 3: Compute 360° skyline — standard resolution pass ──────────────
 
   const angles    = new Float32Array(numAzimuths)
   const distances = new Float32Array(numAzimuths)
   const shading   = new Float32Array(numAzimuths)
 
-  // Allocate per-band arrays
-  const bands: SkylineBand[] = DEPTH_BANDS.map(() => ({
-    elevations: new Float32Array(numAzimuths).fill(-Infinity),
-    distances:  new Float32Array(numAzimuths),
-    slopeX:     new Float32Array(numAzimuths),
-    slopeZ:     new Float32Array(numAzimuths),
-  }))
+  // Allocate per-band arrays with per-band resolution
+  const bands: SkylineBand[] = DEPTH_BANDS.map((cfg) => {
+    const bandRes = cfg.resolution || resolution
+    const bandAz  = Math.round(360 * bandRes)
+    return {
+      elevations:  new Float32Array(bandAz).fill(-Infinity),
+      distances:   new Float32Array(bandAz),
+      slopeX:      new Float32Array(bandAz),
+      slopeZ:      new Float32Array(bandAz),
+      resolution:  bandRes,
+      numAzimuths: bandAz,
+    }
+  })
 
+  // Pass 1: Standard resolution (720 azimuths) — populates overall skyline + standard bands
   for (let ai = 0; ai < numAzimuths; ai++) {
     const azDeg  = ai / resolution
     const azRad  = azDeg * DEG_TO_RAD
@@ -322,12 +356,19 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     let ridgeLat  = viewerLat
     let ridgeLng  = viewerLng
 
-    // Per-band tracking: max elevation angle seen within each band's distance range
-    const bandMaxAngles = DEPTH_BANDS.map(() => -Math.PI / 2)
-    const bandRidgeDist = DEPTH_BANDS.map(() => 0)
-    const bandRidgeLat  = DEPTH_BANDS.map(() => viewerLat)
-    const bandRidgeLng  = DEPTH_BANDS.map(() => viewerLng)
-    const bandRidgeElev = DEPTH_BANDS.map(() => -Infinity)
+    // Per-standard-band tracking
+    const bandMaxAngles: number[] = []
+    const bandRidgeDist: number[] = []
+    const bandRidgeLat:  number[] = []
+    const bandRidgeLng:  number[] = []
+    const bandRidgeElev: number[] = []
+    for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+      bandMaxAngles[bi] = -Math.PI / 2
+      bandRidgeDist[bi] = 0
+      bandRidgeLat[bi]  = viewerLat
+      bandRidgeLng[bi]  = viewerLng
+      bandRidgeElev[bi] = -Infinity
+    }
 
     for (const dist of logDists) {
       const sLat = viewerLat + (cosA * dist) / 111_132
@@ -342,7 +383,7 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
 
       if (elevAngle > Math.PI / 3) continue
 
-      // Overall maximum (existing behaviour)
+      // Overall maximum
       if (elevAngle > maxAngle) {
         maxAngle  = elevAngle
         ridgeDist = dist
@@ -350,15 +391,15 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
         ridgeLng  = sLng
       }
 
-      // Per-band maximum — a sample can fall into multiple bands (overlap zone)
-      for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+      // Only populate standard-res bands in this pass
+      for (const bi of standardBandIndices) {
         const band = DEPTH_BANDS[bi]
         if (dist >= band.minDist && dist <= band.maxDist && elevAngle > bandMaxAngles[bi]) {
           bandMaxAngles[bi] = elevAngle
           bandRidgeDist[bi] = dist
           bandRidgeLat[bi]  = sLat
           bandRidgeLng[bi]  = sLng
-          bandRidgeElev[bi] = rawElev  // Raw elevation (before curvature), for re-projection
+          bandRidgeElev[bi] = rawElev
         }
       }
     }
@@ -371,12 +412,11 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     distances[ai] = ridgeDist
     shading[ai]   = shade
 
-    // Populate band arrays
-    for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+    // Populate standard-res band arrays
+    for (const bi of standardBandIndices) {
       bands[bi].elevations[ai] = bandRidgeElev[bi]
       bands[bi].distances[ai]  = bandRidgeDist[bi]
 
-      // Compute slope at each band's ridgeline point (skip if no ridge in this band)
       if (bandRidgeElev[bi] > -Infinity && bandRidgeDist[bi] > 0) {
         const bZoom = distToZoom(bandRidgeDist[bi])
         const { dzdx, dzdy } = slopeAndShade(
@@ -389,7 +429,77 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     }
 
     if (ai % 45 === 0) {
-      self.postMessage({ type: 'progress', phase: 'skyline', progress: ai / numAzimuths })
+      self.postMessage({ type: 'progress', phase: 'skyline', progress: ai / numAzimuths * 0.7 })
+    }
+  }
+
+  // ── Phase 4: High-res pass (1440 azimuths, 0–20km) for near bands ────────
+
+  if (hiresBandIndices.length > 0) {
+    for (let ai = 0; ai < hiresNumAzimuths; ai++) {
+      const azDeg = ai / HIRES_RESOLUTION
+      const azRad = azDeg * DEG_TO_RAD
+      const sinA  = Math.sin(azRad)
+      const cosA  = Math.cos(azRad)
+
+      // Per high-res band tracking
+      const bandMaxAngles: number[] = []
+      const bandRidgeDist: number[] = []
+      const bandRidgeLat:  number[] = []
+      const bandRidgeLng:  number[] = []
+      const bandRidgeElev: number[] = []
+      for (const bi of hiresBandIndices) {
+        bandMaxAngles[bi] = -Math.PI / 2
+        bandRidgeDist[bi] = 0
+        bandRidgeLat[bi]  = viewerLat
+        bandRidgeLng[bi]  = viewerLng
+        bandRidgeElev[bi] = -Infinity
+      }
+
+      for (const dist of hiresLogDists) {
+        const sLat = viewerLat + (cosA * dist) / 111_132
+        const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
+
+        const zoom    = distToZoom(dist)
+        const rawElev = sampleBest(sLat, sLng, zoom, meshElevations, meshWidth, meshHeight, meshBounds)
+
+        const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const effElev   = rawElev - curvDrop
+        const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
+
+        if (elevAngle > Math.PI / 3) continue
+
+        for (const bi of hiresBandIndices) {
+          const band = DEPTH_BANDS[bi]
+          if (dist >= band.minDist && dist <= band.maxDist && elevAngle > bandMaxAngles[bi]) {
+            bandMaxAngles[bi] = elevAngle
+            bandRidgeDist[bi] = dist
+            bandRidgeLat[bi]  = sLat
+            bandRidgeLng[bi]  = sLng
+            bandRidgeElev[bi] = rawElev
+          }
+        }
+      }
+
+      // Populate high-res band arrays
+      for (const bi of hiresBandIndices) {
+        bands[bi].elevations[ai] = bandRidgeElev[bi]
+        bands[bi].distances[ai]  = bandRidgeDist[bi]
+
+        if (bandRidgeElev[bi] > -Infinity && bandRidgeDist[bi] > 0) {
+          const bZoom = distToZoom(bandRidgeDist[bi])
+          const { dzdx, dzdy } = slopeAndShade(
+            bandRidgeLat[bi], bandRidgeLng[bi], bZoom,
+            meshElevations, meshWidth, meshHeight, meshBounds,
+          )
+          bands[bi].slopeX[ai] = dzdx
+          bands[bi].slopeZ[ai] = dzdy
+        }
+      }
+
+      if (ai % 90 === 0) {
+        self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.7 + (ai / hiresNumAzimuths) * 0.3 })
+      }
     }
   }
 

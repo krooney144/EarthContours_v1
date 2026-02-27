@@ -267,15 +267,17 @@ export interface DepthBandConfig {
   minDist: number
   /** Maximum distance (metres, inclusive) */
   maxDist: number
+  /** Azimuth resolution for this band (steps per degree). If omitted, uses the global resolution. */
+  resolution?: number
 }
 
-/** 5-band configuration for troubleshooting depth layers. */
+/** 5-band configuration with high-res near bands and tightened overlaps. */
 export const DEPTH_BANDS: DepthBandConfig[] = [
-  { label: 'near',     minDist: 0,       maxDist: 8_000   },   // 0–8 km
-  { label: 'med-near', minDist: 6_000,   maxDist: 20_000  },   // 6–20 km
-  { label: 'mid',      minDist: 15_000,  maxDist: 50_000  },   // 15–50 km
-  { label: 'med-far',  minDist: 40_000,  maxDist: 120_000 },   // 40–120 km
-  { label: 'far',      minDist: 100_000, maxDist: 300_000 },   // 100–300 km
+  { label: 'near',     minDist: 0,       maxDist: 8_000,   resolution: 4 },  // 0–8 km   (0.25°, 1440 az)
+  { label: 'med-near', minDist: 7_000,   maxDist: 20_000,  resolution: 4 },  // 7–20 km  (0.25°, 1440 az)
+  { label: 'mid',      minDist: 19_000,  maxDist: 50_000  },                  // 19–50 km (0.5°,  720 az)
+  { label: 'med-far',  minDist: 48_000,  maxDist: 120_000 },                  // 48–120 km
+  { label: 'far',      minDist: 115_000, maxDist: 400_000 },                  // 115–400 km
 ]
 
 /**
@@ -293,6 +295,10 @@ export interface SkylineBand {
   slopeX:     Float32Array
   /** Surface gradient dz/dz (north) at ridgeline — for future contour fragments */
   slopeZ:     Float32Array
+  /** Azimuth resolution for this band (steps per degree). Defaults to SkylineData.resolution. */
+  resolution: number
+  /** Number of azimuth samples in this band's arrays = 360 × resolution */
+  numAzimuths: number
 }
 
 // ─── SCAN — Skyline Precomputation ────────────────────────────────────────────
