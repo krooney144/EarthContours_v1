@@ -1300,8 +1300,6 @@ const ScanScreen: React.FC = () => {
 
 // ─── Sub-Components ───────────────────────────────────────────────────────────
 
-const LABEL_STACK_HEIGHT = 75
-
 const PeakLabel: React.FC<{
   pos: PeakScreenPos
   units: 'imperial' | 'metric'
@@ -1309,10 +1307,6 @@ const PeakLabel: React.FC<{
 }> = ({ pos, units, canvasH }) => {
   const distFade  = Math.max(0.25, 1 - Math.pow(pos.dist_km / (MAX_PEAK_DIST / 1000), 0.5))
   const isNearTop = pos.screenY < canvasH * 0.22
-
-  const topPx = isNearTop
-    ? pos.screenY
-    : pos.screenY - LABEL_STACK_HEIGHT
 
   const card = (
     <div className={styles.peakCard} aria-hidden="true">
@@ -1324,10 +1318,18 @@ const PeakLabel: React.FC<{
     </div>
   )
 
+  // Anchor the dot center at pos.screenY regardless of card content height.
+  // Normal (dot at bottom): use `bottom` so card+line grow upward naturally.
+  // Flipped (dot at top): use `top` so line+card grow downward.
+  const DOT_HALF = 4  // half of the 8px peakDot
+  const posStyle: React.CSSProperties = isNearTop
+    ? { left: `${pos.screenX}px`, top: `${pos.screenY - DOT_HALF}px`, opacity: distFade }
+    : { left: `${pos.screenX}px`, bottom: `${canvasH - pos.screenY - DOT_HALF}px`, opacity: distFade }
+
   return (
     <div
       className={`${styles.peakLabel} ${isNearTop ? styles.peakLabelFlipped : ''}`}
-      style={{ left: `${pos.screenX}px`, top: `${topPx}px`, opacity: distFade }}
+      style={posStyle}
       role="img"
       aria-label={`${pos.name}, ${formatElevation(pos.elevation_m, units)}, ${pos.dist_km.toFixed(0)} km`}
     >
