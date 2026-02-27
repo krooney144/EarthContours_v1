@@ -529,6 +529,38 @@ function drawScanCanvas(
     renderTerrain(ctx, skylineData, cam, projectedBands)
   }
 
+  // ── 2b. DEBUG: Per-band ridgeline overlay (distinct colors) ─────────────────
+  if (skylineData) {
+    const bandColors = ['#ff3333', '#33ff33', '#3399ff']  // near=red, mid=green, far=blue
+    const numBands = skylineData.bands.length
+    for (let bi = 0; bi < numBands; bi++) {
+      ctx.beginPath()
+      let started = false
+      for (let col = 0; col < W; col += 2) {  // every other pixel for speed
+        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+        const angle = bandAngleAt(skylineData, bi, bearingDeg, projectedBands)
+        if (angle <= -Math.PI / 2 + 0.001) { started = false; continue }
+        const { y } = project(bearingDeg, angle, cam)
+        if (!started) { ctx.moveTo(col, y); started = true }
+        else ctx.lineTo(col, y)
+      }
+      ctx.strokeStyle = bandColors[bi] || '#fff'
+      ctx.lineWidth = 1.5
+      ctx.setLineDash([4, 4])
+      ctx.stroke()
+      ctx.setLineDash([])
+
+      // Label at left edge
+      const labelAngle = bandAngleAt(skylineData, bi, cam.heading_deg - cam.hfov * 0.4, projectedBands)
+      if (labelAngle > -Math.PI / 2 + 0.001) {
+        const { y: ly } = project(cam.heading_deg - cam.hfov * 0.4, labelAngle, cam)
+        ctx.font = '11px monospace'
+        ctx.fillStyle = bandColors[bi] || '#fff'
+        ctx.fillText(`${DEPTH_BANDS[bi]?.label || bi} ${(labelAngle * 180 / Math.PI).toFixed(2)}°`, 8, ly - 4)
+      }
+    }
+  }
+
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
   const glowGrad = ctx.createLinearGradient(0, horizonY - 12, 0, horizonY + 12)
   glowGrad.addColorStop(0,   'rgba(132, 209, 219, 0)')
@@ -1073,8 +1105,21 @@ const ScanScreen: React.FC = () => {
                     if (band.distances[i] > dMax) dMax = band.distances[i]
                   }
                 }
-                return { label: DEPTH_BANDS[bi]?.label || `band${bi}`, active, eMin, eMax, dMin, dMax }
+                // Center-of-view angle for this band
+                const centerBearing = heading_deg
+                const normB = ((centerBearing % 360) + 360) % 360
+                const centerIdx = Math.round(normB * skylineData.resolution) % skylineData.numAzimuths
+                const centerAngle = projectedBands
+                  ? projectedBands.bandAngles[bi][centerIdx]
+                  : (band.elevations[centerIdx] > -Infinity
+                    ? Math.atan2(band.elevations[centerIdx] - (band.distances[centerIdx] * band.distances[centerIdx]) / (2 * EARTH_R) * (1 - REFRACTION_K) - skylineData.computedAt.elev, band.distances[centerIdx])
+                    : -Math.PI / 2)
+                return { label: DEPTH_BANDS[bi]?.label || `band${bi}`, active, eMin, eMax, dMin, dMax, centerAngle }
               })
+
+              const elevMismatch = projectedBands
+                ? Math.abs(skylineData.computedAt.elev - projectedBands.viewerElev)
+                : 0
 
               // Peak funnel
               const totalPeaks = (osmPeaks.length > 0 ? osmPeaks : peaks).length
@@ -1092,16 +1137,28 @@ const ScanScreen: React.FC = () => {
                   <div style={{ color: angleDiffOk ? '#0f0' : '#f44' }}>
                     max Δangle: {angleDiffDeg}° {angleDiffOk ? '✓' : '⚠ MISMATCH'}
                   </div>
-                  <div>viewer elev (worker): {skylineData.computedAt.elev.toFixed(0)}m</div>
-                  {projectedBands && <div>viewer elev (reproj): {projectedBands.viewerElev.toFixed(0)}m</div>}
+                  <div>worker elev: {skylineData.computedAt.elev.toFixed(0)}m</div>
+                  {projectedBands && <div>reproj elev: {projectedBands.viewerElev.toFixed(0)}m</div>}
+                  <div style={{ color: elevMismatch > 50 ? '#f44' : elevMismatch > 10 ? '#fa0' : '#0f0' }}>
+                    Δelev: {elevMismatch.toFixed(0)}m {elevMismatch > 50 ? '⚠ BIG' : ''}
+                  </div>
 
-                  <div style={{ color: '#8cf', marginTop: 3 }}>BANDS ({bandStats.length})</div>
-                  {bandStats.map(bs => (
-                    <div key={bs.label} style={{ color: bs.active === 0 ? '#666' : '#0f0' }}>
-                      {bs.label}: {bs.active}/{skylineData.numAzimuths} az
-                      {bs.active > 0 && <> e:{bs.eMin.toFixed(0)}–{bs.eMax.toFixed(0)}m d:{(bs.dMin/1000).toFixed(0)}–{(bs.dMax/1000).toFixed(0)}km</>}
-                    </div>
-                  ))}
+                  <div style={{ color: '#8cf', marginTop: 3 }}>BANDS ({bandStats.length}) — center angles</div>
+                  {bandStats.map((bs, i) => {
+                    const colors = ['#f33', '#3f3', '#39f']
+                    return (
+                      <div key={bs.label} style={{ color: bs.active === 0 ? '#666' : colors[i] || '#0f0' }}>
+                        {bs.label}: {bs.active}/{skylineData.numAzimuths} az
+                        {bs.active > 0 && (
+                          <>
+                            {' '}∠{(bs.centerAngle * 180 / Math.PI).toFixed(2)}°
+                            {' '}e:{bs.eMin.toFixed(0)}–{bs.eMax.toFixed(0)}m
+                            {' '}d:{(bs.dMin/1000).toFixed(0)}–{(bs.dMax/1000).toFixed(0)}km
+                          </>
+                        )}
+                      </div>
+                    )
+                  })}
 
                   <div style={{ color: '#8cf', marginTop: 3 }}>PEAKS</div>
                   <div>total:{totalPeaks} → visible:{peakPositions.length}</div>
