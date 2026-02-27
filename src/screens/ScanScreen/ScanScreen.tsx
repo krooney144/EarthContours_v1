@@ -34,7 +34,9 @@
  *
  * ── Peak visibility ──────────────────────────────────────────────────────────
  *   isPeakVisible() compares peak elevation angle against the ridgeline.
- *   Dots are snapped to ridgeline Y via project(bearing, ridgeAngle, cam).
+ *   Dots snap to the max per-band ridgeline angle at the peak's bearing,
+ *   ensuring they match exactly what's drawn on screen.  Snap is upward-only:
+ *   if the peak's true angle is above all bands, its real position is kept.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -645,15 +647,26 @@ function drawScanCanvas(
     if (screenX < -50 || screenX > W + 50) continue
     if (horizDist > MAX_PEAK_DIST) continue
 
-    // Snap dot to ridgeline Y — uses project() via the same camera
+    // Snap dot to the visible ridgeline — use per-band angles (same data the
+    // renderer draws) instead of the coarser overall array.  Take the max
+    // across all bands so the dot sits on whichever band is topmost at this
+    // bearing, matching exactly what's painted on screen.
     if (skylineData) {
       const bearing = calculateBearing(
         { lat: activeLat, lng: activeLng },
         { lat: peak.lat, lng: peak.lng },
       )
-      const ridgeAngle = skylineAngleAt(skylineData, bearing, projectedBands)
-      const ridgePos = project(bearing, ridgeAngle, cam)
-      screenY = ridgePos.y
+      let maxBandAngle = -Math.PI / 2
+      for (let bi = 0; bi < skylineData.bands.length; bi++) {
+        const a = bandAngleAt(skylineData, bi, bearing, projectedBands)
+        if (a > maxBandAngle) maxBandAngle = a
+      }
+      // Only snap if the ridgeline has data at this bearing
+      if (maxBandAngle > -Math.PI / 2 + 0.001) {
+        const ridgePos = project(bearing, maxBandAngle, cam)
+        // Snap upward only — if peak's true position is above the ridge, keep it
+        screenY = Math.min(screenY, ridgePos.y)
+      }
     }
 
     const minSpacing = W * 0.10

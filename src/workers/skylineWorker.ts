@@ -79,6 +79,8 @@ interface SkylineBand {
   distances:   Float32Array
   slopeX:      Float32Array
   slopeZ:      Float32Array
+  ridgeLats:   Float32Array
+  ridgeLngs:   Float32Array
   resolution:  number      // Steps per degree for this band
   numAzimuths: number      // 360 × resolution
 }
@@ -339,6 +341,8 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       distances:   new Float32Array(bandAz),
       slopeX:      new Float32Array(bandAz),
       slopeZ:      new Float32Array(bandAz),
+      ridgeLats:   new Float32Array(bandAz),
+      ridgeLngs:   new Float32Array(bandAz),
       resolution:  bandRes,
       numAzimuths: bandAz,
     }
@@ -416,6 +420,8 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     for (const bi of standardBandIndices) {
       bands[bi].elevations[ai] = bandRidgeElev[bi]
       bands[bi].distances[ai]  = bandRidgeDist[bi]
+      bands[bi].ridgeLats[ai]  = bandRidgeLat[bi]
+      bands[bi].ridgeLngs[ai]  = bandRidgeLng[bi]
 
       if (bandRidgeElev[bi] > -Infinity && bandRidgeDist[bi] > 0) {
         const bZoom = distToZoom(bandRidgeDist[bi])
@@ -485,6 +491,8 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       for (const bi of hiresBandIndices) {
         bands[bi].elevations[ai] = bandRidgeElev[bi]
         bands[bi].distances[ai]  = bandRidgeDist[bi]
+        bands[bi].ridgeLats[ai]  = bandRidgeLat[bi]
+        bands[bi].ridgeLngs[ai]  = bandRidgeLng[bi]
 
         if (bandRidgeElev[bi] > -Infinity && bandRidgeDist[bi] > 0) {
           const bZoom = distToZoom(bandRidgeDist[bi])
@@ -531,6 +539,8 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       band.distances.buffer as ArrayBuffer,
       band.slopeX.buffer as ArrayBuffer,
       band.slopeZ.buffer as ArrayBuffer,
+      band.ridgeLats.buffer as ArrayBuffer,
+      band.ridgeLngs.buffer as ArrayBuffer,
     )
   }
   self.postMessage({ type: 'complete', skyline }, transferables)
