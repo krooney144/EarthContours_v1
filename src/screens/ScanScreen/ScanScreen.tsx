@@ -723,10 +723,8 @@ const ScanScreen: React.FC = () => {
     const worker = skylineWorker.current
     if (!worker) return
 
-    // Worker computes from ground level — AGL is a camera offset handled by
-    // reprojectBands() on the main thread.  This avoids the stale-closure bug
-    // where height_m was captured at mount time (not in the dependency array).
     const groundElev = sampleMeshBilinear(activeLat, activeLng, meshData)
+    const viewerElev = groundElev + height_m
 
     setIsSkylineComputing(true)
 
@@ -736,7 +734,7 @@ const ScanScreen: React.FC = () => {
     const request: SkylineRequest = {
       viewerLat:      activeLat,
       viewerLng:      activeLng,
-      viewerElev:     groundElev,
+      viewerElev:     viewerElev,
       meshElevations: meshCopy,
       meshWidth:      meshData.width,
       meshHeight:     meshData.height,
