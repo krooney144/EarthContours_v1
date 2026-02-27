@@ -381,9 +381,8 @@ function drawScanCanvas(
       const vfovRad = VFOV * DEG_TO_RAD
       const ridgeScreenY = horizonY - ridgeAngle * (H / vfovRad)
 
-      // Use the lower screen position (higher pixel Y = lower in image) of:
-      // ridgeline position vs geometric position — dot sits at the ridge, never floating in sky
-      screenY = Math.max(ridgeScreenY, screenY)
+      // Snap dot directly to ridgeline
+      screenY = ridgeScreenY
     }
 
     // Skip if too close horizontally to an already-added label (prevents cluster overlap).
