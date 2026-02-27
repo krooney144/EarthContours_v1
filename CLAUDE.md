@@ -7,8 +7,9 @@ Quick reference for any Claude Code session in this repo.
 ## What This Project Is
 
 A **terrain visualization web app** (React + TypeScript + Vite) for exploring US elevation data.
-- **v1.4.1** — SCAN bugfixes: DPR coordinate mismatch (horizon was rendering at canvas bottom at dpr>1 due to `setTransform` vs physical-pixel mismatch), stale-while-revalidate skyline (old panorama visible while worker recomputes), skip recompute for moves < 1.5 km, peak label improvements (max 8, FOV-gated fallback filter, horizontal deduplication at 10% canvas-width spacing).
-- **v1.4** — SCAN performance overhaul: worker-only rendering (no main-thread ray march), canvas RAF gating, ridgeline peak filtering, peak dot snap to ridgeline, natural drag direction.
+- **v2.0** — SCAN architectural overhaul: single `project()` camera function (all bearing/angle→screen conversions go through one function — alignment bugs structurally impossible), depth-banded skyline (near/mid/far bands with raw elevation+distance per azimuth), main-thread AGL re-projection (no worker round-trip for height changes), layered renderer (painter's order far→near with depth cues: line weight 0.5→3px, opacity 0.15→0.8, progressive fill darkness), comprehensive debug diagnostics panel.
+- **v1.4.1** — SCAN bugfixes: DPR coordinate mismatch, stale-while-revalidate skyline, skip recompute for moves < 1.5 km, peak label improvements.
+- **v1.4** — SCAN performance overhaul: worker-only rendering, canvas RAF gating, ridgeline peak filtering, peak dot snap to ridgeline, natural drag direction.
 - Mobile-first, state-based routing (no URL changes), native app feel.
 - 4 screens: SCAN (AR first-person panorama), EXPLORE (3D orbit), MAP (topo tiles), SETTINGS.
 
@@ -16,7 +17,7 @@ A **terrain visualization web app** (React + TypeScript + Vite) for exploring US
 
 ## Branch
 
-Active development branch: `claude/fix-scan-performance-OKa7Z`
+Active development branch: `claude/remove-scan-shading-RmS6l`
 
 ---
 
@@ -87,16 +88,16 @@ Transitions use zoom animation stored in `uiStore`.
 
 ## Rendering Per Screen
 
-- **SCAN** (v1.4.1 — worker-only rendering + bugfixes):
-  - **Single rendering path** — QUICK path only: reads pre-computed `SkylineData` from `skylineWorker.ts` (O(W)/frame). Main thread shows sky + "Computing panorama…" loading overlay until worker completes. No main-thread ray march.
-  - **No double tile fetching** — only the worker fetches AWS Terrarium tiles via `ScanTileCache`. Main thread does not prefetch tiles.
-  - **Canvas RAF gating** — `resizeCanvas()` only runs on ResizeObserver; `redrawCanvas()` is gated through `requestAnimationFrame` to collapse rapid pointer events into one draw per frame.
-  - **Physical-pixel coordinate system** — `ctx.setTransform(1,0,0,1,0,0)` (identity); `drawScanCanvas` works in `canvas.width/height` (physical pixels). Peak positions divided by `dpr` only when converting to HTML overlay CSS coords. Using `setTransform(dpr,...)` here caused the horizon to render at the canvas bottom at dpr>1.
-  - **Stale-while-revalidate** — on location change, old skyline stays visible while worker recomputes in background; `skylineDataRef` mirrors state so the effect can read it without a stale closure. Progress bar still shows during recompute.
-  - **Skip recompute for moves < 1.5 km** — checks distance from `skylineData.computedAt` before posting to worker; ridgeline is visually identical at that scale.
-  - **Peak visibility filter** — `isPeakVisible()` checks each peak's elevation angle against the ridgeline angle in `skylineData.angles`. Only peaks above the ridge are shown; max 8 most prominent per view. Fallback filter (no skyline) also applies FOV check. Horizontal deduplication: peaks within 10% of canvas width of a higher-elevation label are skipped.
-  - **Peak dot snapped to ridgeline** — `screenY` overridden to ridgeline Y from skyline data so dots sit on the terrain silhouette, not floating in sky.
-  - **Natural drag direction** — `applyARDrag` negates deltaX so drag right → view pans right (heading decreases), matching PeakFinder behaviour.
+- **SCAN** (v2.0 — depth-layered architecture):
+  - **Single camera function** — `project(bearingDeg, elevAngleRad, cam) → {x, y}` is the ONE source of truth for all bearing/angle→screen conversions. Ridgeline renderer, peak dots, peak labels all call it. Alignment bugs structurally impossible.
+  - **Depth-banded skyline** — Worker produces `SkylineData` with 3 depth bands (near 0–12km, mid 8–60km, far 50–300km). Each band stores per-azimuth raw elevation + distance + slope vectors. Band overlap at boundaries prevents seams. Array-driven — adding bands = pushing to `DEPTH_BANDS`.
+  - **AGL re-projection** — `reprojectBands()` re-derives elevation angles from raw band data when viewer height changes. O(2160) atan2 calls, sub-millisecond. No worker round-trip for AGL slider changes.
+  - **Layered renderer** — `renderTerrain()` draws bands in painter's order (far→near) with depth cues: line weight (0.5→3px), opacity (0.15→0.8), fill darkness. Band count is array-driven — visual parameters auto-interpolate.
+  - **Canvas RAF gating** — `resizeCanvas()` only runs on ResizeObserver; `redrawCanvas()` is gated through `requestAnimationFrame`.
+  - **Physical-pixel coordinate system** — `ctx.setTransform(1,0,0,1,0,0)` (identity); all drawing in physical pixels. Peak positions divided by `dpr` only for HTML overlay CSS coords.
+  - **Stale-while-revalidate** — old skyline stays visible while worker recomputes; skip recompute for moves < 1.5 km.
+  - **Peak visibility + snap** — `isPeakVisible()` checks peak angle vs ridgeline. Dots snapped to ridgeline Y via `project(bearing, ridgeAngle, cam)`. Max 8, horizontal dedup at 10% canvas width.
+  - **Debug diagnostics** — Comprehensive debug panel: camera state, re-projection validation (max angle diff), per-band health (active azimuths, elevation/distance ranges), peak funnel.
   - `fetchPeaksNear(lat, lng, 130)` fetches worldwide OSM peaks on location change; falls back to hardcoded peaks
   - `applyFovScale(scale)` changes FOV via pinch gesture (15°–100°)
   - `PitchIndicator` component on left edge; loading progress bar; FOV badge
@@ -226,6 +227,8 @@ Regions are hand-tuned geographic chunks sized for visual quality, **not politic
 | v1.3 (done) | SCAN Phase 2: `ScanTileCache` (z8–z13 multi-zoom), `skylineWorker` (720-azimuth precomputation), OSM Overpass peaks (worldwide, 24h cache), pinch-zoom FOV (15°–100°), pitch indicator, 250km range, O(1) mobile shading |
 | v1.4 (done) | SCAN performance overhaul: worker-only rendering (removed main-thread ray march + double tile fetch), canvas RAF gating + ResizeObserver-only resize, ridgeline peak visibility filter (max 15), peak dot snap to ridgeline Y, natural drag direction (negated deltaX) |
 | v1.4.1 (done) | SCAN bugfixes: DPR coordinate mismatch fixed (horizon now correct at dpr>1), stale-while-revalidate skyline, skip recompute for moves < 1.5 km, peak labels max 8 + FOV-gated fallback + horizontal deduplication |
+| v2.0 (done) | SCAN architectural overhaul: single `project()` camera function, depth-banded skyline (near/mid/far with raw elev+dist per azimuth), main-thread AGL re-projection (no worker round-trip), layered renderer (painter's order far→near with depth cues), comprehensive debug diagnostics |
+| v2.1 | Phase 5: Interior contour fragments — slope-driven line fragments inside terrain bands, density decreasing with distance. Slope vectors already stored in `SkylineBand.slopeX/slopeZ`. |
 | 3 | Real GPS (`navigator.geolocation`), `DeviceOrientationEvent` heading for true AR, worldwide viewpoint selection, HTTPS deployment for camera overlay |
 | Future | Three.js WebGL renderer; museum exhibit mode (7680×1080 triple ultra-wide) |
 

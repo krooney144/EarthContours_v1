@@ -2,7 +2,7 @@
 
 **Terrain visualization web app** — explore US elevation data through AR, 3D orbit, and topographic map views.
 
-![Version](https://img.shields.io/badge/version-1.4.1-blue) ![Status](https://img.shields.io/badge/status-active-green)
+![Version](https://img.shields.io/badge/version-2.0-blue) ![Status](https://img.shields.io/badge/status-active-green)
 
 ---
 
@@ -12,7 +12,7 @@ EarthContours renders geographic elevation data across the United States in thre
 
 | Screen | Description |
 |--------|-------------|
-| **SCAN** | AR first-person panorama — PeakFinder-style silhouette renderer, 250 km range, worker-only rendering (no main-thread ray march), ridgeline peak visibility filter, natural drag panning, ocean-depth palette |
+| **SCAN** | AR first-person panorama — depth-layered ridgeline renderer (near/mid/far bands), single `project()` camera function, AGL re-projection without worker round-trip, 250 km range, ocean-depth palette |
 | **EXPLORE** | 3D terrain explorer — free-roam pan/zoom/orbit, real peak label projection, location pin from MAP |
 | **MAP** | Dark topographic map — Carto Dark Matter tiles on Canvas, with peak/river overlays |
 | **SETTINGS** | User preferences — units, labels, performance, data resolution |
@@ -120,7 +120,7 @@ EarthContours_v1/
 **Active data source (as of Session 2):** AWS Terrarium tiles (Tier 4). Mount Elbert test region (39.1°N, 106.4°W) should show max elevation ~4400m (14,440 ft). Open the browser console and filter for `ELEVATION LOAD` or `TERRAIN SOURCE` to see which tier is active at runtime.
 
 **Rendering approaches per screen:**
-- SCAN (v1.4.1): **Single rendering path** — QUICK path only. Worker precomputes a 720-azimuth 360° skyline (tiles + ray march in background). Old panorama stays visible while worker recomputes a new location (stale-while-revalidate); recompute is skipped entirely for moves < 1.5 km. Canvas uses physical-pixel coordinate space (identity ctx transform) — fixes horizon alignment at dpr>1. Peak labels: max 8, filtered by ridgeline visibility and FOV, horizontally deduplicated at 10% canvas-width spacing. Peak dots snap to ridgeline Y. Drag right = pan right. Pinch-zoom FOV 15°–100°. OSM Overpass worldwide peaks with 24h cache.
+- SCAN (v2.0): **Depth-layered architecture** — Single `project()` camera function for all coordinate conversions. Worker produces depth-banded skyline (near 0–12km, mid 8–60km, far 50–300km) with raw elevation+distance per azimuth. `renderTerrain()` draws bands in painter's order (far→near) with depth cues: line weight 0.5→3px, opacity 0.15→0.8, progressive fill darkness. `reprojectBands()` re-derives angles when AGL changes — no worker round-trip. Debug panel shows camera state, re-projection validation, per-band health, peak funnel. Stale-while-revalidate; skip recompute < 1.5km. Peak labels max 8, ridgeline snap via `project()`. Pinch-zoom FOV 15°–100°. OSM Overpass worldwide peaks with 24h cache.
 - EXPLORE: Marching squares (extracts contour line segments at elevation thresholds). Free-roam navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to. Peak labels use real `project3D()` projection from actual lat/lng. Pulsing gold location pin appears when MAP sets an explore point.
 - MAP: Canvas tile fetching with overlay graphics. Tap anywhere to set the explore location (synced to EXPLORE and SCAN via `locationStore`).
 
@@ -141,7 +141,9 @@ EarthContours_v1/
 | **v1.2 (done)** | SCAN Phase 1: bilinear sampling, logarithmic rays (476 steps), Earth curvature + refraction, hill shading, 120km range |
 | **v1.3 (done)** | SCAN Phase 2: `ScanTileCache` (z8–z13 multi-zoom), `skylineWorker` (720-azimuth precomputation), OSM Overpass peaks (worldwide, 24h cache), pinch-zoom FOV (15°–100°), pitch indicator, 250km range, O(1) mobile shading |
 | **v1.4 (done)** | SCAN performance overhaul: worker-only rendering (removed main-thread ray march + double tile fetch), canvas RAF gating + ResizeObserver-only resize, ridgeline peak visibility filter (max 15), peak dot snap to ridgeline Y, natural drag direction |
-| **v1.4.1 (done)** | SCAN bugfixes: DPR coordinate mismatch (horizon now renders at correct position on all displays), stale-while-revalidate skyline, skip recompute < 1.5 km, peak labels max 8 + FOV-gated fallback + horizontal deduplication |
+| **v1.4.1 (done)** | SCAN bugfixes: DPR coordinate mismatch, stale-while-revalidate skyline, skip recompute < 1.5 km, peak label dedup |
+| **v2.0 (done)** | SCAN architectural overhaul: single `project()` camera, depth-banded skyline (near/mid/far), AGL re-projection, layered renderer with depth cues, comprehensive debug panel |
+| **v2.1** | Interior contour fragments (slope-driven linework, Phase 5) |
 | **3** | Real GPS, DeviceOrientation/magnetometer for true AR, Three.js WebGL renderer |
 | **Future** | Museum exhibit mode (7680×1080 triple ultra-wide) |
 

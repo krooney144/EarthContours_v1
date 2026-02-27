@@ -1,34 +1,43 @@
 /**
- * EarthContours — SCAN Screen  (v1.4)
+ * EarthContours — SCAN Screen  (v2.0)
  *
- * First-person terrain panorama with PeakFinder-style aesthetics.
+ * First-person terrain panorama with depth-layered ridgeline rendering.
  *
- * ── Rendering architecture ───────────────────────────────────────────────────
- *  Worker computes a 720-azimuth 360° skyline in background (tiles + ray march).
- *  Main thread shows sky + loading overlay while worker runs, then snaps to the
- *  full panorama on worker completion — O(W) per frame during panning (QUICK path).
+ * ── Architecture (3 layers) ──────────────────────────────────────────────────
  *
- * ── Layers (painter's order) ─────────────────────────────────────────────────
- *   1  Sky gradient   — deep void → atmospheric haze with horizon glow
- *   2  Terrain fill   — silhouette fill from ridgeline to bottom (worker skyline)
- *   3  Horizon glow   — thin teal line at the horizon
- *   4  Peak labels    — HTML overlay; only visible ridgeline peaks, max 15
+ *  Layer 1 — THE CAMERA (pure math, no drawing):
+ *    project(bearingDeg, elevAngleRad, cam) → {x, y}
+ *    Single source of truth for all bearing/elevation → screen conversions.
+ *    Ridgeline, peak dots, peak labels all call this ONE function.
+ *
+ *  Layer 2 — SCENE DATA (what exists in the world):
+ *    Worker produces SkylineData with depth bands (near/mid/far).
+ *    Each band stores raw elevation + distance per azimuth.
+ *    Main-thread reprojectBands() re-derives angles when AGL changes
+ *    — no worker round-trip needed.
+ *
+ *  Layer 3 — THE RENDERER (draws the scene in painter's order):
+ *    renderTerrain() draws bands far→near with depth cues:
+ *      - Far: thin lines (0.5px), low opacity (0.15), light fill
+ *      - Mid: medium lines (1.5px), mid opacity (0.45), medium fill
+ *      - Near: thick lines (3px), high opacity (0.8), dark fill
+ *    Adding bands = pushing to DEPTH_BANDS array; renderer auto-scales.
+ *
+ * ── Painter's order ─────────────────────────────────────────────────────────
+ *   1  Sky gradient + stars
+ *   2  Far band fill + stroke
+ *   3  Mid band fill + stroke
+ *   4  Near band fill + stroke
+ *   5  Horizon glow
+ *   6  Peak dots (snapped to ridgeline via project())
+ *   7  Peak label cards (HTML overlay)
  *
  * ── Peak visibility ──────────────────────────────────────────────────────────
- *   isPeakVisible() compares peak elevation angle against skyline ridgeline angle
- *   at that azimuth. Dots are snapped to the ridgeline Y so they sit on the ridge.
- *
- * ── Projection math (ENU → screen) ──────────────────────────────────────────
- *   dx_east  = (lng − viewerLng) × 111 320 × cos(viewerLat)
- *   dy_north = (lat − viewerLat) × 111 132
- *   Rotate by heading → cam_forward (depth), cam_right (lateral)
- *   azimuth   = atan2(cam_right, cam_forward)
- *   elev_angle = atan2(dz − curvDrop, horizDist)  ← includes curvature
- *   screenX   = cx + azimuth    × (W / hfovRad)
- *   screenY   = horizonY − elev_angle × (H / vfovRad)
+ *   isPeakVisible() compares peak elevation angle against the ridgeline.
+ *   Dots are snapped to ridgeline Y via project(bearing, ridgeAngle, cam).
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   useCameraStore, useLocationStore, useTerrainStore, useSettingsStore,
 } from '../../store'
@@ -42,7 +51,8 @@ import {
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
-import type { Peak, TerrainMeshData, SkylineData, SkylineRequest } from '../../core/types'
+import type { Peak, TerrainMeshData, SkylineData, SkylineBand, SkylineRequest } from '../../core/types'
+import { DEPTH_BANDS } from '../../core/types'
 import styles from './ScanScreen.module.css'
 
 const log = createLogger('SCREEN:SCAN')
@@ -56,6 +66,64 @@ const EARTH_R           = 6_371_000  // Earth radius (m)
 const REFRACTION_K      = 0.13       // Atmospheric refraction coefficient
 const DEG_TO_RAD        = Math.PI / 180
 const SKYLINE_RESOLUTION = 2         // 0.5° per step = 720 azimuths for full 360°
+
+// ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
+
+/**
+ * Per-band projected elevation angles — computed on the main thread from
+ * the worker's raw elevation/distance data whenever viewerElev changes.
+ * This avoids a ~2s worker recompute when the user drags the AGL slider.
+ */
+interface ProjectedBands {
+  /** Per-band elevation angles (radians) at each azimuth. Index matches DEPTH_BANDS. */
+  bandAngles: Float32Array[]
+  /** Overall max angle per azimuth (across all bands) — replaces skylineData.angles for rendering */
+  overallAngles: Float32Array
+  /** The viewer elevation these were computed for (used to detect staleness) */
+  viewerElev: number
+}
+
+/**
+ * Re-project band elevation angles from raw world data for a new viewer elevation.
+ * O(numAzimuths × numBands) ≈ O(2160) — sub-millisecond.
+ */
+function reprojectBands(
+  skyline: SkylineData,
+  viewerElev: number,
+): ProjectedBands {
+  const { numAzimuths, bands } = skyline
+  const bandAngles: Float32Array[] = []
+  const overallAngles = new Float32Array(numAzimuths)
+  overallAngles.fill(-Math.PI / 2)
+
+  for (let bi = 0; bi < bands.length; bi++) {
+    const band = bands[bi]
+    const angles = new Float32Array(numAzimuths)
+
+    for (let ai = 0; ai < numAzimuths; ai++) {
+      const elev = band.elevations[ai]
+      const dist = band.distances[ai]
+
+      if (elev === -Infinity || dist <= 0) {
+        angles[ai] = -Math.PI / 2  // No ridge in this band
+        continue
+      }
+
+      // Same formula as worker: elevation angle with curvature correction
+      const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const effElev  = elev - curvDrop
+      angles[ai] = Math.atan2(effElev - viewerElev, dist)
+
+      if (angles[ai] > overallAngles[ai]) {
+        overallAngles[ai] = angles[ai]
+      }
+    }
+
+    bandAngles.push(angles)
+  }
+
+  return { bandAngles, overallAngles, viewerElev }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -81,6 +149,59 @@ interface PeakScreenPos {
   screenY:     number
 }
 
+// ─── The Camera — Single Source of Truth ──────────────────────────────────────
+//
+// Every bearing/elevation → screen pixel conversion goes through this one function.
+// Ridgeline renderer, peak dots, peak labels — all call project(). If this changes,
+// everything moves together. Alignment bugs become structurally impossible.
+
+interface CameraParams {
+  heading_deg: number
+  pitch_deg:   number
+  hfov:        number
+  W:           number   // Physical pixels (canvas.width)
+  H:           number   // Physical pixels (canvas.height)
+}
+
+/**
+ * Project a bearing (degrees) and elevation angle (radians) to physical-pixel
+ * canvas coordinates.  This is the ONLY function that performs this conversion.
+ *
+ * bearingDeg: absolute compass bearing (0=N, 90=E, …)
+ * elevAngleRad: elevation angle in radians (0=horizon, +up, −down)
+ */
+function project(
+  bearingDeg: number,
+  elevAngleRad: number,
+  cam: CameraParams,
+): { x: number; y: number } {
+  const hfovRad  = cam.hfov * DEG_TO_RAD
+  const vfovRad  = VFOV * DEG_TO_RAD
+  const pitchRad = cam.pitch_deg * DEG_TO_RAD
+
+  // Bearing offset from camera center, wrapped to [-180, 180]
+  let dBearing = bearingDeg - cam.heading_deg
+  if (dBearing > 180) dBearing -= 360
+  if (dBearing < -180) dBearing += 360
+  const dBearingRad = dBearing * DEG_TO_RAD
+
+  const horizonY = cam.H * 0.5 - pitchRad * (cam.H / vfovRad)
+
+  return {
+    x: cam.W * 0.5 + dBearingRad * (cam.W / hfovRad),
+    y: horizonY - elevAngleRad * (cam.H / vfovRad),
+  }
+}
+
+/**
+ * Compute the horizonY for the current camera (convenience for sky/glow drawing).
+ */
+function getHorizonY(cam: CameraParams): number {
+  const vfovRad  = VFOV * DEG_TO_RAD
+  const pitchRad = cam.pitch_deg * DEG_TO_RAD
+  return cam.H * 0.5 - pitchRad * (cam.H / vfovRad)
+}
+
 // ─── Grid Sampler ─────────────────────────────────────────────────────────────
 
 function sampleMeshBilinear(lat: number, lng: number, mesh: TerrainMeshData): number {
@@ -103,45 +224,48 @@ function sampleMeshBilinear(lat: number, lng: number, mesh: TerrainMeshData): nu
 // ─── First-Person Projection ──────────────────────────────────────────────────
 
 /**
- * Project a world-space point into first-person screen space.
- * Includes Earth curvature correction so distant peaks appear at their true angle.
+ * Compute bearing (degrees) and elevation angle (radians) from viewer to a
+ * world-space point.  Returns null if the point is behind the viewer.
+ * Includes Earth curvature + atmospheric refraction correction.
  */
-function projectFirstPerson(
+function worldToBearingElev(
   lat: number, lng: number, elev: number,
   viewerLat: number, viewerLng: number, viewerElev: number,
-  heading_deg: number, pitch_deg: number,
-  hfov: number, W: number, H: number,
-): { screenX: number; screenY: number; horizDist: number } | null {
+): { bearingDeg: number; elevAngleRad: number; horizDist: number } | null {
   const cosLat = Math.cos(viewerLat * DEG_TO_RAD)
 
   const dx_east  = (lng - viewerLng) * 111_320 * cosLat
   const dy_north = (lat - viewerLat) * 111_132
 
-  const headRad     = heading_deg * DEG_TO_RAD
-  const cam_forward = dx_east * Math.sin(headRad) + dy_north * Math.cos(headRad)
-  const cam_right   = dx_east * Math.cos(headRad) - dy_north * Math.sin(headRad)
+  const horizDist = Math.sqrt(dx_east * dx_east + dy_north * dy_north)
+  if (horizDist < 10) return null
 
-  if (cam_forward <= 10) return null
-
-  const horizDist = Math.sqrt(cam_forward * cam_forward + cam_right * cam_right)
+  // Bearing in degrees (0=N, 90=E)
+  const bearingDeg = ((Math.atan2(dx_east, dy_north) * 180 / Math.PI) + 360) % 360
 
   // Earth curvature + refraction correction — same formula as ray march
-  const curvDrop  = (horizDist * horizDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-  const corrElev  = elev - curvDrop
-  const dz_up     = corrElev - viewerElev
+  const curvDrop     = (horizDist * horizDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+  const corrElev     = elev - curvDrop
+  const dz_up        = corrElev - viewerElev
+  const elevAngleRad = Math.atan2(dz_up, horizDist)
 
-  const azimuth   = Math.atan2(cam_right, cam_forward)
-  const elevAngle = Math.atan2(dz_up, horizDist)
+  return { bearingDeg, elevAngleRad, horizDist }
+}
 
-  const hfovRad  = hfov * DEG_TO_RAD
-  const vfovRad  = VFOV * DEG_TO_RAD
-  const pitchRad = pitch_deg * DEG_TO_RAD
-  const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
+/**
+ * Project a world-space point into first-person screen space.
+ * Uses worldToBearingElev → project() pipeline (single camera).
+ */
+function projectFirstPerson(
+  lat: number, lng: number, elev: number,
+  viewerLat: number, viewerLng: number, viewerElev: number,
+  cam: CameraParams,
+): { screenX: number; screenY: number; horizDist: number } | null {
+  const world = worldToBearingElev(lat, lng, elev, viewerLat, viewerLng, viewerElev)
+  if (!world) return null
 
-  const screenX = W * 0.5 + azimuth    * (W / hfovRad)
-  const screenY = horizonY - elevAngle * (H / vfovRad)
-
-  return { screenX, screenY, horizDist }
+  const { x, y } = project(world.bearingDeg, world.elevAngleRad, cam)
+  return { screenX: x, screenY: y, horizDist: world.horizDist }
 }
 
 
@@ -192,64 +316,156 @@ function isPeakVisible(
 // ─── Quick Render (SkylineData) ───────────────────────────────────────────────
 
 /**
- * Fast O(W) render using pre-computed SkylineData.
- * Draws the terrain ridgeline as a clean line with a solid dark fill below.
+ * Look up the ridgeline elevation angle for a given bearing.
+ * Uses re-projected overall angles when available (AGL-aware), falls back to
+ * worker-baked angles.
  */
-function drawFromSkyline(
+function skylineAngleAt(
+  skyline: SkylineData,
+  bearingDeg: number,
+  projected: ProjectedBands | null = null,
+): number {
+  const normBearing = ((bearingDeg % 360) + 360) % 360
+  const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
+  // Use re-projected angles (AGL-aware) when available
+  if (projected) return projected.overallAngles[aziIdx]
+  return skyline.angles[aziIdx]
+}
+
+/**
+ * Look up the per-band elevation angle for a given bearing and band index.
+ * Returns -PI/2 if no ridge in this band at this azimuth.
+ */
+function bandAngleAt(
+  skyline: SkylineData,
+  bandIndex: number,
+  bearingDeg: number,
+  projected: ProjectedBands | null,
+): number {
+  const normBearing = ((bearingDeg % 360) + 360) % 360
+  const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
+  if (projected) return projected.bandAngles[bandIndex][aziIdx]
+  // Fallback: use the band's raw data with the worker's baked viewer elevation
+  const band = skyline.bands[bandIndex]
+  if (band.elevations[aziIdx] === -Infinity) return -Math.PI / 2
+  const dist = band.distances[aziIdx]
+  const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+  return Math.atan2(band.elevations[aziIdx] - curvDrop - skyline.computedAt.elev, dist)
+}
+
+// ─── Depth Band Visual Parameters ─────────────────────────────────────────────
+//
+// Driven by band index as a fraction of total bands.  Adding bands later means
+// these interpolate automatically — no hardcoded per-band style blocks.
+
+interface BandStyle {
+  fillColor:   string   // Terrain fill below ridgeline
+  strokeColor: string   // Ridgeline stroke RGBA
+  lineWidth:   number   // Ridgeline thickness (px)
+}
+
+function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
+  // t = 0 (far) → 1 (near)
+  const t = bandCount <= 1 ? 1 : 1 - bandIndex / (bandCount - 1)
+
+  // Fill: far = lighter/hazier, near = deep dark
+  // Interpolate from #0a1e2e (far, lighter) through to #050e18 (near, darkest)
+  const fillR = Math.round(10 - t * 5)
+  const fillG = Math.round(30 - t * 16)
+  const fillB = Math.round(46 - t * 22)
+  const fillColor = `rgb(${fillR},${fillG},${fillB})`
+
+  // Stroke: far = thin/faint, near = thick/bright
+  const opacity   = 0.15 + t * 0.65     // 0.15 → 0.80
+  const lineWidth = 0.5 + t * 2.5       // 0.5px → 3.0px
+  const strokeColor = `rgba(132, 209, 219, ${opacity.toFixed(2)})`
+
+  return { fillColor, strokeColor, lineWidth }
+}
+
+/**
+ * Layered terrain renderer — draws depth bands in painter's order (far→near).
+ * Each band gets its own fill + stroke with depth-appropriate visual weight.
+ * All projection goes through project() — single camera source of truth.
+ */
+function renderTerrain(
   ctx: CanvasRenderingContext2D,
   skyline: SkylineData,
-  heading_deg: number,
-  pitch_deg: number,
-  hfov: number,
-  W: number,
-  H: number,
+  cam: CameraParams,
+  projected: ProjectedBands | null,
 ): void {
-  const hfovRad  = hfov * DEG_TO_RAD
-  const vfovRad  = VFOV * DEG_TO_RAD
-  const pitchRad = pitch_deg * DEG_TO_RAD
-  const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
+  const { W, H } = cam
+  const numBands = skyline.bands.length
 
-  // ── Solid dark fill below ridgeline ────────────────────────────────────────
-  ctx.beginPath()
-  ctx.moveTo(0, H)
-  for (let col = 0; col < W; col++) {
-    const bearingDeg = heading_deg + (col / W - 0.5) * hfov
-    const normBearing = ((bearingDeg % 360) + 360) % 360
-    const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
-    const ridgeAngle = skyline.angles[aziIdx]
-    const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
-    ctx.lineTo(col, Math.min(H, Math.max(0, screenY)))
-  }
-  ctx.lineTo(W, H)
-  ctx.closePath()
-  ctx.fillStyle = '#06111d'
-  ctx.fill()
+  // Draw bands far→near (painter's order: far gets painted first, near overlaps)
+  // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
+  for (let bi = numBands - 1; bi >= 0; bi--) {
+    const style = bandStyleForIndex(bi, numBands)
 
-  // ── Ridgeline stroke ───────────────────────────────────────────────────────
-  ctx.beginPath()
-  let started = false
-  for (let col = 0; col < W; col++) {
-    const bearingDeg = heading_deg + (col / W - 0.5) * hfov
-    const normBearing = ((bearingDeg % 360) + 360) % 360
-    const aziIdx = Math.round(normBearing * skyline.resolution) % skyline.numAzimuths
-    const ridgeAngle = skyline.angles[aziIdx]
-    const screenY = Math.round(horizonY - ridgeAngle * (H / vfovRad))
+    // ── Fill below this band's ridgeline ───────────────────────────────────
+    ctx.beginPath()
+    ctx.moveTo(0, H)
+    let hasVisiblePixels = false
 
-    if (screenY >= H) {
-      started = false
-      continue
+    for (let col = 0; col < W; col++) {
+      const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+      const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
+
+      // Skip columns where this band has no data (sentinel -PI/2)
+      if (angle <= -Math.PI / 2 + 0.001) {
+        ctx.lineTo(col, H)
+        continue
+      }
+
+      hasVisiblePixels = true
+      const { y } = project(bearingDeg, angle, cam)
+      const screenY = Math.round(y)
+      ctx.lineTo(col, Math.min(H, Math.max(0, screenY)))
     }
-    const y = Math.max(0, screenY)
-    if (!started) {
-      ctx.moveTo(col, y)
-      started = true
-    } else {
-      ctx.lineTo(col, y)
+
+    ctx.lineTo(W, H)
+    ctx.closePath()
+    if (hasVisiblePixels) {
+      ctx.fillStyle = style.fillColor
+      ctx.fill()
+    }
+
+    // ── Ridgeline stroke for this band ─────────────────────────────────────
+    if (hasVisiblePixels) {
+      ctx.beginPath()
+      let started = false
+
+      for (let col = 0; col < W; col++) {
+        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+        const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
+
+        if (angle <= -Math.PI / 2 + 0.001) {
+          started = false
+          continue
+        }
+
+        const { y } = project(bearingDeg, angle, cam)
+        const screenY = Math.round(y)
+
+        if (screenY >= H) {
+          started = false
+          continue
+        }
+
+        const clampedY = Math.max(0, screenY)
+        if (!started) {
+          ctx.moveTo(col, clampedY)
+          started = true
+        } else {
+          ctx.lineTo(col, clampedY)
+        }
+      }
+
+      ctx.strokeStyle = style.strokeColor
+      ctx.lineWidth = style.lineWidth
+      ctx.stroke()
     }
   }
-  ctx.strokeStyle = 'rgba(132, 209, 219, 0.8)'
-  ctx.lineWidth = 1.5
-  ctx.stroke()
 }
 
 // ─── Full Canvas Draw ─────────────────────────────────────────────────────────
@@ -265,6 +481,7 @@ function drawScanCanvas(
   activeLng: number,
   hfov: number,
   skylineData: SkylineData | null,
+  projectedBands: ProjectedBands | null,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -275,26 +492,22 @@ function drawScanCanvas(
   const groundElev = sampleMeshBilinear(activeLat, activeLng, mesh)
   const eyeElev    = groundElev + eyeHeight_m
 
-  const pitchRad = pitch_deg * DEG_TO_RAD
-  const vfovRad  = VFOV * DEG_TO_RAD
-  const hfovRad  = hfov * DEG_TO_RAD
-  const horizonY = H * 0.5 - pitchRad * (H / vfovRad)
+  // Single camera params — shared by every projection call this frame
+  const cam: CameraParams = { heading_deg, pitch_deg, hfov, W, H }
+  const horizonY = getHorizonY(cam)
 
   // ── 1. Sky gradient ─────────────────────────────────────────────────────────
-  // Multi-stop gradient from deep void (top) through ocean navy to horizon haze.
-  // The gradient fills the full canvas height — terrain paints over the lower half.
   const skyGrad = ctx.createLinearGradient(0, 0, 0, H)
-  skyGrad.addColorStop(0,    '#000810')   // --ec-void  — absolute black top
-  skyGrad.addColorStop(0.20, '#020c18')   // dark space
-  skyGrad.addColorStop(0.50, '#051520')   // mid sky
-  skyGrad.addColorStop(0.78, '#071a2a')   // near horizon
-  skyGrad.addColorStop(0.90, '#0c2235')   // atmosphere haze
-  skyGrad.addColorStop(1.0,  '#0f2c42')   // horizon
+  skyGrad.addColorStop(0,    '#000810')
+  skyGrad.addColorStop(0.20, '#020c18')
+  skyGrad.addColorStop(0.50, '#051520')
+  skyGrad.addColorStop(0.78, '#071a2a')
+  skyGrad.addColorStop(0.90, '#0c2235')
+  skyGrad.addColorStop(1.0,  '#0f2c42')
   ctx.fillStyle = skyGrad
   ctx.fillRect(0, 0, W, H)
 
-  // Subtle star field: very faint dots in the upper 45% of sky
-  // Deterministic from canvas dimensions so they don't flicker between frames
+  // Subtle star field
   ctx.save()
   ctx.globalAlpha = 0.35
   const starRng = { seed: 42 }
@@ -311,14 +524,12 @@ function drawScanCanvas(
   }
   ctx.restore()
 
-  // ── 2. Terrain silhouette ────────────────────────────────────────────────────
+  // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
   if (skylineData) {
-    drawFromSkyline(ctx, skylineData, heading_deg, pitch_deg, hfov, W, H)
+    renderTerrain(ctx, skylineData, cam, projectedBands)
   }
-  // else: no terrain drawn — loading overlay shows "Computing panorama..."
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
-  // Soft teal glow centred on the horizon line
   const glowGrad = ctx.createLinearGradient(0, horizonY - 12, 0, horizonY + 12)
   glowGrad.addColorStop(0,   'rgba(132, 209, 219, 0)')
   glowGrad.addColorStop(0.5, 'rgba(132, 209, 219, 0.22)')
@@ -326,19 +537,16 @@ function drawScanCanvas(
   ctx.fillStyle = glowGrad
   ctx.fillRect(0, Math.round(horizonY - 12), W, 24)
 
-  // Crisp 1-pixel glow line
   ctx.fillStyle = 'rgba(132, 209, 219, 0.18)'
   ctx.fillRect(0, Math.round(horizonY), W, 1)
 
-  // ── Compute peak screen positions ─────────────────────────────────────────
+  // ── 4. Peak placement — all through project() ─────────────────────────────
 
   const peakPositions: PeakScreenPos[] = []
 
-  // Filter to visible peaks, then take top 8 by elevation to prevent label clutter
   const visiblePeaks = skylineData
     ? peaks.filter(p => isPeakVisible(p, activeLat, activeLng, eyeElev, heading_deg, hfov, skylineData))
     : peaks.filter(p => {
-        // Without skyline, check FOV + distance
         const cosLat = Math.cos(activeLat * DEG_TO_RAD)
         const dx = (p.lng - activeLng) * 111_320 * cosLat
         const dy = (p.lat - activeLat) * 111_132
@@ -351,7 +559,6 @@ function drawScanCanvas(
         return Math.abs(angleDiff) <= hfov * 0.6
       })
 
-  // Sort by elevation descending, take top 8
   const topPeaks = visiblePeaks
     .sort((a, b) => b.elevation_m - a.elevation_m)
     .slice(0, 8)
@@ -359,8 +566,7 @@ function drawScanCanvas(
   for (const peak of topPeaks) {
     const projected = projectFirstPerson(
       peak.lat, peak.lng, peak.elevation_m,
-      activeLat, activeLng, eyeElev,
-      heading_deg, pitch_deg, hfov, W, H,
+      activeLat, activeLng, eyeElev, cam,
     )
     if (!projected) continue
 
@@ -368,25 +574,17 @@ function drawScanCanvas(
     if (screenX < -50 || screenX > W + 50) continue
     if (horizDist > MAX_PEAK_DIST) continue
 
-    // Snap dot to ridgeline Y position when skyline data is available
+    // Snap dot to ridgeline Y — uses project() via the same camera
     if (skylineData) {
       const bearing = calculateBearing(
         { lat: activeLat, lng: activeLng },
         { lat: peak.lat, lng: peak.lng },
       )
-      const normBearing = ((bearing % 360) + 360) % 360
-      const aziIdx = Math.round(normBearing * skylineData.resolution) % skylineData.numAzimuths
-      const ridgeAngle = skylineData.angles[aziIdx]
-
-      const vfovRad = VFOV * DEG_TO_RAD
-      const ridgeScreenY = horizonY - ridgeAngle * (H / vfovRad)
-
-      // Snap dot directly to ridgeline
-      screenY = ridgeScreenY
+      const ridgeAngle = skylineAngleAt(skylineData, bearing, projectedBands)
+      const ridgePos = project(bearing, ridgeAngle, cam)
+      screenY = ridgePos.y
     }
 
-    // Skip if too close horizontally to an already-added label (prevents cluster overlap).
-    // topPeaks is sorted by elevation desc so the more prominent label was added first.
     const minSpacing = W * 0.10
     if (peakPositions.some(p => Math.abs(p.screenX - screenX) < minSpacing)) continue
 
@@ -449,6 +647,15 @@ const ScanScreen: React.FC = () => {
 
   // ── Active peak set: OSM peaks when available, fallback to hardcoded ────────
   const activePeaks: Peak[] = osmPeaks.length > 0 ? osmPeaks : peaks
+
+  // ── Re-project band angles when AGL changes (no worker round-trip) ────────
+  // Recomputes ~2160 atan2 calls — sub-millisecond.
+  const projectedBands = useMemo<ProjectedBands | null>(() => {
+    if (!skylineData || !meshData) return null
+    const groundElev = sampleMeshBilinear(activeLat, activeLng, meshData)
+    const viewerElev = groundElev + height_m
+    return reprojectBands(skylineData, viewerElev)
+  }, [skylineData, meshData, activeLat, activeLng, height_m])
 
   // ── Initialise Web Worker ─────────────────────────────────────────────────
 
@@ -597,7 +804,7 @@ const ScanScreen: React.FC = () => {
       activePeaks,
       heading_deg, pitch_deg, height_m,
       activeLat, activeLng,
-      fov, skylineData,
+      fov, skylineData, projectedBands,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -609,7 +816,7 @@ const ScanScreen: React.FC = () => {
     heading_deg, pitch_deg, height_m, fov,
     activeLat, activeLng,
     meshData, activePeaks,
-    skylineData,
+    skylineData, projectedBands,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
@@ -826,34 +1033,83 @@ const ScanScreen: React.FC = () => {
           </div>
         )}
 
-        {/* DEBUG: Skyline angle stats — TEMPORARY */}
+        {/* DEBUG: Comprehensive diagnostics panel */}
         {skylineData && (
           <div style={{
             position: 'absolute', top: 58, right: 44,
-            color: '#0f0', fontSize: 10, fontFamily: 'monospace',
-            background: 'rgba(0,0,0,0.7)', padding: '6px 10px',
-            borderRadius: 4, zIndex: 9999, lineHeight: 1.5,
-            pointerEvents: 'none',
+            color: '#0f0', fontSize: 9, fontFamily: 'monospace',
+            background: 'rgba(0,0,0,0.8)', padding: '6px 10px',
+            borderRadius: 4, zIndex: 9999, lineHeight: 1.4,
+            pointerEvents: 'none', maxWidth: 280,
           }}>
             {(() => {
-              const a = skylineData.angles
-              const d = skylineData.distances
               const deg = (r: number) => (r * 180 / Math.PI).toFixed(2)
-              let aMin = Infinity, aMax = -Infinity, aSum = 0
-              let dMin = Infinity, dMax = -Infinity
-              for (let i = 0; i < a.length; i++) {
-                if (a[i] < aMin) aMin = a[i]
-                if (a[i] > aMax) aMax = a[i]
-                aSum += a[i]
-                if (d[i] < dMin) dMin = d[i]
-                if (d[i] > dMax) dMax = d[i]
+              const horizY = getHorizonY({ heading_deg, pitch_deg, hfov: fov, W: terrainCanvasRef.current?.width || 0, H: terrainCanvasRef.current?.height || 0 })
+              const pxPerDegH = terrainCanvasRef.current ? (terrainCanvasRef.current.width / (fov * DEG_TO_RAD)).toFixed(1) : '?'
+              const pxPerDegV = terrainCanvasRef.current ? (terrainCanvasRef.current.height / (VFOV * DEG_TO_RAD)).toFixed(1) : '?'
+              const gElev = meshData ? sampleMeshBilinear(activeLat, activeLng, meshData) : 0
+              const eyeElev = gElev + height_m
+
+              // Re-projection validation
+              let maxAngleDiff = 0
+              if (projectedBands && skylineData) {
+                for (let i = 0; i < skylineData.numAzimuths; i++) {
+                  const diff = Math.abs(projectedBands.overallAngles[i] - skylineData.angles[i])
+                  if (diff > maxAngleDiff) maxAngleDiff = diff
+                }
               }
+              const angleDiffDeg = (maxAngleDiff * 180 / Math.PI).toFixed(4)
+              const angleDiffOk = maxAngleDiff < 0.001
+
+              // Per-band stats
+              const bandStats = skylineData.bands.map((band, bi) => {
+                let active = 0, eMin = Infinity, eMax = -Infinity, dMin = Infinity, dMax = -Infinity
+                for (let i = 0; i < skylineData.numAzimuths; i++) {
+                  if (band.elevations[i] > -Infinity) {
+                    active++
+                    if (band.elevations[i] < eMin) eMin = band.elevations[i]
+                    if (band.elevations[i] > eMax) eMax = band.elevations[i]
+                    if (band.distances[i] < dMin) dMin = band.distances[i]
+                    if (band.distances[i] > dMax) dMax = band.distances[i]
+                  }
+                }
+                return { label: DEPTH_BANDS[bi]?.label || `band${bi}`, active, eMin, eMax, dMin, dMax }
+              })
+
+              // Peak funnel
+              const totalPeaks = (osmPeaks.length > 0 ? osmPeaks : peaks).length
+
               return (
                 <>
-                  <div style={{ color: '#ff0', marginBottom: 2 }}>v1.0.4-MVP DEBUG</div>
-                  <div>angles: {deg(aMin)}° → {deg(aMax)}° (avg {deg(aSum / a.length)}°)</div>
-                  <div>dist: {(dMin/1000).toFixed(1)}km → {(dMax/1000).toFixed(1)}km</div>
-                  <div>viewer: {skylineData.computedAt.elev.toFixed(0)}m</div>
+                  <div style={{ color: '#ff0', marginBottom: 2 }}>v2.0 DEBUG — Layered</div>
+
+                  <div style={{ color: '#8cf', marginTop: 3 }}>CAMERA</div>
+                  <div>hdg:{heading_deg.toFixed(1)}° pit:{pitch_deg.toFixed(1)}° fov:{fov.toFixed(0)}°</div>
+                  <div>horizonY:{horizY.toFixed(0)}px  px/rad H:{pxPerDegH} V:{pxPerDegV}</div>
+                  <div>AGL:{height_m.toFixed(0)}m  ground:{gElev.toFixed(0)}m  eye:{eyeElev.toFixed(0)}m</div>
+
+                  <div style={{ color: '#8cf', marginTop: 3 }}>RE-PROJECTION</div>
+                  <div style={{ color: angleDiffOk ? '#0f0' : '#f44' }}>
+                    max Δangle: {angleDiffDeg}° {angleDiffOk ? '✓' : '⚠ MISMATCH'}
+                  </div>
+                  <div>viewer elev (worker): {skylineData.computedAt.elev.toFixed(0)}m</div>
+                  {projectedBands && <div>viewer elev (reproj): {projectedBands.viewerElev.toFixed(0)}m</div>}
+
+                  <div style={{ color: '#8cf', marginTop: 3 }}>BANDS ({bandStats.length})</div>
+                  {bandStats.map(bs => (
+                    <div key={bs.label} style={{ color: bs.active === 0 ? '#666' : '#0f0' }}>
+                      {bs.label}: {bs.active}/{skylineData.numAzimuths} az
+                      {bs.active > 0 && <> e:{bs.eMin.toFixed(0)}–{bs.eMax.toFixed(0)}m d:{(bs.dMin/1000).toFixed(0)}–{(bs.dMax/1000).toFixed(0)}km</>}
+                    </div>
+                  ))}
+
+                  <div style={{ color: '#8cf', marginTop: 3 }}>PEAKS</div>
+                  <div>total:{totalPeaks} → visible:{peakPositions.length}</div>
+                  {peakPositions.slice(0, 3).map(p => (
+                    <div key={p.id} style={{ color: '#ccc', fontSize: 8 }}>
+                      {p.name}: {p.bearing.toFixed(0)}° {p.dist_km.toFixed(0)}km x:{p.screenX.toFixed(0)} y:{p.screenY.toFixed(0)}
+                    </div>
+                  ))}
                 </>
               )
             })()}
