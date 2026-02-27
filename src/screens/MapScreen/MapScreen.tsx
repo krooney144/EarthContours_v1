@@ -269,8 +269,13 @@ const MapScreen: React.FC = () => {
     const ctx = canvas.getContext('2d')
     if (!ctx) { log.error('Canvas 2D context unavailable'); return }
 
-    const W = canvas.width
-    const H = canvas.height
+    // Use CSS pixel dimensions — ctx.scale(dpr) set by the resize observer
+    // maps these to physical pixels.  This keeps drawing coordinates consistent
+    // with pointer handlers (which use getBoundingClientRect = CSS pixels),
+    // so tap-to-explore, hover readout, and drawn features all share one GPS grid.
+    const dpr = window.devicePixelRatio || 1
+    const W = canvas.width  / dpr
+    const H = canvas.height / dpr
 
     const thisGeneration = ++loadingRef.current
 
