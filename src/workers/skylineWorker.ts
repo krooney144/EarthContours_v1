@@ -58,6 +58,26 @@ export interface SkylineRequest {
   maxRange:     number
 }
 
+/** Depth band distance config — mirrors DEPTH_BANDS from types.ts */
+interface BandConfig {
+  label:   string
+  minDist: number
+  maxDist: number
+}
+
+const DEPTH_BANDS: BandConfig[] = [
+  { label: 'near', minDist: 0,      maxDist: 12_000  },
+  { label: 'mid',  minDist: 8_000,  maxDist: 60_000  },
+  { label: 'far',  minDist: 50_000, maxDist: 300_000 },
+]
+
+interface SkylineBand {
+  elevations: Float32Array
+  distances:  Float32Array
+  slopeX:     Float32Array
+  slopeZ:     Float32Array
+}
+
 export interface SkylineData {
   /** Max elevation angle (radians) at each azimuth step */
   angles:      Float32Array
@@ -65,6 +85,8 @@ export interface SkylineData {
   distances:   Float32Array
   /** Hill shade at ridgeline [0–1] */
   shading:     Float32Array
+  /** Per-depth-band raw world data (near/mid/far) */
+  bands:       SkylineBand[]
   /** Steps per degree used during computation */
   resolution:  number
   /** Total azimuth steps (= 360 × resolution) */
@@ -186,13 +208,13 @@ function sampleBest(
   return sampleMeshGrid(lat, lng, mesh, mw, mh, bounds)
 }
 
-/** Finite-difference hill shade at a terrain point. */
-function hillShade(
+/** Finite-difference slope + hill shade at a terrain point.
+ *  Returns { shade, dzdx, dzdy } — slope vectors preserved for contour fragments. */
+function slopeAndShade(
   lat: number, lng: number, zoom: number,
   mesh: Float32Array, mw: number, mh: number,
   bounds: { north: number; south: number; east: number; west: number },
-): number {
-  // Step size: finer for high-zoom (close) terrain, coarser for far
+): { shade: number; dzdx: number; dzdy: number } {
   const STEP   = zoom >= 11 ? 0.0005 : 0.002
   const cosLat = Math.cos(lat * DEG_TO_RAD)
   const dx_m   = STEP * 111_320 * cosLat
@@ -207,7 +229,8 @@ function hillShade(
   const dzdy = (eN - eS) / (2 * dy_m)
   const nx = -dzdx, ny = 1.0, nz = -dzdy
   const mag = Math.sqrt(nx * nx + ny * ny + nz * nz)
-  return Math.max(0, (nx * LIGHT_X + ny * LIGHT_Y + nz * LIGHT_Z) / mag)
+  const shade = Math.max(0, (nx * LIGHT_X + ny * LIGHT_Y + nz * LIGHT_Z) / mag)
+  return { shade, dzdx, dzdy }
 }
 
 // ─── Worker Message Handler ───────────────────────────────────────────────────
@@ -272,11 +295,19 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
   }
   logDists.reverse()  // far → near so nearer terrain wins
 
-  // ── Phase 3: Compute 360° skyline ─────────────────────────────────────────
+  // ── Phase 3: Compute 360° skyline with depth bands ──────────────────────────
 
   const angles    = new Float32Array(numAzimuths)
   const distances = new Float32Array(numAzimuths)
   const shading   = new Float32Array(numAzimuths)
+
+  // Allocate per-band arrays
+  const bands: SkylineBand[] = DEPTH_BANDS.map(() => ({
+    elevations: new Float32Array(numAzimuths).fill(-Infinity),
+    distances:  new Float32Array(numAzimuths),
+    slopeX:     new Float32Array(numAzimuths),
+    slopeZ:     new Float32Array(numAzimuths),
+  }))
 
   for (let ai = 0; ai < numAzimuths; ai++) {
     const azDeg  = ai / resolution
@@ -284,44 +315,77 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     const sinA   = Math.sin(azRad)
     const cosA   = Math.cos(azRad)
 
-    let maxAngle  = -Math.PI / 2  // start below horizon
+    let maxAngle  = -Math.PI / 2
     let ridgeDist = maxRange / 2
     let ridgeLat  = viewerLat
     let ridgeLng  = viewerLng
+
+    // Per-band tracking: max elevation angle seen within each band's distance range
+    const bandMaxAngles = DEPTH_BANDS.map(() => -Math.PI / 2)
+    const bandRidgeDist = DEPTH_BANDS.map(() => 0)
+    const bandRidgeLat  = DEPTH_BANDS.map(() => viewerLat)
+    const bandRidgeLng  = DEPTH_BANDS.map(() => viewerLng)
+    const bandRidgeElev = DEPTH_BANDS.map(() => -Infinity)
 
     for (const dist of logDists) {
       const sLat = viewerLat + (cosA * dist) / 111_132
       const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
-      const zoom   = distToZoom(dist)
+      const zoom    = distToZoom(dist)
       const rawElev = sampleBest(sLat, sLng, zoom, meshElevations, meshWidth, meshHeight, meshBounds)
 
-      // Earth curvature + atmospheric refraction correction
       const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev   = rawElev - curvDrop
       const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
 
-      // Sanity clamp: skip angles > 60° — physically impossible for normal terrain.
-      // Catches any remaining tile decode errors or boundary artefacts.
       if (elevAngle > Math.PI / 3) continue
 
+      // Overall maximum (existing behaviour)
       if (elevAngle > maxAngle) {
         maxAngle  = elevAngle
         ridgeDist = dist
         ridgeLat  = sLat
         ridgeLng  = sLng
       }
+
+      // Per-band maximum — a sample can fall into multiple bands (overlap zone)
+      for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+        const band = DEPTH_BANDS[bi]
+        if (dist >= band.minDist && dist <= band.maxDist && elevAngle > bandMaxAngles[bi]) {
+          bandMaxAngles[bi] = elevAngle
+          bandRidgeDist[bi] = dist
+          bandRidgeLat[bi]  = sLat
+          bandRidgeLng[bi]  = sLng
+          bandRidgeElev[bi] = rawElev  // Raw elevation (before curvature), for re-projection
+        }
+      }
     }
 
-    // Hill shade computed once at the final ridgeline position
+    // Overall ridgeline shade
     const ridgeZoom = distToZoom(ridgeDist)
-    const shade = hillShade(ridgeLat, ridgeLng, ridgeZoom, meshElevations, meshWidth, meshHeight, meshBounds)
+    const { shade } = slopeAndShade(ridgeLat, ridgeLng, ridgeZoom, meshElevations, meshWidth, meshHeight, meshBounds)
 
     angles[ai]    = maxAngle
     distances[ai] = ridgeDist
     shading[ai]   = shade
 
-    // Progress every 45 azimuths (~12.5° increments)
+    // Populate band arrays
+    for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+      bands[bi].elevations[ai] = bandRidgeElev[bi]
+      bands[bi].distances[ai]  = bandRidgeDist[bi]
+
+      // Compute slope at each band's ridgeline point (skip if no ridge in this band)
+      if (bandRidgeElev[bi] > -Infinity && bandRidgeDist[bi] > 0) {
+        const bZoom = distToZoom(bandRidgeDist[bi])
+        const { dzdx, dzdy } = slopeAndShade(
+          bandRidgeLat[bi], bandRidgeLng[bi], bZoom,
+          meshElevations, meshWidth, meshHeight, meshBounds,
+        )
+        bands[bi].slopeX[ai] = dzdx
+        bands[bi].slopeZ[ai] = dzdy
+      }
+    }
+
     if (ai % 45 === 0) {
       self.postMessage({ type: 'progress', phase: 'skyline', progress: ai / numAzimuths })
     }
@@ -331,6 +395,7 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     angles,
     distances,
     shading,
+    bands,
     resolution,
     numAzimuths,
     computedAt: {
@@ -341,9 +406,19 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     },
   }
 
-  // Transfer ArrayBuffers (zero-copy) to main thread
-  self.postMessage(
-    { type: 'complete', skyline },
-    [angles.buffer, distances.buffer, shading.buffer],
-  )
+  // Transfer ArrayBuffers (zero-copy) — include band buffers
+  const transferables: Transferable[] = [
+    angles.buffer as ArrayBuffer,
+    distances.buffer as ArrayBuffer,
+    shading.buffer as ArrayBuffer,
+  ]
+  for (const band of bands) {
+    transferables.push(
+      band.elevations.buffer as ArrayBuffer,
+      band.distances.buffer as ArrayBuffer,
+      band.slopeX.buffer as ArrayBuffer,
+      band.slopeZ.buffer as ArrayBuffer,
+    )
+  }
+  self.postMessage({ type: 'complete', skyline }, transferables)
 }

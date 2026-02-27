@@ -250,23 +250,71 @@ export interface ContourLine {
   points: Array<{ x: number; y: number; z: number }>  // 3D world space points
 }
 
-// ─── SCAN Phase 2 — Skyline Precomputation ────────────────────────────────────
+// ─── SCAN — Depth Band Configuration ──────────────────────────────────────────
+
+/**
+ * Distance thresholds for depth bands.  Bands are drawn far→near (painter's order).
+ * Each band stores per-azimuth raw elevation + distance so the main thread can
+ * re-project angles when AGL changes without a worker round-trip.
+ *
+ * Band overlap (near extends to 12 km, mid starts at 8 km) prevents seams at
+ * boundaries where a ridge straddles the cutoff.
+ */
+export interface DepthBandConfig {
+  /** Unique label for debugging */
+  label:  string
+  /** Minimum distance (metres, inclusive) */
+  minDist: number
+  /** Maximum distance (metres, inclusive) */
+  maxDist: number
+}
+
+/** Default 3-band configuration.  Array-driven so adding bands later is trivial. */
+export const DEPTH_BANDS: DepthBandConfig[] = [
+  { label: 'near', minDist: 0,      maxDist: 12_000  },
+  { label: 'mid',  minDist: 8_000,  maxDist: 60_000  },
+  { label: 'far',  minDist: 50_000, maxDist: 300_000 },
+]
+
+/**
+ * Per-azimuth data for a single depth band.
+ * Stores raw world data (elevation + distance) so angles can be re-projected
+ * on the main thread when viewer elevation (AGL) changes.
+ */
+export interface SkylineBand {
+  /** Raw ground elevation (metres) at the ridgeline point for each azimuth.
+   *  -Infinity sentinel means no ridge in this band at this azimuth. */
+  elevations: Float32Array
+  /** Distance to the ridgeline point (metres) */
+  distances:  Float32Array
+  /** Surface gradient dz/dx (east) at ridgeline — for future contour fragments */
+  slopeX:     Float32Array
+  /** Surface gradient dz/dz (north) at ridgeline — for future contour fragments */
+  slopeZ:     Float32Array
+}
+
+// ─── SCAN — Skyline Precomputation ────────────────────────────────────────────
 
 /**
  * Pre-computed 360° terrain skyline for the SCAN screen.
  * Produced by `skylineWorker.ts` — the worker sends this via postMessage
  * (with transferable ArrayBuffers) once per viewpoint change.
  *
+ * v2 adds depth bands: per-band raw elevation/distance data for layered rendering
+ * and AGL re-projection without worker round-trip.
+ *
  * Indexing:
  *   aziIdx = Math.round(((bearingDeg % 360 + 360) % 360) * resolution) % numAzimuths
  */
 export interface SkylineData {
-  /** Maximum elevation angle (radians) at each azimuth — the ridgeline silhouette */
+  /** Maximum elevation angle (radians) at each azimuth — the overall ridgeline silhouette */
   angles:      Float32Array
   /** Distance to ridgeline in metres */
   distances:   Float32Array
   /** NW-45° hill shade at ridgeline [0–1] */
   shading:     Float32Array
+  /** Per-depth-band raw world data (near/mid/far). Array index matches DEPTH_BANDS. */
+  bands:       SkylineBand[]
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */
