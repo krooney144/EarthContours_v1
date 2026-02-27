@@ -319,7 +319,7 @@ export interface SkylineData {
   resolution:  number
   /** Total azimuth steps = 360 × resolution */
   numAzimuths: number
-  computedAt:  { lat: number; lng: number; elev: number; timestamp: number }
+  computedAt:  { lat: number; lng: number; elev: number; groundElev: number; timestamp: number }
 }
 
 /**
