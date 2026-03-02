@@ -147,18 +147,83 @@ function drawExploreCanvas(
   ctx.fillStyle = '#020e18'
   ctx.fillRect(0, 0, W, H)
 
-  // Subtle ground-plane ellipse at terrain base
-  const groundY  = cy
-  const groundRX = terrainWidth_m / 2 * scale * 0.55
-  const groundRY = terrainDepth_m / 2 * scale * Math.abs(Math.cos(phi)) * 0.3 + 4
-  ctx.beginPath()
-  ctx.ellipse(cx, groundY, groundRX, groundRY, 0, 0, Math.PI * 2)
-  ctx.strokeStyle = 'rgba(18, 75, 107, 0.4)'
-  ctx.lineWidth = 1
-  ctx.stroke()
+  // ── Solid terrain surface fill (painter's order: back → front) ────────────
+  // Render each grid cell as a filled quad so the terrain is an opaque shape.
+  // Fill colour uses a very dark version of the ocean-depth palette so contour
+  // lines drawn on top remain prominent.
+  const elevRange = maxElevation_m - minElevation_m || 1
+
+  // Determine grid traversal order based on camera angle so back cells are
+  // painted first (painter's algorithm).  theta determines which corner is
+  // "far" from the camera.
+  const normTheta = ((theta % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
+  const rowStart = (normTheta > Math.PI / 2 && normTheta < 3 * Math.PI / 2) ? height - 2 : 0
+  const rowEnd   = rowStart === 0 ? height - 1 : -1
+  const rowStep  = rowStart === 0 ? 1 : -1
+  const colStart = (normTheta > Math.PI) ? width - 2 : 0
+  const colEnd   = colStart === 0 ? width - 1 : -1
+  const colStep  = colStart === 0 ? 1 : -1
+
+  // Downsample for performance — skip every Nth cell on large grids
+  const cellCount = (width - 1) * (height - 1)
+  const step = cellCount > 80000 ? 2 : 1
+
+  for (let row = rowStart; row !== rowEnd; row += rowStep * step) {
+    for (let col = colStart; col !== colEnd; col += colStep * step) {
+      const r0 = Math.min(row, height - 2)
+      const c0 = Math.min(col, width  - 2)
+      const c1 = Math.min(c0 + step, width  - 1)
+      const r1 = Math.min(r0 + step, height - 1)
+
+      // Four corner elevations
+      const e00 = elevations[r0 * width + c0]
+      const e10 = elevations[r0 * width + c1]
+      const e01 = elevations[r1 * width + c0]
+      const e11 = elevations[r1 * width + c1]
+      const avgElev = (e00 + e10 + e01 + e11) / 4
+
+      // Normalised elevation [0,1]
+      const t = (avgElev - minElevation_m) / elevRange
+
+      // Very dark ocean-depth fill — dark enough that contour strokes pop
+      const fr = Math.round(2  + t * (30  - 2))
+      const fg = Math.round(10 + t * (55  - 10))
+      const fb = Math.round(18 + t * (70  - 18))
+
+      // Project all four corners to screen
+      const x00 = (c0 / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
+      const z00 = (r0 / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
+      const y00 = (e00 - minElevation_m) * verticalExaggeration
+
+      const x10 = (c1 / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
+      const z10 = (r0 / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
+      const y10 = (e10 - minElevation_m) * verticalExaggeration
+
+      const x11 = (c1 / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
+      const z11 = (r1 / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
+      const y11 = (e11 - minElevation_m) * verticalExaggeration
+
+      const x01 = (c0 / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
+      const z01 = (r1 / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
+      const y01 = (e01 - minElevation_m) * verticalExaggeration
+
+      const [sx00, sy00] = project3D(x00, y00, z00, theta, phi, cx, cy, scale)
+      const [sx10, sy10] = project3D(x10, y10, z10, theta, phi, cx, cy, scale)
+      const [sx11, sy11] = project3D(x11, y11, z11, theta, phi, cx, cy, scale)
+      const [sx01, sy01] = project3D(x01, y01, z01, theta, phi, cx, cy, scale)
+
+      ctx.fillStyle = `rgb(${fr},${fg},${fb})`
+      ctx.beginPath()
+      ctx.moveTo(sx00, sy00)
+      ctx.lineTo(sx10, sy10)
+      ctx.lineTo(sx11, sy11)
+      ctx.lineTo(sx01, sy01)
+      ctx.closePath()
+      ctx.fill()
+    }
+  }
 
   // ── Contour lines (painter's algorithm: low → high) ───────────────────────
-  const elevRange = maxElevation_m - minElevation_m || 1
 
   for (const elev of contourElevations) {
     const t = (elev - minElevation_m) / elevRange  // used only for colour
