@@ -144,84 +144,110 @@ function drawExploreCanvas(
   const pivotX_m = panX * terrainWidth_m
   const pivotZ_m = panZ * terrainDepth_m
 
-  ctx.fillStyle = '#020e18'
-  ctx.fillRect(0, 0, W, H)
-
-  // ── Solid terrain surface fill (painter's order: back → front) ────────────
-  // Render each grid cell as a filled quad so the terrain is an opaque shape.
-  // Fill colour uses a very dark version of the ocean-depth palette so contour
-  // lines drawn on top remain prominent.
+  // ── Solid terrain surface fill (Voxel Space column-sweep) ───────────────
+  // Renders the terrain as an opaque solid shape using a back-to-front
+  // depth sweep.  For each screen column, tracks a "horizon" — the highest
+  // pixel drawn so far — and fills downward from each terrain sample to
+  // the previous horizon.  One putImageData call replaces ~65 000 individual
+  // canvas fill calls, making interactive frame rates possible.
   const elevRange = maxElevation_m - minElevation_m || 1
 
-  // Determine grid traversal order based on camera angle so back cells are
-  // painted first (painter's algorithm).  theta determines which corner is
-  // "far" from the camera.
-  const normTheta = ((theta % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
-  const rowStart = (normTheta > Math.PI / 2 && normTheta < 3 * Math.PI / 2) ? height - 2 : 0
-  const rowEnd   = rowStart === 0 ? height - 1 : -1
-  const rowStep  = rowStart === 0 ? 1 : -1
-  const colStart = (normTheta > Math.PI) ? width - 2 : 0
-  const colEnd   = colStart === 0 ? width - 1 : -1
-  const colStep  = colStart === 0 ? 1 : -1
+  const physW = canvas.width
+  const physH = canvas.height
+  const physCx = cx * dpr
+  const physCy = cy * dpr
+  const physScale = scale * dpr
 
-  // Downsample for performance — skip every Nth cell on large grids
-  const cellCount = (width - 1) * (height - 1)
-  const step = cellCount > 80000 ? 2 : 1
+  const cosT = Math.cos(theta)
+  const sinT = Math.sin(theta)
+  const cosPhi = Math.cos(phi)
+  const sinPhi = Math.sin(phi)
 
-  for (let row = rowStart; row !== rowEnd; row += rowStep * step) {
-    for (let col = colStart; col !== colEnd; col += colStep * step) {
-      const r0 = Math.min(row, height - 2)
-      const c0 = Math.min(col, width  - 2)
-      const c1 = Math.min(c0 + step, width  - 1)
-      const r1 = Math.min(r0 + step, height - 1)
+  const imageData = ctx.createImageData(physW, physH)
+  const buf32 = new Uint32Array(imageData.data.buffer)
+  // Pre-fill with background colour #020e18  (ABGR little-endian)
+  buf32.fill(0xFF180E02)
+  const pixels = imageData.data
 
-      // Four corner elevations
-      const e00 = elevations[r0 * width + c0]
-      const e10 = elevations[r0 * width + c1]
-      const e01 = elevations[r1 * width + c0]
-      const e11 = elevations[r1 * width + c1]
-      const avgElev = (e00 + e10 + e01 + e11) / 4
+  // Depth range: compute rz_view at the four terrain corners
+  const halfW = terrainWidth_m / 2
+  const halfD = terrainDepth_m / 2
+  const cx1 = -halfW - pivotX_m, cx2 = halfW - pivotX_m
+  const cz1 = -halfD - pivotZ_m, cz2 = halfD - pivotZ_m
+  const rz0 = -cx1 * sinT + cz1 * cosT
+  const rz1 = -cx2 * sinT + cz1 * cosT
+  const rz2 = -cx1 * sinT + cz2 * cosT
+  const rz3 = -cx2 * sinT + cz2 * cosT
+  const rzFar  = Math.max(rz0, rz1, rz2, rz3)
+  const rzNear = Math.min(rz0, rz1, rz2, rz3)
 
-      // Normalised elevation [0,1]
-      const t = (avgElev - minElevation_m) / elevRange
+  const depthSteps = 512
+  const rzStep = (rzFar - rzNear) / depthSteps
 
-      // Very dark ocean-depth fill — dark enough that contour strokes pop
-      const fr = Math.round(2  + t * (30  - 2))
-      const fg = Math.round(10 + t * (55  - 10))
-      const fb = Math.round(18 + t * (70  - 18))
+  // Per-column horizon (physical-pixel y of highest terrain drawn so far)
+  const horizon = new Float32Array(physW)
+  horizon.fill(physH)
 
-      // Project all four corners to screen
-      const x00 = (c0 / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
-      const z00 = (r0 / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
-      const y00 = (e00 - minElevation_m) * verticalExaggeration
+  // Grid-to-world scale factors (precompute)
+  const invTW = 1 / terrainWidth_m
+  const invTD = 1 / terrainDepth_m
+  const gw1 = width  - 1
+  const gh1 = height - 1
 
-      const x10 = (c1 / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
-      const z10 = (r0 / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
-      const y10 = (e10 - minElevation_m) * verticalExaggeration
+  for (let rz = rzFar; rz >= rzNear; rz -= rzStep) {
+    // Precompute rz-dependent terms
+    const rz_sinT = rz * sinT
+    const rz_cosT = rz * cosT
+    const ry2_rz  = -rz * sinPhi            // rz contribution to ry2
 
-      const x11 = (c1 / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
-      const z11 = (r1 / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
-      const y11 = (e11 - minElevation_m) * verticalExaggeration
+    for (let psx = 0; psx < physW; psx++) {
+      const rx = (psx - physCx) / physScale
 
-      const x01 = (c0 / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
-      const z01 = (r1 / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
-      const y01 = (e01 - minElevation_m) * verticalExaggeration
+      // Inverse-rotate to world coords
+      const worldX = rx * cosT - rz_sinT + pivotX_m
+      const worldZ = rx * sinT + rz_cosT + pivotZ_m
 
-      const [sx00, sy00] = project3D(x00, y00, z00, theta, phi, cx, cy, scale)
-      const [sx10, sy10] = project3D(x10, y10, z10, theta, phi, cx, cy, scale)
-      const [sx11, sy11] = project3D(x11, y11, z11, theta, phi, cx, cy, scale)
-      const [sx01, sy01] = project3D(x01, y01, z01, theta, phi, cx, cy, scale)
+      // Grid coordinates (nearest-neighbour)
+      const gc = (worldX * invTW + 0.5) * gw1
+      const gr = (worldZ * invTD + 0.5) * gh1
+      if (gc < 0 || gc > gw1 || gr < 0 || gr > gh1) continue
+      const c = (gc + 0.5) | 0
+      const r = (gr + 0.5) | 0
 
-      ctx.fillStyle = `rgb(${fr},${fg},${fb})`
-      ctx.beginPath()
-      ctx.moveTo(sx00, sy00)
-      ctx.lineTo(sx10, sy10)
-      ctx.lineTo(sx11, sy11)
-      ctx.lineTo(sx01, sy01)
-      ctx.closePath()
-      ctx.fill()
+      const elev = elevations[r * width + c]
+      const y_m = (elev - minElevation_m) * verticalExaggeration
+
+      // Project elevation to physical screen-y
+      const ry2 = y_m * cosPhi + ry2_rz
+      const psy = physCy - ry2 * physScale
+
+      const h = horizon[psx]
+      if (psy >= h) continue
+
+      // Elevation-based colour (dark ocean-depth palette)
+      const t = (elev - minElevation_m) / elevRange
+      const fr = (8  + t * 42) | 0
+      const fg = (20 + t * 55) | 0
+      const fb = (35 + t * 60) | 0
+
+      const yStart = Math.max(0, psy | 0)
+      const yEnd   = Math.min(physH, h | 0)
+      for (let py = yStart; py < yEnd; py++) {
+        const idx = (py * physW + psx) << 2
+        pixels[idx]     = fr
+        pixels[idx + 1] = fg
+        pixels[idx + 2] = fb
+        // alpha already 255 from bg fill
+      }
+      horizon[psx] = psy
     }
   }
+
+  // Blit the filled terrain to the canvas
+  ctx.save()
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.putImageData(imageData, 0, 0)
+  ctx.restore()
 
   // ── Contour lines (painter's algorithm: low → high) ───────────────────────
 
