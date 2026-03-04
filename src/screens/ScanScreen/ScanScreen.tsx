@@ -133,6 +133,149 @@ function reprojectBands(
   return { bandAngles, overallAngles, viewerElev }
 }
 
+// ─── Contour Strand Precomputation ────────────────────────────────────────────
+
+/** Contour interval in metres for each depth band index.
+ *  near/med-near = 200ft (60.96m), mid = 500ft (152.4m),
+ *  med-far = 1000ft (304.8m), far = 2000ft (609.6m). */
+const CONTOUR_INTERVALS_M: number[] = [60.96, 60.96, 152.4, 304.8, 609.6]
+
+/** A pre-built contour strand — world-space data ready for per-frame projection. */
+interface PrebuiltContourStrand {
+  level:    number   // Contour elevation (m), snapped to interval grid
+  bandIdx:  number   // Depth band index (for line width/opacity)
+  /** Per-point bearing + elevation angle. Angle is precomputed for the current viewerElev. */
+  points:   Array<{ bearingDeg: number; elevAngleRad: number }>
+}
+
+/**
+ * Build contour strands from crossing data across all 360° azimuths.
+ * Runs once when skyline data arrives or AGL changes — NOT per frame.
+ *
+ * For each band: iterates all azimuths, runs occlusion sweep, then
+ * strand-tracks by level + direction + distance proximity. Contour levels
+ * are snapped to the band's interval grid to eliminate floating point drift.
+ */
+function buildContourStrands(
+  skyline: SkylineData,
+  viewerElev: number,
+): PrebuiltContourStrand[] {
+  const completed: PrebuiltContourStrand[] = []
+
+  for (let bi = skyline.bands.length - 1; bi >= 0; bi--) {
+    const band = skyline.bands[bi]
+    const bandAz = band.numAzimuths
+    const bandRes = band.resolution
+    const offsets = band.crossingOffsets
+    const data = band.crossingData
+    const interval = CONTOUR_INTERVALS_M[bi] || 152.4
+
+    if (!data || data.length === 0) continue
+
+    const maxAzGap = Math.ceil(bandRes * 2)  // Max 2° gap before expiring strand
+
+    // Active strands keyed by snapped-level + direction
+    const activeStrands = new Map<string, Array<{
+      lastAi:   number
+      lastDist: number
+      level:    number
+      points:   Array<{ bearingDeg: number; elevAngleRad: number }>
+    }>>()
+
+    for (let ai = 0; ai < bandAz; ai++) {
+      const start = offsets[ai]
+      const end = offsets[ai + 1]
+      const bearingDeg = ai / bandRes
+
+      if (start < end) {
+        // Collect crossings, sort near-first for occlusion sweep
+        const azCrossings: Array<{ elev: number; dist: number; dir: number }> = []
+        for (let j = start; j < end; j += 5) {
+          azCrossings.push({ elev: data[j], dist: data[j + 1], dir: data[j + 4] })
+        }
+        azCrossings.sort((a, b) => a.dist - b.dist)
+
+        // Occlusion sweep: skip crossings hidden behind nearer terrain
+        let runningMaxAngle = -Math.PI / 2
+        for (const c of azCrossings) {
+          const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+          const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
+
+          if (angle <= runningMaxAngle) continue
+          runningMaxAngle = angle
+
+          // Snap level to nearest interval — eliminates floating point drift
+          const snappedLevel = Math.round(c.elev / interval) * interval
+          const levelKey = `${snappedLevel}_${c.dir > 0 ? 'u' : 'd'}`
+
+          let strands = activeStrands.get(levelKey)
+          if (!strands) {
+            strands = []
+            activeStrands.set(levelKey, strands)
+          }
+
+          // Match to closest strand by distance proximity
+          const maxDistDiff = Math.max(500, c.dist * 0.2)
+          let bestIdx = -1
+          let bestDiff = Infinity
+          for (let si = 0; si < strands.length; si++) {
+            const s = strands[si]
+            if (s.lastAi === ai) continue          // Already matched this azimuth
+            if (ai - s.lastAi > maxAzGap) continue // Too old
+            const diff = Math.abs(c.dist - s.lastDist)
+            if (diff < bestDiff && diff < maxDistDiff) {
+              bestIdx = si
+              bestDiff = diff
+            }
+          }
+
+          if (bestIdx >= 0) {
+            strands[bestIdx].lastAi = ai
+            strands[bestIdx].lastDist = c.dist
+            strands[bestIdx].points.push({ bearingDeg, elevAngleRad: angle })
+          } else {
+            strands.push({
+              lastAi: ai,
+              lastDist: c.dist,
+              level: snappedLevel,
+              points: [{ bearingDeg, elevAngleRad: angle }],
+            })
+          }
+        }
+      }
+
+      // Expire old strands periodically (amortized)
+      if (ai % maxAzGap === 0) {
+        for (const [key, strands] of activeStrands) {
+          const remaining: typeof strands = []
+          for (const s of strands) {
+            if (ai - s.lastAi > maxAzGap) {
+              if (s.points.length >= 2) {
+                completed.push({ level: s.level, bandIdx: bi, points: s.points })
+              }
+            } else {
+              remaining.push(s)
+            }
+          }
+          if (remaining.length === 0) activeStrands.delete(key)
+          else activeStrands.set(key, remaining)
+        }
+      }
+    }
+
+    // Flush remaining active strands
+    for (const [, strands] of activeStrands) {
+      for (const s of strands) {
+        if (s.points.length >= 2) {
+          completed.push({ level: s.level, bandIdx: bi, points: s.points })
+        }
+      }
+    }
+  }
+
+  return completed
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface DragState {
@@ -660,182 +803,32 @@ function renderTerrain(
 
 // ─── Contour Line Renderer ────────────────────────────────────────────────────
 
-/** A contour strand being built across azimuths */
-interface ContourStrand {
-  lastSeqIdx: number        // Sequence position of last extension
-  lastDist:   number        // Distance at last extension (for proximity matching)
-  level:      number        // Contour elevation level
-  bandIdx:    number        // Which depth band
-  points:     Array<{ x: number; y: number }>
-}
-
 /**
- * Renders contour lines from elevation crossings stored in skyline bands.
- * For each band, reprojects crossings to screen space, performs a near-to-far
- * occlusion sweep per azimuth, then uses strand tracking to connect crossings
- * across azimuths by elevation level + crossing direction + distance proximity.
- *
- * Separates up-crossings from down-crossings so terrain going through a contour
- * level in opposite directions forms independent lines. Within the same direction,
- * multiple crossings at different distances (e.g. two ridges at the same elevation)
- * are tracked as separate strands.
- *
- * Colors match the ridgeline elevation palette (elevToRidgeColor).
+ * Renders pre-built contour strands by projecting them to screen space.
+ * All heavy lifting (occlusion sweep, strand tracking) was done in
+ * buildContourStrands(). This just projects, clips to FOV, and draws.
  */
 function renderContours(
   ctx: CanvasRenderingContext2D,
-  skyline: SkylineData,
+  strands: PrebuiltContourStrand[],
   cam: CameraParams,
-  viewerElev: number,
   globalElevMin: number,
   globalElevMax: number,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
-  const numBands = skyline.bands.length
 
-  // Line widths per band (near=thick, far=thin) — thinner than ridgelines
+  // Line widths per band (near=thick, far=thin)
   const CONTOUR_LINE_WIDTHS = [1.5, 1.2, 1.0, 0.7, 0.5]
-  // Opacity per band (near=visible, far=subtle)
   const CONTOUR_OPACITIES = [0.55, 0.45, 0.35, 0.25, 0.15]
 
-  // Completed strands to draw at the end
-  const completedStrands: ContourStrand[] = []
-
-  // For each band, process crossings using strand tracking
-  for (let bi = numBands - 1; bi >= 0; bi--) {
-    const band = skyline.bands[bi]
-    const bandAz = band.numAzimuths
-    const bandRes = band.resolution
-    const offsets = band.crossingOffsets
-    const data = band.crossingData
-
-    if (!data || data.length === 0) continue
-
-    const maxSeqGap = Math.ceil(bandRes * 2)  // Max 2° gap before expiring strand
-
-    // Compute visible azimuth range (only iterate what's on screen)
-    const halfFov = cam.hfov * 0.6  // Small margin
-    const leftDeg  = cam.heading_deg - halfFov
-    const rightDeg = cam.heading_deg + halfFov
-    const leftAi   = Math.floor(((leftDeg  % 360 + 360) % 360) * bandRes) % bandAz
-    const rightAi  = Math.ceil (((rightDeg % 360 + 360) % 360) * bandRes) % bandAz
-
-    // Build ordered azimuth index list (handles wrap-around)
-    const azOrder: number[] = []
-    if (leftAi <= rightAi) {
-      for (let ai = leftAi; ai <= rightAi && ai < bandAz; ai++) azOrder.push(ai)
-    } else {
-      for (let ai = leftAi; ai < bandAz; ai++) azOrder.push(ai)
-      for (let ai = 0; ai <= rightAi; ai++) azOrder.push(ai)
-    }
-
-    // Active strands keyed by level+direction
-    const activeStrands = new Map<string, ContourStrand[]>()
-
-    for (let seqIdx = 0; seqIdx < azOrder.length; seqIdx++) {
-      const ai = azOrder[seqIdx]
-      const start = offsets[ai]
-      const end = offsets[ai + 1]
-
-      const bearingDeg = ai / bandRes
-
-      if (start < end) {
-        // Collect crossings for this azimuth, sorted near-first for occlusion
-        const azCrossings: Array<{ elev: number; dist: number; dir: number }> = []
-        for (let j = start; j < end; j += 5) {
-          azCrossings.push({
-            elev: data[j],
-            dist: data[j + 1],
-            dir:  data[j + 4],
-          })
-        }
-        azCrossings.sort((a, b) => a.dist - b.dist)
-
-        // Occlusion sweep: skip crossings hidden behind nearer terrain
-        let runningMaxAngle = -Math.PI / 2
-        for (const c of azCrossings) {
-          const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-          const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
-
-          if (angle <= runningMaxAngle) continue  // Occluded
-          runningMaxAngle = angle
-
-          // Project to screen
-          const { x, y } = project(bearingDeg, angle, cam)
-          if (y >= H || y < 0 || x < -10 || x > W + 10) continue
-
-          // Match to active strand by level + direction + distance proximity
-          const levelKey = `${Math.round(c.elev * 10) / 10}_${c.dir > 0 ? 'u' : 'd'}`
-          let strands = activeStrands.get(levelKey)
-          if (!strands) {
-            strands = []
-            activeStrands.set(levelKey, strands)
-          }
-
-          const maxDistDiff = Math.max(500, c.dist * 0.2)  // 20% of distance, floor 500m
-          let bestIdx = -1
-          let bestDiff = Infinity
-          for (let si = 0; si < strands.length; si++) {
-            const s = strands[si]
-            if (s.lastSeqIdx === seqIdx) continue  // Already matched this azimuth
-            if (seqIdx - s.lastSeqIdx > maxSeqGap) continue  // Too old
-            const diff = Math.abs(c.dist - s.lastDist)
-            if (diff < bestDiff && diff < maxDistDiff) {
-              bestIdx = si
-              bestDiff = diff
-            }
-          }
-
-          if (bestIdx >= 0) {
-            // Extend existing strand
-            strands[bestIdx].lastSeqIdx = seqIdx
-            strands[bestIdx].lastDist = c.dist
-            strands[bestIdx].points.push({ x: Math.round(x), y: Math.round(y) })
-          } else {
-            // Start new strand
-            strands.push({
-              lastSeqIdx: seqIdx,
-              lastDist: c.dist,
-              level: c.elev,
-              bandIdx: bi,
-              points: [{ x: Math.round(x), y: Math.round(y) }],
-            })
-          }
-        }
-      }
-
-      // Expire old strands every few azimuths (amortized)
-      if (seqIdx % maxSeqGap === 0) {
-        for (const [key, strands] of activeStrands) {
-          const remaining: ContourStrand[] = []
-          for (const s of strands) {
-            if (seqIdx - s.lastSeqIdx > maxSeqGap) {
-              if (s.points.length >= 2) completedStrands.push(s)
-            } else {
-              remaining.push(s)
-            }
-          }
-          if (remaining.length === 0) activeStrands.delete(key)
-          else activeStrands.set(key, remaining)
-        }
-      }
-    }
-
-    // Flush remaining active strands
-    for (const [, strands] of activeStrands) {
-      for (const s of strands) {
-        if (s.points.length >= 2) completedStrands.push(s)
-      }
-    }
-  }
-
-  // ── Draw all completed strands ──────────────────────────────────────────────
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
-  for (const strand of completedStrands) {
+  for (const strand of strands) {
+    if (strand.points.length < 2) continue
+
     const bi = strand.bandIdx
     ctx.lineWidth = CONTOUR_LINE_WIDTHS[bi] ?? 0.5
     const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
@@ -848,12 +841,30 @@ function renderContours(
     if (!rgbMatch) continue
 
     ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
+
+    // Project each point and draw, breaking on off-screen gaps
     ctx.beginPath()
-    ctx.moveTo(strand.points[0].x, strand.points[0].y)
-    for (let i = 1; i < strand.points.length; i++) {
-      ctx.lineTo(strand.points[i].x, strand.points[i].y)
+    let inPath = false
+    for (const pt of strand.points) {
+      const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
+      const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
+
+      if (onScreen) {
+        if (!inPath) {
+          ctx.moveTo(x, y)
+          inPath = true
+        } else {
+          ctx.lineTo(x, y)
+        }
+      } else {
+        if (inPath) {
+          ctx.stroke()
+          ctx.beginPath()
+          inPath = false
+        }
+      }
     }
-    ctx.stroke()
+    if (inPath) ctx.stroke()
   }
 }
 
@@ -871,6 +882,7 @@ function drawScanCanvas(
   hfov: number,
   skylineData: SkylineData | null,
   projectedBands: ProjectedBands | null,
+  contourStrands: PrebuiltContourStrand[],
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -918,8 +930,8 @@ function drawScanCanvas(
     renderTerrain(ctx, skylineData, cam, projectedBands)
   }
 
-  // ── 2b. Contour lines — elevation crossings connected across azimuths ──────
-  if (skylineData) {
+  // ── 2b. Contour lines — pre-built strands projected to screen ───────────────
+  if (contourStrands.length > 0 && skylineData) {
     // Compute global elevation range (same as renderTerrain uses)
     let cElevMin = Infinity, cElevMax = -Infinity
     for (let bi = 0; bi < skylineData.bands.length; bi++) {
@@ -930,7 +942,7 @@ function drawScanCanvas(
         if (elev[i] > cElevMax) cElevMax = elev[i]
       }
     }
-    renderContours(ctx, skylineData, cam, eyeElev, cElevMin, cElevMax)
+    renderContours(ctx, contourStrands, cam, cElevMin, cElevMax)
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
@@ -1064,6 +1076,14 @@ const ScanScreen: React.FC = () => {
     const groundElev = sampleMeshBilinear(activeLat, activeLng, meshData)
     const viewerElev = groundElev + height_m
     return reprojectBands(skylineData, viewerElev)
+  }, [skylineData, meshData, activeLat, activeLng, height_m])
+
+  // ── Pre-build contour strands (full 360°, one-time on data/AGL change) ────
+  const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
+    if (!skylineData || !meshData) return []
+    const groundElev = sampleMeshBilinear(activeLat, activeLng, meshData)
+    const viewerElev = groundElev + height_m
+    return buildContourStrands(skylineData, viewerElev)
   }, [skylineData, meshData, activeLat, activeLng, height_m])
 
   // ── Initialise Web Worker ─────────────────────────────────────────────────
@@ -1214,6 +1234,7 @@ const ScanScreen: React.FC = () => {
       heading_deg, pitch_deg, height_m,
       activeLat, activeLng,
       fov, skylineData, projectedBands,
+      contourStrands,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -1225,7 +1246,7 @@ const ScanScreen: React.FC = () => {
     heading_deg, pitch_deg, height_m, fov,
     activeLat, activeLng,
     meshData, activePeaks,
-    skylineData, projectedBands,
+    skylineData, projectedBands, contourStrands,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
