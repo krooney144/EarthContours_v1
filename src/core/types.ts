@@ -273,9 +273,9 @@ export interface DepthBandConfig {
 
 /** 5-band configuration with high-res near bands and tightened overlaps. */
 export const DEPTH_BANDS: DepthBandConfig[] = [
-  { label: 'near',     minDist: 0,       maxDist: 8_000,   resolution: 4 },  // 0–8 km   (0.25°, 1440 az)
-  { label: 'med-near', minDist: 7_000,   maxDist: 20_000,  resolution: 4 },  // 7–20 km  (0.25°, 1440 az)
-  { label: 'mid',      minDist: 19_000,  maxDist: 50_000  },                  // 19–50 km (0.5°,  720 az)
+  { label: 'near',     minDist: 0,       maxDist: 8_000,   resolution: 8 },  // 0–8 km   (0.125°, 2880 az)
+  { label: 'med-near', minDist: 7_000,   maxDist: 20_000,  resolution: 8 },  // 7–20 km  (0.125°, 2880 az)
+  { label: 'mid',      minDist: 19_000,  maxDist: 50_000  },                  // 19–50 km (0.25°, 1440 az)
   { label: 'med-far',  minDist: 48_000,  maxDist: 120_000 },                  // 48–120 km
   { label: 'far',      minDist: 115_000, maxDist: 400_000 },                  // 115–400 km
 ]

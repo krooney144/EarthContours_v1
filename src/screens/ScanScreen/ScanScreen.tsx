@@ -67,7 +67,7 @@ const MAX_PEAK_DIST     = 400_000     // Max distance for peak label display (m)
 const EARTH_R           = 6_371_000  // Earth radius (m)
 const REFRACTION_K      = 0.13       // Atmospheric refraction coefficient
 const DEG_TO_RAD        = Math.PI / 180
-const SKYLINE_RESOLUTION = 2         // 0.5° per step = 720 azimuths for full 360°
+const SKYLINE_RESOLUTION = 4         // 0.25° per step = 1440 azimuths for full 360°
 
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
 
@@ -394,6 +394,60 @@ function bandAngleAt(
   return a0 * (1 - t) + a1 * t
 }
 
+/** Interpolated raw elevation at a fractional bearing for a given band. */
+function bandElevAt(
+  skyline: SkylineData,
+  bandIndex: number,
+  bearingDeg: number,
+): number {
+  const band = skyline.bands[bandIndex]
+  const bandRes = band.resolution
+  const bandAz  = band.numAzimuths
+
+  const normBearing = ((bearingDeg % 360) + 360) % 360
+  const fracIdx = normBearing * bandRes
+  const idx0 = Math.floor(fracIdx) % bandAz
+  const idx1 = (idx0 + 1) % bandAz
+  const t = fracIdx - Math.floor(fracIdx)
+
+  const e0 = band.elevations[idx0]
+  const e1 = band.elevations[idx1]
+  if (e0 === -Infinity && e1 === -Infinity) return -Infinity
+  if (e0 === -Infinity) return e1
+  if (e1 === -Infinity) return e0
+  return e0 * (1 - t) + e1 * t
+}
+
+// ─── Elevation → Palette Color ────────────────────────────────────────────────
+//
+// Maps a normalized elevation (0–1) through the ocean-depth palette stops.
+// Low ridgelines = abyss (dark), high peaks = reef (bright).
+// Palette: abyss → deep → navy → ocean → mid → reef
+
+const RIDGE_PALETTE: [number, number, number][] = [
+  [14,  57,  81],   // abyss  #0E3951  t=0.0
+  [18,  75, 107],   // deep   #124B6B  t=0.2
+  [33,  92, 121],   // navy   #215C79  t=0.4
+  [47, 109, 135],   // ocean  #2F6D87  t=0.6
+  [75, 142, 163],   // mid    #4B8EA3  t=0.8
+  [104, 176, 191],  // reef   #68B0BF  t=1.0
+]
+
+function elevToRidgeColor(tElev: number): string {
+  const t = Math.max(0, Math.min(1, tElev))
+  const maxIdx = RIDGE_PALETTE.length - 1
+  const scaled = t * maxIdx
+  const i0 = Math.floor(scaled)
+  const i1 = Math.min(i0 + 1, maxIdx)
+  const frac = scaled - i0
+  const [r0, g0, b0] = RIDGE_PALETTE[i0]
+  const [r1, g1, b1] = RIDGE_PALETTE[i1]
+  const r = Math.round(r0 + (r1 - r0) * frac)
+  const g = Math.round(g0 + (g1 - g0) * frac)
+  const b = Math.round(b0 + (b1 - b0) * frac)
+  return `rgb(${r},${g},${b})`
+}
+
 // ─── Depth Band Visual Parameters ─────────────────────────────────────────────
 //
 // Driven by band index as a fraction of total bands.  Adding bands later means
@@ -416,17 +470,18 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
   const fillB = Math.round(46 - t * 22)
   const fillColor = `rgb(${fillR},${fillG},${fillB})`
 
-  // Stroke: far = thin/faint, near = thick/bright
-  const opacity   = 0.15 + t * 0.65     // 0.15 → 0.80
-  const lineWidth = 0.5 + t * 2.5       // 0.5px → 3.0px
-  const strokeColor = `rgba(132, 209, 219, ${opacity.toFixed(2)})`
+  // Stroke: far = thin, near = thick — color now driven per-azimuth by elevation
+  const lineWidth = 1.0 + t * 4.0       // 1.0px (far) → 5.0px (near)
+  const strokeColor = `rgba(132, 209, 219, ${(0.15 + t * 0.65).toFixed(2)})`  // fallback
 
   return { fillColor, strokeColor, lineWidth }
 }
 
 /**
  * Layered terrain renderer — draws depth bands in painter's order (far→near).
- * Each band gets its own fill + stroke with depth-appropriate visual weight.
+ * Each band gets its own fill (flat) + ridgeline stroke with:
+ *   - Per-band thickness (near=5px → far=1px)
+ *   - Per-azimuth color from elevation (high=reef/bright → low=abyss/dark)
  * All projection goes through project() — single camera source of truth.
  */
 function renderTerrain(
@@ -437,6 +492,22 @@ function renderTerrain(
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
+
+  // ── Global elevation range for color normalization ───────────────────────
+  let globalElevMin = Infinity
+  let globalElevMax = -Infinity
+  for (let bi = 0; bi < numBands; bi++) {
+    const elev = skyline.bands[bi].elevations
+    for (let i = 0; i < elev.length; i++) {
+      if (elev[i] === -Infinity) continue
+      if (elev[i] < globalElevMin) globalElevMin = elev[i]
+      if (elev[i] > globalElevMax) globalElevMax = elev[i]
+    }
+  }
+  const elevRange = globalElevMax - globalElevMin
+  const hasElevRange = elevRange > 1  // Avoid division by zero
+
+  const SEGMENT_SIZE = 4  // Columns per ridgeline color segment
 
   // Draw bands far→near (painter's order: far gets painted first, near overlaps)
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
@@ -471,17 +542,23 @@ function renderTerrain(
       ctx.fill()
     }
 
-    // ── Ridgeline stroke for this band ─────────────────────────────────────
+    // ── Ridgeline stroke — segment-based for per-azimuth elevation color ──
     if (hasVisiblePixels) {
-      ctx.beginPath()
-      let started = false
+      ctx.lineWidth = style.lineWidth
+      ctx.lineCap = 'round'
+      ctx.lineJoin = 'round'
+
+      let segStartCol = -1
+      let prevClampedY = 0
 
       for (let col = 0; col < W; col++) {
         const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
         const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
 
         if (angle <= -Math.PI / 2 + 0.001) {
-          started = false
+          // Gap — flush pending segment
+          if (segStartCol >= 0) ctx.stroke()
+          segStartCol = -1
           continue
         }
 
@@ -489,22 +566,45 @@ function renderTerrain(
         const screenY = Math.round(y)
 
         if (screenY >= H) {
-          started = false
+          if (segStartCol >= 0) ctx.stroke()
+          segStartCol = -1
           continue
         }
 
         const clampedY = Math.max(0, screenY)
-        if (!started) {
+
+        if (segStartCol < 0) {
+          // Start a new segment — compute color from elevation
+          const elev = bandElevAt(skyline, bi, bearingDeg)
+          const tElev = hasElevRange && elev > -Infinity
+            ? (elev - globalElevMin) / elevRange
+            : 0.5
+          ctx.beginPath()
+          ctx.strokeStyle = elevToRidgeColor(tElev)
           ctx.moveTo(col, clampedY)
-          started = true
+          segStartCol = col
+        } else if (col - segStartCol >= SEGMENT_SIZE) {
+          // Flush current segment, start new one with updated color
+          ctx.lineTo(col, clampedY)
+          ctx.stroke()
+
+          const elev = bandElevAt(skyline, bi, bearingDeg)
+          const tElev = hasElevRange && elev > -Infinity
+            ? (elev - globalElevMin) / elevRange
+            : 0.5
+          ctx.beginPath()
+          ctx.strokeStyle = elevToRidgeColor(tElev)
+          ctx.moveTo(col, clampedY)
+          segStartCol = col
         } else {
           ctx.lineTo(col, clampedY)
         }
+
+        prevClampedY = clampedY
       }
 
-      ctx.strokeStyle = style.strokeColor
-      ctx.lineWidth = style.lineWidth
-      ctx.stroke()
+      // Flush final segment
+      if (segStartCol >= 0) ctx.stroke()
     }
   }
 }
@@ -1180,16 +1280,16 @@ const ScanScreen: React.FC = () => {
 
               return (
                 <>
-                  <div style={{ color: '#ff0', marginBottom: 2 }}>v2.1 DEBUG — Layered + Interp</div>
+                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.1 DEBUG — Layered + Interp</div>
 
-                  <div style={{ color: '#8cf', marginTop: 3 }}>CAMERA</div>
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>CAMERA</div>
                   <div>hdg:{heading_deg.toFixed(1)}° pit:{pitch_deg.toFixed(1)}° fov:{fov.toFixed(0)}°</div>
                   <div>horizonY:{horizY.toFixed(0)}px  px/rad H:{pxPerDegH} V:{pxPerDegV}</div>
                   <div>AGL:{height_m.toFixed(0)}m  ground:{gElev.toFixed(0)}m  eye:{eyeElev.toFixed(0)}m</div>
                   <div>interp:ON  az:{pxPerAzStd}px/std {pxPerAzHi}px/hi</div>
                   <div>horizon:{horizonDist.toFixed(0)}km (geometric)</div>
 
-                  <div style={{ color: '#8cf', marginTop: 3 }}>RE-PROJECTION</div>
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>RE-PROJECTION</div>
                   <div style={{ color: angleDiffOk ? '#0f0' : '#f44' }}>
                     max Δangle: {angleDiffDeg}° {angleDiffOk ? '✓' : '⚠ MISMATCH'}
                   </div>
@@ -1199,27 +1299,43 @@ const ScanScreen: React.FC = () => {
                     Δelev: {elevMismatch.toFixed(0)}m {elevMismatch > 50 ? '⚠ BIG' : ''}
                   </div>
 
-                  <div style={{ color: '#8cf', marginTop: 3 }}>BANDS ({bandStats.length})</div>
-                  {bandStats.map((bs, i) => {
-                    const colors = ['#f33', '#f93', '#3f3', '#39f', '#c3f']
-                    const bandCfg = DEPTH_BANDS[i]
-                    const rangeStr = bandCfg ? `[${(bandCfg.minDist/1000).toFixed(0)}–${(bandCfg.maxDist/1000).toFixed(0)}km]` : ''
-                    const resLabel = bs.bandRes > SKYLINE_RESOLUTION ? ' hi' : ''
-                    return (
-                      <div key={bs.label} style={{ color: bs.active === 0 ? '#666' : colors[i] || '#0f0' }}>
-                        {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel}
-                        {bs.active > 0 && (
-                          <>
-                            {' '}∠{(bs.centerAngle * 180 / Math.PI).toFixed(2)}°
-                            {' '}e:{bs.eMin.toFixed(0)}–{bs.eMax.toFixed(0)}m
-                            {' '}d:{(bs.dMin/1000).toFixed(0)}–{(bs.dMax/1000).toFixed(0)}km
-                          </>
-                        )}
-                      </div>
-                    )
-                  })}
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>BANDS ({bandStats.length})</div>
+                  {(() => {
+                    // Global elev range for debug color preview
+                    let gMin = Infinity, gMax = -Infinity
+                    for (const bs of bandStats) {
+                      if (bs.active > 0) {
+                        if (bs.eMin < gMin) gMin = bs.eMin
+                        if (bs.eMax > gMax) gMax = bs.eMax
+                      }
+                    }
+                    const gRange = gMax - gMin
+                    return bandStats.map((bs, i) => {
+                      const bandCfg = DEPTH_BANDS[i]
+                      const rangeStr = bandCfg ? `[${(bandCfg.minDist/1000).toFixed(0)}–${(bandCfg.maxDist/1000).toFixed(0)}km]` : ''
+                      const resLabel = bs.bandRes > SKYLINE_RESOLUTION ? ' hi' : ''
+                      // Palette-derived color: use band's center elevation mapped through RIDGE_PALETTE
+                      const bandT = bandStats.length <= 1 ? 1 : 1 - i / (bandStats.length - 1)
+                      const centerElev = bs.active > 0 ? (bs.eMin + bs.eMax) / 2 : 0
+                      const tElev = gRange > 1 && bs.active > 0 ? (centerElev - gMin) / gRange : 0.5
+                      const bandColor = bs.active === 0 ? '#666' : elevToRidgeColor(Math.min(1, tElev + 0.2))
+                      const bStyle = bandStyleForIndex(i, bandStats.length)
+                      return (
+                        <div key={bs.label} style={{ color: bandColor }}>
+                          {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel} lw:{bStyle.lineWidth.toFixed(1)}px
+                          {bs.active > 0 && (
+                            <>
+                              {' '}∠{(bs.centerAngle * 180 / Math.PI).toFixed(2)}°
+                              {' '}e:{bs.eMin.toFixed(0)}–{bs.eMax.toFixed(0)}m
+                              {' '}d:{(bs.dMin/1000).toFixed(0)}–{(bs.dMax/1000).toFixed(0)}km
+                            </>
+                          )}
+                        </div>
+                      )
+                    })
+                  })()}
 
-                  <div style={{ color: '#8cf', marginTop: 3 }}>PEAKS</div>
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>PEAKS</div>
                   <div>total:{totalPeaks} → visible:{peakPositions.length} (r≤{MAX_PEAK_DIST/1000}km)</div>
                   {peakPositions.slice(0, 3).map(p => (
                     <div key={p.id} style={{ color: '#ccc', fontSize: 8 }}>
