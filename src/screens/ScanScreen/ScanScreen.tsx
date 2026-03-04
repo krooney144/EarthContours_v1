@@ -418,6 +418,31 @@ function bandElevAt(
   return e0 * (1 - t) + e1 * t
 }
 
+/** Interpolated distance at a fractional bearing for a given band. */
+function bandDistAt(
+  skyline: SkylineData,
+  bandIndex: number,
+  bearingDeg: number,
+): number {
+  const band = skyline.bands[bandIndex]
+  const bandRes = band.resolution
+  const bandAz  = band.numAzimuths
+
+  const normBearing = ((bearingDeg % 360) + 360) % 360
+  const fracIdx = normBearing * bandRes
+  const idx0 = Math.floor(fracIdx) % bandAz
+  const idx1 = (idx0 + 1) % bandAz
+  const t = fracIdx - Math.floor(fracIdx)
+
+  const d0 = band.distances[idx0]
+  const d1 = band.distances[idx1]
+  // If either sample has no ridge (-Infinity elevation), return the other
+  if (band.elevations[idx0] === -Infinity && band.elevations[idx1] === -Infinity) return 0
+  if (band.elevations[idx0] === -Infinity) return d1
+  if (band.elevations[idx1] === -Infinity) return d0
+  return d0 * (1 - t) + d1 * t
+}
+
 // ─── Elevation → Palette Color ────────────────────────────────────────────────
 //
 // Maps a normalized elevation (0–1) through the ocean-depth palette stops.
@@ -454,34 +479,56 @@ function elevToRidgeColor(tElev: number): string {
 // these interpolate automatically — no hardcoded per-band style blocks.
 
 interface BandStyle {
-  fillColor:   string   // Terrain fill below ridgeline
-  strokeColor: string   // Ridgeline stroke RGBA
-  lineWidth:   number   // Ridgeline thickness (px)
+  fillColor:      string   // Terrain fill below ridgeline
+  strokeColor:    string   // Ridgeline stroke RGBA (fallback)
+  lineWidthNear:  number   // Ridgeline thickness at band's near edge (px)
+  lineWidthFar:   number   // Ridgeline thickness at band's far edge (px)
+  hasGap:         boolean  // Whether to skip far 35% of band range (depth separation)
 }
+
+/** Per-band line widths: edges match at boundaries so adjacent bands are seamless.
+ *  near 8→7, med-near 7→6, mid 6→5, med-far 5→4, far 4→3.
+ *  Nearest 3 bands get distance-based interpolation + gaps.
+ *  Far 2 bands are continuous (flat width, no gaps). */
+const BAND_LINE_WIDTHS: [number, number][] = [
+  [8, 7],  // near:     8px at 0km → 7px at 8km
+  [7, 6],  // med-near: 7px at 7km → 6px at 20km
+  [6, 5],  // mid:      6px at 19km → 5px at 50km
+  [5, 4],  // med-far:  5px at 48km → 4px at 120km (continuous)
+  [4, 3],  // far:      4px at 115km → 3px at 400km (continuous)
+]
+
+/** Number of nearest bands that get distance-based width variation + fill gaps. */
+const GAP_BAND_COUNT = 3
+
+/** Fraction of band range to skip at far edge (creates depth separation). */
+const GAP_FRACTION = 0.35
 
 function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
   // t = 0 (far) → 1 (near)
   const t = bandCount <= 1 ? 1 : 1 - bandIndex / (bandCount - 1)
 
   // Fill: far = lighter/hazier, near = deep dark
-  // Interpolate from #0a1e2e (far, lighter) through to #050e18 (near, darkest)
   const fillR = Math.round(10 - t * 5)
   const fillG = Math.round(30 - t * 16)
   const fillB = Math.round(46 - t * 22)
   const fillColor = `rgb(${fillR},${fillG},${fillB})`
 
-  // Stroke: far = thin, near = thick — color now driven per-azimuth by elevation
-  const lineWidth = 1.0 + t * 4.0       // 1.0px (far) → 5.0px (near)
-  const strokeColor = `rgba(132, 209, 219, ${(0.15 + t * 0.65).toFixed(2)})`  // fallback
+  const strokeColor = `rgba(132, 209, 219, ${(0.15 + t * 0.65).toFixed(2)})`
 
-  return { fillColor, strokeColor, lineWidth }
+  const widths = BAND_LINE_WIDTHS[bandIndex] || [1 + t * 4, 1 + t * 4]
+  const hasGap = bandIndex < GAP_BAND_COUNT
+
+  return { fillColor, strokeColor, lineWidthNear: widths[0], lineWidthFar: widths[1], hasGap }
 }
 
 /**
  * Layered terrain renderer — draws depth bands in painter's order (far→near).
  * Each band gets its own fill (flat) + ridgeline stroke with:
- *   - Per-band thickness (near=5px → far=1px)
+ *   - Distance-based line width (edges match at band boundaries)
  *   - Per-azimuth color from elevation (high=reef/bright → low=abyss/dark)
+ *   - Nearest 3 bands: fill gaps at far 35% of range for depth separation
+ *   - Far 2 bands: continuous (no gaps) for a smoother horizon
  * All projection goes through project() — single camera source of truth.
  */
 function renderTerrain(
@@ -513,6 +560,18 @@ function renderTerrain(
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
   for (let bi = numBands - 1; bi >= 0; bi--) {
     const style = bandStyleForIndex(bi, numBands)
+    const bandCfg = DEPTH_BANDS[bi]
+
+    // Gap threshold: for nearest 3 bands, skip far 35% of band range
+    const bandRange = bandCfg ? bandCfg.maxDist - bandCfg.minDist : 0
+    const gapThreshold = style.hasGap && bandCfg
+      ? bandCfg.minDist + bandRange * (1 - GAP_FRACTION)
+      : Infinity  // No gap for far bands
+
+    // Line width interpolation helper
+    const lwMin = bandCfg ? bandCfg.minDist : 0
+    const lwMax = bandCfg ? bandCfg.maxDist : 1
+    const lwRange = lwMax - lwMin
 
     // ── Fill below this band's ridgeline ───────────────────────────────────
     ctx.beginPath()
@@ -527,6 +586,15 @@ function renderTerrain(
       if (angle <= -Math.PI / 2 + 0.001) {
         ctx.lineTo(col, H)
         continue
+      }
+
+      // Gap check: skip far 35% of band range for nearest 3 bands
+      if (style.hasGap) {
+        const dist = bandDistAt(skyline, bi, bearingDeg)
+        if (dist > gapThreshold) {
+          ctx.lineTo(col, H)
+          continue
+        }
       }
 
       hasVisiblePixels = true
@@ -544,7 +612,6 @@ function renderTerrain(
 
     // ── Ridgeline stroke — segment-based for per-azimuth elevation color ──
     if (hasVisiblePixels) {
-      ctx.lineWidth = style.lineWidth
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
 
@@ -556,10 +623,19 @@ function renderTerrain(
         const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
 
         if (angle <= -Math.PI / 2 + 0.001) {
-          // Gap — flush pending segment
           if (segStartCol >= 0) ctx.stroke()
           segStartCol = -1
           continue
+        }
+
+        // Gap check for stroke too
+        if (style.hasGap) {
+          const dist = bandDistAt(skyline, bi, bearingDeg)
+          if (dist > gapThreshold) {
+            if (segStartCol >= 0) ctx.stroke()
+            segStartCol = -1
+            continue
+          }
         }
 
         const { y } = project(bearingDeg, angle, cam)
@@ -574,17 +650,21 @@ function renderTerrain(
         const clampedY = Math.max(0, screenY)
 
         if (segStartCol < 0) {
-          // Start a new segment — compute color from elevation
+          // Start a new segment — compute color + distance-based line width
           const elev = bandElevAt(skyline, bi, bearingDeg)
           const tElev = hasElevRange && elev > -Infinity
             ? (elev - globalElevMin) / elevRange
             : 0.5
+          // Distance-based line width interpolation
+          const dist = bandDistAt(skyline, bi, bearingDeg)
+          const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
+          ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
           ctx.beginPath()
           ctx.strokeStyle = elevToRidgeColor(tElev)
           ctx.moveTo(col, clampedY)
           segStartCol = col
         } else if (col - segStartCol >= SEGMENT_SIZE) {
-          // Flush current segment, start new one with updated color
+          // Flush current segment, start new one with updated color + width
           ctx.lineTo(col, clampedY)
           ctx.stroke()
 
@@ -592,6 +672,9 @@ function renderTerrain(
           const tElev = hasElevRange && elev > -Infinity
             ? (elev - globalElevMin) / elevRange
             : 0.5
+          const dist = bandDistAt(skyline, bi, bearingDeg)
+          const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
+          ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
           ctx.beginPath()
           ctx.strokeStyle = elevToRidgeColor(tElev)
           ctx.moveTo(col, clampedY)
@@ -668,38 +751,6 @@ function drawScanCanvas(
   // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands)
-  }
-
-  // ── 2b. DEBUG: Per-band ridgeline overlay (distinct colors) ─────────────────
-  if (skylineData) {
-    const bandColors = ['#68B0BF', '#4B8EA3', '#2F6D87', '#215C79', '#124B6B']  // near=reef, med-near=mid, mid=ocean, med-far=navy, far=deep
-    const numBands = skylineData.bands.length
-    for (let bi = 0; bi < numBands; bi++) {
-      ctx.beginPath()
-      let started = false
-      for (let col = 0; col < W; col += 2) {  // every other pixel for speed
-        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
-        const angle = bandAngleAt(skylineData, bi, bearingDeg, projectedBands)
-        if (angle <= -Math.PI / 2 + 0.001) { started = false; continue }
-        const { y } = project(bearingDeg, angle, cam)
-        if (!started) { ctx.moveTo(col, y); started = true }
-        else ctx.lineTo(col, y)
-      }
-      ctx.strokeStyle = bandColors[bi] || '#fff'
-      ctx.lineWidth = 1.5
-      ctx.setLineDash([4, 4])
-      ctx.stroke()
-      ctx.setLineDash([])
-
-      // Label at left edge
-      const labelAngle = bandAngleAt(skylineData, bi, cam.heading_deg - cam.hfov * 0.4, projectedBands)
-      if (labelAngle > -Math.PI / 2 + 0.001) {
-        const { y: ly } = project(cam.heading_deg - cam.hfov * 0.4, labelAngle, cam)
-        ctx.font = '11px monospace'
-        ctx.fillStyle = bandColors[bi] || '#fff'
-        ctx.fillText(`${DEPTH_BANDS[bi]?.label || bi} ${(labelAngle * 180 / Math.PI).toFixed(2)}°`, 8, ly - 4)
-      }
-    }
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
@@ -1322,7 +1373,7 @@ const ScanScreen: React.FC = () => {
                       const bStyle = bandStyleForIndex(i, bandStats.length)
                       return (
                         <div key={bs.label} style={{ color: bandColor }}>
-                          {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel} lw:{bStyle.lineWidth.toFixed(1)}px
+                          {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel} lw:{bStyle.lineWidthNear.toFixed(0)}→{bStyle.lineWidthFar.toFixed(0)}px
                           {bs.active > 0 && (
                             <>
                               {' '}∠{(bs.centerAngle * 180 / Math.PI).toFixed(2)}°
