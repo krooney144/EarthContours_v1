@@ -483,7 +483,6 @@ interface BandStyle {
   strokeColor:    string   // Ridgeline stroke RGBA (fallback)
   lineWidthNear:  number   // Ridgeline thickness at band's near edge (px)
   lineWidthFar:   number   // Ridgeline thickness at band's far edge (px)
-  hasGap:         boolean  // Whether to skip far 35% of band range (depth separation)
 }
 
 /** Per-band line widths: edges match at boundaries so adjacent bands are seamless.
@@ -498,12 +497,6 @@ const BAND_LINE_WIDTHS: [number, number][] = [
   [4, 3],  // far:      4px at 115km → 3px at 400km (continuous)
 ]
 
-/** Number of nearest bands that get distance-based width variation + fill gaps. */
-const GAP_BAND_COUNT = 3
-
-/** Fraction of band range to skip at far edge (creates depth separation). */
-const GAP_FRACTION = 0.35
-
 function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
   // t = 0 (far) → 1 (near)
   const t = bandCount <= 1 ? 1 : 1 - bandIndex / (bandCount - 1)
@@ -517,9 +510,8 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
   const strokeColor = `rgba(132, 209, 219, ${(0.15 + t * 0.65).toFixed(2)})`
 
   const widths = BAND_LINE_WIDTHS[bandIndex] || [1 + t * 4, 1 + t * 4]
-  const hasGap = bandIndex < GAP_BAND_COUNT
 
-  return { fillColor, strokeColor, lineWidthNear: widths[0], lineWidthFar: widths[1], hasGap }
+  return { fillColor, strokeColor, lineWidthNear: widths[0], lineWidthFar: widths[1] }
 }
 
 /**
@@ -527,8 +519,7 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
  * Each band gets its own fill (flat) + ridgeline stroke with:
  *   - Distance-based line width (edges match at band boundaries)
  *   - Per-azimuth color from elevation (high=reef/bright → low=abyss/dark)
- *   - Nearest 3 bands: fill gaps at far 35% of range for depth separation
- *   - Far 2 bands: continuous (no gaps) for a smoother horizon
+ *   - All bands render all segments (no fill gaps)
  * All projection goes through project() — single camera source of truth.
  */
 function renderTerrain(
@@ -562,12 +553,6 @@ function renderTerrain(
     const style = bandStyleForIndex(bi, numBands)
     const bandCfg = DEPTH_BANDS[bi]
 
-    // Gap threshold: for nearest 3 bands, skip far 35% of band range
-    const bandRange = bandCfg ? bandCfg.maxDist - bandCfg.minDist : 0
-    const gapThreshold = style.hasGap && bandCfg
-      ? bandCfg.minDist + bandRange * (1 - GAP_FRACTION)
-      : Infinity  // No gap for far bands
-
     // Line width interpolation helper
     const lwMin = bandCfg ? bandCfg.minDist : 0
     const lwMax = bandCfg ? bandCfg.maxDist : 1
@@ -586,15 +571,6 @@ function renderTerrain(
       if (angle <= -Math.PI / 2 + 0.001) {
         ctx.lineTo(col, H)
         continue
-      }
-
-      // Gap check: skip far 35% of band range for nearest 3 bands
-      if (style.hasGap) {
-        const dist = bandDistAt(skyline, bi, bearingDeg)
-        if (dist > gapThreshold) {
-          ctx.lineTo(col, H)
-          continue
-        }
       }
 
       hasVisiblePixels = true
@@ -626,16 +602,6 @@ function renderTerrain(
           if (segStartCol >= 0) ctx.stroke()
           segStartCol = -1
           continue
-        }
-
-        // Gap check for stroke too
-        if (style.hasGap) {
-          const dist = bandDistAt(skyline, bi, bearingDeg)
-          if (dist > gapThreshold) {
-            if (segStartCol >= 0) ctx.stroke()
-            segStartCol = -1
-            continue
-          }
         }
 
         const { y } = project(bearingDeg, angle, cam)
