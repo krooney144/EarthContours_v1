@@ -14,12 +14,13 @@
  *    Uses createImageBitmap + OffscreenCanvas for PNG decoding (worker-safe).
  *
  *  Phase 2 — Skyline computation:
- *    For each of 720 azimuth steps (0.5°/step = full 360°):
+ *    For each azimuth:
  *      Walk outward with logarithmic steps (100 m → maxRange).
  *      For each step:
  *        Sample elevation from tile cache; fall back to mesh grid.
  *        Apply Earth curvature + atmospheric refraction correction.
  *        Track maximum elevation angle seen (= ridgeline for this direction).
+ *        Detect elevation crossings at contour intervals (200ft near → 2000ft far).
  *      Compute hill shade at the final ridgeline point.
  *
  *  Output: SkylineData with transferable ArrayBuffers (zero-copy to main thread).
@@ -40,6 +41,19 @@ const REFRACTION_K  = 0.13
 const DEG_TO_RAD    = Math.PI / 180
 // NW-45° sun direction (ENU: x=east, y=up, z=north)
 const LIGHT_X = -0.5, LIGHT_Y = 0.707, LIGHT_Z = 0.5
+
+// ─── Contour Intervals Per Band ──────────────────────────────────────────────
+
+/** Contour interval in metres for each depth band index.
+ *  near/med-near = 200ft (60.96m), mid = 500ft (152.4m),
+ *  med-far = 1000ft (304.8m), far = 2000ft (609.6m). */
+const CONTOUR_INTERVALS_M: number[] = [
+  60.96,   // near:     200ft
+  60.96,   // med-near: 200ft
+  152.4,   // mid:      500ft
+  304.8,   // med-far:  1000ft
+  609.6,   // far:      2000ft
+]
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -77,10 +91,10 @@ const DEPTH_BANDS: BandConfig[] = [
 interface SkylineBand {
   elevations:  Float32Array
   distances:   Float32Array
-  slopeX:      Float32Array
-  slopeZ:      Float32Array
   ridgeLats:   Float32Array
   ridgeLngs:   Float32Array
+  crossingData:    Float32Array
+  crossingOffsets: Uint32Array
   resolution:  number      // Steps per degree for this band
   numAzimuths: number      // 360 × resolution
 }
@@ -215,13 +229,12 @@ function sampleBest(
   return sampleMeshGrid(lat, lng, mesh, mw, mh, bounds)
 }
 
-/** Finite-difference slope + hill shade at a terrain point.
- *  Returns { shade, dzdx, dzdy } — slope vectors preserved for contour fragments. */
-function slopeAndShade(
+/** Hill shade at a terrain point (NW-45° light). */
+function hillShade(
   lat: number, lng: number, zoom: number,
   mesh: Float32Array, mw: number, mh: number,
   bounds: { north: number; south: number; east: number; west: number },
-): { shade: number; dzdx: number; dzdy: number } {
+): number {
   const STEP   = zoom >= 11 ? 0.0005 : 0.002
   const cosLat = Math.cos(lat * DEG_TO_RAD)
   const dx_m   = STEP * 111_320 * cosLat
@@ -236,8 +249,45 @@ function slopeAndShade(
   const dzdy = (eN - eS) / (2 * dy_m)
   const nx = -dzdx, ny = 1.0, nz = -dzdy
   const mag = Math.sqrt(nx * nx + ny * ny + nz * nz)
-  const shade = Math.max(0, (nx * LIGHT_X + ny * LIGHT_Y + nz * LIGHT_Z) / mag)
-  return { shade, dzdx, dzdy }
+  return Math.max(0, (nx * LIGHT_X + ny * LIGHT_Y + nz * LIGHT_Z) / mag)
+}
+
+// ─── Contour Crossing Detection ──────────────────────────────────────────────
+
+/**
+ * Detect elevation crossings between two consecutive ray steps.
+ * Returns crossing points where terrain elevation crosses a contour threshold.
+ * Interpolates exact crossing distance and lat/lng.
+ */
+function detectCrossings(
+  prevElev: number, prevDist: number, prevLat: number, prevLng: number,
+  currElev: number, currDist: number, currLat: number, currLng: number,
+  interval: number,
+  crossings: number[],  // output: push [elev, dist, lat, lng] tuples
+): void {
+  if (prevElev === -Infinity || currElev === -Infinity) return
+
+  // Determine which contour levels are crossed between prevElev and currElev
+  const loElev = Math.min(prevElev, currElev)
+  const hiElev = Math.max(prevElev, currElev)
+
+  // First contour level at or above loElev
+  const firstLevel = Math.ceil(loElev / interval) * interval
+  if (firstLevel > hiElev) return  // No crossings
+
+  for (let level = firstLevel; level <= hiElev; level += interval) {
+    // Interpolation factor: where between prev and curr does this crossing occur?
+    const dElev = currElev - prevElev
+    if (Math.abs(dElev) < 0.01) continue  // Flat — skip degenerate crossing
+    const t = (level - prevElev) / dElev
+    if (t < 0 || t > 1) continue
+
+    const cDist = prevDist + t * (currDist - prevDist)
+    const cLat  = prevLat  + t * (currLat  - prevLat)
+    const cLng  = prevLng  + t * (currLng  - prevLng)
+
+    crossings.push(level, cDist, cLat, cLng)
+  }
 }
 
 // ─── Worker Message Handler ───────────────────────────────────────────────────
@@ -282,11 +332,6 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
   self.postMessage({ type: 'progress', phase: 'tiles', progress: 1, tilesLoaded: tileCacheW.size })
 
   // ── Fix elevation source mismatch ─────────────────────────────────────────
-  // The main thread computes viewerElev from the coarse region mesh (~860m/px).
-  // The worker samples nearby terrain from z13 tiles (~19m/px). In mountain
-  // valleys the mesh smooths the canyon to ~1535m while tiles show ~3000m nearby,
-  // creating 86° "cliff" angles at 100m. Re-sample the viewer's ground from
-  // the same tile source so both sides agree.
   const meshGround = sampleMeshGrid(viewerLat, viewerLng, meshElevations, meshWidth, meshHeight, meshBounds)
   const tileGround = sampleBest(viewerLat, viewerLng, 13, meshElevations, meshWidth, meshHeight, meshBounds)
   const elevCorrection = tileGround - meshGround
@@ -337,15 +382,22 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     const bandRes = cfg.resolution || resolution
     const bandAz  = Math.round(360 * bandRes)
     return {
-      elevations:  new Float32Array(bandAz).fill(-Infinity),
-      distances:   new Float32Array(bandAz),
-      slopeX:      new Float32Array(bandAz),
-      slopeZ:      new Float32Array(bandAz),
-      ridgeLats:   new Float32Array(bandAz),
-      ridgeLngs:   new Float32Array(bandAz),
-      resolution:  bandRes,
-      numAzimuths: bandAz,
+      elevations:      new Float32Array(bandAz).fill(-Infinity),
+      distances:       new Float32Array(bandAz),
+      ridgeLats:       new Float32Array(bandAz),
+      ridgeLngs:       new Float32Array(bandAz),
+      crossingData:    new Float32Array(0),  // Will be packed after march
+      crossingOffsets: new Uint32Array(bandAz + 1),
+      resolution:      bandRes,
+      numAzimuths:     bandAz,
     }
+  })
+
+  // Temp storage for crossings: per-band, per-azimuth
+  // bandCrossingsTemp[bi][ai] = [elev, dist, lat, lng, elev, dist, lat, lng, ...]
+  const bandCrossingsTemp: number[][][] = DEPTH_BANDS.map((cfg) => {
+    const bandAz = Math.round(360 * (cfg.resolution || resolution))
+    return Array.from({ length: bandAz }, () => [])
   })
 
   // Pass 1: Standard resolution (720 azimuths) — populates overall skyline + standard bands
@@ -374,6 +426,12 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       bandRidgeElev[bi] = -Infinity
     }
 
+    // Per-band previous-step tracking for crossing detection
+    const bandPrevElev: number[] = new Array(DEPTH_BANDS.length).fill(-Infinity)
+    const bandPrevDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
+    const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
+    const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
+
     for (const dist of logDists) {
       const sLat = viewerLat + (cosA * dist) / 111_132
       const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
@@ -395,43 +453,51 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
         ridgeLng  = sLng
       }
 
-      // Only populate standard-res bands in this pass
+      // Per-band: ridgeline tracking + crossing detection (standard-res bands only)
       for (const bi of standardBandIndices) {
         const band = DEPTH_BANDS[bi]
-        if (dist >= band.minDist && dist <= band.maxDist && elevAngle > bandMaxAngles[bi]) {
+        if (dist < band.minDist || dist > band.maxDist) continue
+
+        // Ridgeline: track maximum elevation angle
+        if (elevAngle > bandMaxAngles[bi]) {
           bandMaxAngles[bi] = elevAngle
           bandRidgeDist[bi] = dist
           bandRidgeLat[bi]  = sLat
           bandRidgeLng[bi]  = sLng
           bandRidgeElev[bi] = rawElev
         }
+
+        // Crossing detection — uses raw (uncorrected) elevation for contour levels
+        const interval = CONTOUR_INTERVALS_M[bi] || 152.4
+        if (bandPrevElev[bi] !== -Infinity) {
+          detectCrossings(
+            bandPrevElev[bi], bandPrevDist[bi], bandPrevLat[bi], bandPrevLng[bi],
+            rawElev, dist, sLat, sLng,
+            interval,
+            bandCrossingsTemp[bi][ai],
+          )
+        }
+        bandPrevElev[bi] = rawElev
+        bandPrevDist[bi] = dist
+        bandPrevLat[bi]  = sLat
+        bandPrevLng[bi]  = sLng
       }
     }
 
     // Overall ridgeline shade
     const ridgeZoom = distToZoom(ridgeDist)
-    const { shade } = slopeAndShade(ridgeLat, ridgeLng, ridgeZoom, meshElevations, meshWidth, meshHeight, meshBounds)
+    const shade = hillShade(ridgeLat, ridgeLng, ridgeZoom, meshElevations, meshWidth, meshHeight, meshBounds)
 
     angles[ai]    = maxAngle
     distances[ai] = ridgeDist
     shading[ai]   = shade
 
-    // Populate standard-res band arrays
+    // Populate standard-res band arrays (ridgeline only — crossings packed later)
     for (const bi of standardBandIndices) {
       bands[bi].elevations[ai] = bandRidgeElev[bi]
       bands[bi].distances[ai]  = bandRidgeDist[bi]
       bands[bi].ridgeLats[ai]  = bandRidgeLat[bi]
       bands[bi].ridgeLngs[ai]  = bandRidgeLng[bi]
-
-      if (bandRidgeElev[bi] > -Infinity && bandRidgeDist[bi] > 0) {
-        const bZoom = distToZoom(bandRidgeDist[bi])
-        const { dzdx, dzdy } = slopeAndShade(
-          bandRidgeLat[bi], bandRidgeLng[bi], bZoom,
-          meshElevations, meshWidth, meshHeight, meshBounds,
-        )
-        bands[bi].slopeX[ai] = dzdx
-        bands[bi].slopeZ[ai] = dzdy
-      }
     }
 
     if (ai % 45 === 0) {
@@ -439,7 +505,7 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     }
   }
 
-  // ── Phase 4: High-res pass (1440 azimuths, 0–20km) for near bands ────────
+  // ── Phase 4: High-res pass (2880 azimuths, 0–20km) for near bands ────────
 
   if (hiresBandIndices.length > 0) {
     for (let ai = 0; ai < hiresNumAzimuths; ai++) {
@@ -462,6 +528,12 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
         bandRidgeElev[bi] = -Infinity
       }
 
+      // Per-band previous-step tracking for crossing detection
+      const bandPrevElev: number[] = new Array(DEPTH_BANDS.length).fill(-Infinity)
+      const bandPrevDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
+      const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
+      const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
+
       for (const dist of hiresLogDists) {
         const sLat = viewerLat + (cosA * dist) / 111_132
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
@@ -477,38 +549,75 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
 
         for (const bi of hiresBandIndices) {
           const band = DEPTH_BANDS[bi]
-          if (dist >= band.minDist && dist <= band.maxDist && elevAngle > bandMaxAngles[bi]) {
+          if (dist < band.minDist || dist > band.maxDist) continue
+
+          // Ridgeline: track maximum elevation angle
+          if (elevAngle > bandMaxAngles[bi]) {
             bandMaxAngles[bi] = elevAngle
             bandRidgeDist[bi] = dist
             bandRidgeLat[bi]  = sLat
             bandRidgeLng[bi]  = sLng
             bandRidgeElev[bi] = rawElev
           }
+
+          // Crossing detection
+          const interval = CONTOUR_INTERVALS_M[bi] || 60.96
+          if (bandPrevElev[bi] !== -Infinity) {
+            detectCrossings(
+              bandPrevElev[bi], bandPrevDist[bi], bandPrevLat[bi], bandPrevLng[bi],
+              rawElev, dist, sLat, sLng,
+              interval,
+              bandCrossingsTemp[bi][ai],
+            )
+          }
+          bandPrevElev[bi] = rawElev
+          bandPrevDist[bi] = dist
+          bandPrevLat[bi]  = sLat
+          bandPrevLng[bi]  = sLng
         }
       }
 
-      // Populate high-res band arrays
+      // Populate high-res band arrays (ridgeline only)
       for (const bi of hiresBandIndices) {
         bands[bi].elevations[ai] = bandRidgeElev[bi]
         bands[bi].distances[ai]  = bandRidgeDist[bi]
         bands[bi].ridgeLats[ai]  = bandRidgeLat[bi]
         bands[bi].ridgeLngs[ai]  = bandRidgeLng[bi]
-
-        if (bandRidgeElev[bi] > -Infinity && bandRidgeDist[bi] > 0) {
-          const bZoom = distToZoom(bandRidgeDist[bi])
-          const { dzdx, dzdy } = slopeAndShade(
-            bandRidgeLat[bi], bandRidgeLng[bi], bZoom,
-            meshElevations, meshWidth, meshHeight, meshBounds,
-          )
-          bands[bi].slopeX[ai] = dzdx
-          bands[bi].slopeZ[ai] = dzdy
-        }
       }
 
       if (ai % 90 === 0) {
         self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.7 + (ai / hiresNumAzimuths) * 0.3 })
       }
     }
+  }
+
+  // ── Phase 5: Pack crossing data into flat arrays ──────────────────────────
+
+  for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+    const azCrossings = bandCrossingsTemp[bi]
+    const bandAz = bands[bi].numAzimuths
+    const offsets = new Uint32Array(bandAz + 1)
+
+    // Count total crossings (each crossing = 4 floats)
+    let totalFloats = 0
+    for (let ai = 0; ai < bandAz; ai++) {
+      offsets[ai] = totalFloats
+      totalFloats += azCrossings[ai].length  // Already in groups of 4
+    }
+    offsets[bandAz] = totalFloats
+
+    // Pack into flat Float32Array
+    const data = new Float32Array(totalFloats)
+    let idx = 0
+    for (let ai = 0; ai < bandAz; ai++) {
+      const c = azCrossings[ai]
+      for (let j = 0; j < c.length; j++) {
+        data[idx++] = c[j]
+      }
+    }
+
+    bands[bi].crossingData = data
+    bands[bi].crossingOffsets = offsets
   }
 
   const skyline: SkylineData = {
@@ -537,10 +646,10 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     transferables.push(
       band.elevations.buffer as ArrayBuffer,
       band.distances.buffer as ArrayBuffer,
-      band.slopeX.buffer as ArrayBuffer,
-      band.slopeZ.buffer as ArrayBuffer,
       band.ridgeLats.buffer as ArrayBuffer,
       band.ridgeLngs.buffer as ArrayBuffer,
+      band.crossingData.buffer as ArrayBuffer,
+      band.crossingOffsets.buffer as ArrayBuffer,
     )
   }
   self.postMessage({ type: 'complete', skyline }, transferables)
