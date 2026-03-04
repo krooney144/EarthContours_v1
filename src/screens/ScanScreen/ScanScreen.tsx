@@ -215,7 +215,7 @@ function buildContourStrands(
           }
 
           // Match to closest strand by distance proximity
-          const maxDistDiff = Math.max(500, c.dist * 0.2)
+          const maxDistDiff = Math.max(200, c.dist * 0.05)
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
