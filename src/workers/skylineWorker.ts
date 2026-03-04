@@ -256,29 +256,33 @@ function hillShade(
 
 /**
  * Detect elevation crossings between two consecutive ray steps.
- * Returns crossing points where terrain elevation crosses a contour threshold.
- * Interpolates exact crossing distance and lat/lng.
+ * Pushes 5 floats per crossing: [elevation_m, distance_m, lat, lng, direction].
+ * direction: +1.0 = terrain rising outward (up-crossing),
+ *            -1.0 = terrain falling outward (down-crossing).
+ * prevElev/prevDist are the FARTHER sample (march is far-to-near).
  */
 function detectCrossings(
   prevElev: number, prevDist: number, prevLat: number, prevLng: number,
   currElev: number, currDist: number, currLat: number, currLng: number,
   interval: number,
-  crossings: number[],  // output: push [elev, dist, lat, lng] tuples
+  crossings: number[],  // output: push [elev, dist, lat, lng, dir] tuples
 ): void {
   if (prevElev === -Infinity || currElev === -Infinity) return
 
-  // Determine which contour levels are crossed between prevElev and currElev
+  const dElev = currElev - prevElev
+  if (Math.abs(dElev) < 0.01) return  // Flat — no crossings
+
+  // Direction: prev is farther, curr is nearer.
+  // Going outward (curr→prev): if prevElev > currElev terrain rises → up-crossing
+  const dir = prevElev > currElev ? 1.0 : -1.0
+
   const loElev = Math.min(prevElev, currElev)
   const hiElev = Math.max(prevElev, currElev)
 
-  // First contour level at or above loElev
   const firstLevel = Math.ceil(loElev / interval) * interval
-  if (firstLevel > hiElev) return  // No crossings
+  if (firstLevel > hiElev) return
 
   for (let level = firstLevel; level <= hiElev; level += interval) {
-    // Interpolation factor: where between prev and curr does this crossing occur?
-    const dElev = currElev - prevElev
-    if (Math.abs(dElev) < 0.01) continue  // Flat — skip degenerate crossing
     const t = (level - prevElev) / dElev
     if (t < 0 || t > 1) continue
 
@@ -286,7 +290,7 @@ function detectCrossings(
     const cLat  = prevLat  + t * (currLat  - prevLat)
     const cLng  = prevLng  + t * (currLng  - prevLng)
 
-    crossings.push(level, cDist, cLat, cLng)
+    crossings.push(level, cDist, cLat, cLng, dir)
   }
 }
 

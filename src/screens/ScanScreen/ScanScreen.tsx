@@ -660,11 +660,25 @@ function renderTerrain(
 
 // ─── Contour Line Renderer ────────────────────────────────────────────────────
 
+/** A contour strand being built across azimuths */
+interface ContourStrand {
+  lastSeqIdx: number        // Sequence position of last extension
+  lastDist:   number        // Distance at last extension (for proximity matching)
+  level:      number        // Contour elevation level
+  bandIdx:    number        // Which depth band
+  points:     Array<{ x: number; y: number }>
+}
+
 /**
  * Renders contour lines from elevation crossings stored in skyline bands.
  * For each band, reprojects crossings to screen space, performs a near-to-far
- * occlusion sweep per azimuth, then connects crossings at the same elevation
- * across adjacent azimuths to form contour polylines.
+ * occlusion sweep per azimuth, then uses strand tracking to connect crossings
+ * across azimuths by elevation level + crossing direction + distance proximity.
+ *
+ * Separates up-crossings from down-crossings so terrain going through a contour
+ * level in opposite directions forms independent lines. Within the same direction,
+ * multiple crossings at different distances (e.g. two ridges at the same elevation)
+ * are tracked as separate strands.
  *
  * Colors match the ridgeline elevation palette (elevToRidgeColor).
  */
@@ -686,7 +700,10 @@ function renderContours(
   // Opacity per band (near=visible, far=subtle)
   const CONTOUR_OPACITIES = [0.55, 0.45, 0.35, 0.25, 0.15]
 
-  // For each band, process crossings and draw contour lines
+  // Completed strands to draw at the end
+  const completedStrands: ContourStrand[] = []
+
+  // For each band, process crossings using strand tracking
   for (let bi = numBands - 1; bi >= 0; bi--) {
     const band = skyline.bands[bi]
     const bandAz = band.numAzimuths
@@ -696,111 +713,147 @@ function renderContours(
 
     if (!data || data.length === 0) continue
 
-    const lineWidth = CONTOUR_LINE_WIDTHS[bi] ?? 0.5
-    const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
+    const maxSeqGap = Math.ceil(bandRes * 2)  // Max 2° gap before expiring strand
 
-    // ── Step 1: Reproject all crossings and build per-azimuth visible lists ──
-    // For each azimuth, collect visible crossings sorted near-to-far.
-    // A crossing is visible if its reprojected angle > running max (occlusion sweep).
+    // Compute visible azimuth range (only iterate what's on screen)
+    const halfFov = cam.hfov * 0.6  // Small margin
+    const leftDeg  = cam.heading_deg - halfFov
+    const rightDeg = cam.heading_deg + halfFov
+    const leftAi   = Math.floor(((leftDeg  % 360 + 360) % 360) * bandRes) % bandAz
+    const rightAi  = Math.ceil (((rightDeg % 360 + 360) % 360) * bandRes) % bandAz
 
-    // Map: contourLevel → array of {azIdx, screenX, screenY} for connecting
-    const contourPoints = new Map<number, Array<{ azIdx: number; x: number; y: number }>>()
+    // Build ordered azimuth index list (handles wrap-around)
+    const azOrder: number[] = []
+    if (leftAi <= rightAi) {
+      for (let ai = leftAi; ai <= rightAi && ai < bandAz; ai++) azOrder.push(ai)
+    } else {
+      for (let ai = leftAi; ai < bandAz; ai++) azOrder.push(ai)
+      for (let ai = 0; ai <= rightAi; ai++) azOrder.push(ai)
+    }
 
-    for (let ai = 0; ai < bandAz; ai++) {
+    // Active strands keyed by level+direction
+    const activeStrands = new Map<string, ContourStrand[]>()
+
+    for (let seqIdx = 0; seqIdx < azOrder.length; seqIdx++) {
+      const ai = azOrder[seqIdx]
       const start = offsets[ai]
       const end = offsets[ai + 1]
-      if (start >= end) continue
 
       const bearingDeg = ai / bandRes
 
-      // Check if this bearing is in the visible FOV
-      let relBearing = bearingDeg - cam.heading_deg
-      while (relBearing > 180) relBearing -= 360
-      while (relBearing < -180) relBearing += 360
-      if (Math.abs(relBearing) > cam.hfov * 0.55) continue  // Outside FOV
-
-      // Collect crossings for this azimuth, sorted by distance (near first)
-      const azCrossings: Array<{ elev: number; dist: number; lat: number; lng: number }> = []
-      for (let j = start; j < end; j += 4) {
-        azCrossings.push({
-          elev: data[j],
-          dist: data[j + 1],
-          lat:  data[j + 2],
-          lng:  data[j + 3],
-        })
-      }
-      // Sort near-to-far for occlusion sweep
-      azCrossings.sort((a, b) => a.dist - b.dist)
-
-      // Occlusion sweep: track running max angle, skip occluded crossings
-      let runningMaxAngle = -Math.PI / 2
-      for (const c of azCrossings) {
-        const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-        const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
-
-        if (angle <= runningMaxAngle) continue  // Occluded by nearer terrain
-        runningMaxAngle = angle
-
-        // Project to screen
-        const { x, y } = project(bearingDeg, angle, cam)
-        if (y >= H || y < 0 || x < -10 || x > W + 10) continue
-
-        // Round contour level to avoid floating point drift
-        const level = Math.round(c.elev * 100) / 100
-
-        let pts = contourPoints.get(level)
-        if (!pts) {
-          pts = []
-          contourPoints.set(level, pts)
+      if (start < end) {
+        // Collect crossings for this azimuth, sorted near-first for occlusion
+        const azCrossings: Array<{ elev: number; dist: number; dir: number }> = []
+        for (let j = start; j < end; j += 5) {
+          azCrossings.push({
+            elev: data[j],
+            dist: data[j + 1],
+            dir:  data[j + 4],
+          })
         }
-        pts.push({ azIdx: ai, x: Math.round(x), y: Math.round(y) })
+        azCrossings.sort((a, b) => a.dist - b.dist)
+
+        // Occlusion sweep: skip crossings hidden behind nearer terrain
+        let runningMaxAngle = -Math.PI / 2
+        for (const c of azCrossings) {
+          const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+          const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
+
+          if (angle <= runningMaxAngle) continue  // Occluded
+          runningMaxAngle = angle
+
+          // Project to screen
+          const { x, y } = project(bearingDeg, angle, cam)
+          if (y >= H || y < 0 || x < -10 || x > W + 10) continue
+
+          // Match to active strand by level + direction + distance proximity
+          const levelKey = `${Math.round(c.elev * 10) / 10}_${c.dir > 0 ? 'u' : 'd'}`
+          let strands = activeStrands.get(levelKey)
+          if (!strands) {
+            strands = []
+            activeStrands.set(levelKey, strands)
+          }
+
+          const maxDistDiff = Math.max(500, c.dist * 0.2)  // 20% of distance, floor 500m
+          let bestIdx = -1
+          let bestDiff = Infinity
+          for (let si = 0; si < strands.length; si++) {
+            const s = strands[si]
+            if (s.lastSeqIdx === seqIdx) continue  // Already matched this azimuth
+            if (seqIdx - s.lastSeqIdx > maxSeqGap) continue  // Too old
+            const diff = Math.abs(c.dist - s.lastDist)
+            if (diff < bestDiff && diff < maxDistDiff) {
+              bestIdx = si
+              bestDiff = diff
+            }
+          }
+
+          if (bestIdx >= 0) {
+            // Extend existing strand
+            strands[bestIdx].lastSeqIdx = seqIdx
+            strands[bestIdx].lastDist = c.dist
+            strands[bestIdx].points.push({ x: Math.round(x), y: Math.round(y) })
+          } else {
+            // Start new strand
+            strands.push({
+              lastSeqIdx: seqIdx,
+              lastDist: c.dist,
+              level: c.elev,
+              bandIdx: bi,
+              points: [{ x: Math.round(x), y: Math.round(y) }],
+            })
+          }
+        }
+      }
+
+      // Expire old strands every few azimuths (amortized)
+      if (seqIdx % maxSeqGap === 0) {
+        for (const [key, strands] of activeStrands) {
+          const remaining: ContourStrand[] = []
+          for (const s of strands) {
+            if (seqIdx - s.lastSeqIdx > maxSeqGap) {
+              if (s.points.length >= 2) completedStrands.push(s)
+            } else {
+              remaining.push(s)
+            }
+          }
+          if (remaining.length === 0) activeStrands.delete(key)
+          else activeStrands.set(key, remaining)
+        }
       }
     }
 
-    // ── Step 2: Draw contour lines by connecting points at same elevation ────
-    ctx.lineWidth = lineWidth
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-
-    for (const [level, points] of contourPoints) {
-      if (points.length < 2) continue
-
-      // Sort by azimuth index for left-to-right drawing
-      points.sort((a, b) => a.azIdx - b.azIdx)
-
-      // Color from elevation — matches ridgeline palette
-      const tElev = hasElevRange
-        ? Math.max(0, Math.min(1, (level - globalElevMin) / elevRange))
-        : 0.5
-      const baseColor = elevToRidgeColor(tElev)
-      // Extract RGB and apply band opacity
-      const rgbMatch = baseColor.match(/\d+/g)
-      if (!rgbMatch) continue
-      ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
-
-      // Connect adjacent azimuth points into polyline segments.
-      // Break the line if azimuth gap is too large (discontinuity).
-      const maxAzGap = Math.ceil(bandRes * 2)  // Max 2° gap before breaking line
-
-      ctx.beginPath()
-      let prevAzIdx = -Infinity
-      let inPath = false
-
-      for (const pt of points) {
-        const azGap = pt.azIdx - prevAzIdx
-        if (azGap > maxAzGap) {
-          // Break — too far between azimuths
-          if (inPath) ctx.stroke()
-          ctx.beginPath()
-          ctx.moveTo(pt.x, pt.y)
-          inPath = true
-        } else {
-          ctx.lineTo(pt.x, pt.y)
-        }
-        prevAzIdx = pt.azIdx
+    // Flush remaining active strands
+    for (const [, strands] of activeStrands) {
+      for (const s of strands) {
+        if (s.points.length >= 2) completedStrands.push(s)
       }
-      if (inPath) ctx.stroke()
     }
+  }
+
+  // ── Draw all completed strands ──────────────────────────────────────────────
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  for (const strand of completedStrands) {
+    const bi = strand.bandIdx
+    ctx.lineWidth = CONTOUR_LINE_WIDTHS[bi] ?? 0.5
+    const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
+
+    const tElev = hasElevRange
+      ? Math.max(0, Math.min(1, (strand.level - globalElevMin) / elevRange))
+      : 0.5
+    const baseColor = elevToRidgeColor(tElev)
+    const rgbMatch = baseColor.match(/\d+/g)
+    if (!rgbMatch) continue
+
+    ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
+    ctx.beginPath()
+    ctx.moveTo(strand.points[0].x, strand.points[0].y)
+    for (let i = 1; i < strand.points.length; i++) {
+      ctx.lineTo(strand.points[i].x, strand.points[i].y)
+    }
+    ctx.stroke()
   }
 }
 
