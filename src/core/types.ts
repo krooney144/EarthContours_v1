@@ -295,12 +295,13 @@ export interface SkylineBand {
   ridgeLats:  Float32Array
   /** GPS longitude of the ridgeline point for each azimuth (for peak matching) */
   ridgeLngs:  Float32Array
-  /** Contour crossings: packed [elevation, distance, lat, lng] per crossing.
+  /** Contour crossings: packed [elevation, distance, lat, lng, direction] per crossing.
+   *  direction: +1.0 = terrain rises outward (up-crossing), -1.0 = falls (down-crossing).
    *  All azimuths concatenated — use crossingOffsets to index. */
   crossingData:    Float32Array
   /** Per-azimuth offset into crossingData (length = numAzimuths + 1).
    *  Azimuth ai's crossings are at indices crossingOffsets[ai]..crossingOffsets[ai+1].
-   *  Each crossing occupies 4 floats: [elevation_m, distance_m, lat, lng]. */
+   *  Each crossing occupies 5 floats: [elevation_m, distance_m, lat, lng, direction]. */
   crossingOffsets: Uint32Array
   /** Azimuth resolution for this band (steps per degree). Defaults to SkylineData.resolution. */
   resolution: number
