@@ -291,14 +291,17 @@ export interface SkylineBand {
   elevations: Float32Array
   /** Distance to the ridgeline point (metres) */
   distances:  Float32Array
-  /** Surface gradient dz/dx (east) at ridgeline — for future contour fragments */
-  slopeX:     Float32Array
-  /** Surface gradient dz/dz (north) at ridgeline — for future contour fragments */
-  slopeZ:     Float32Array
   /** GPS latitude of the ridgeline point for each azimuth (for peak matching) */
   ridgeLats:  Float32Array
   /** GPS longitude of the ridgeline point for each azimuth (for peak matching) */
   ridgeLngs:  Float32Array
+  /** Contour crossings: packed [elevation, distance, lat, lng] per crossing.
+   *  All azimuths concatenated — use crossingOffsets to index. */
+  crossingData:    Float32Array
+  /** Per-azimuth offset into crossingData (length = numAzimuths + 1).
+   *  Azimuth ai's crossings are at indices crossingOffsets[ai]..crossingOffsets[ai+1].
+   *  Each crossing occupies 4 floats: [elevation_m, distance_m, lat, lng]. */
+  crossingOffsets: Uint32Array
   /** Azimuth resolution for this band (steps per degree). Defaults to SkylineData.resolution. */
   resolution: number
   /** Number of azimuth samples in this band's arrays = 360 × resolution */

@@ -658,6 +658,152 @@ function renderTerrain(
   }
 }
 
+// ─── Contour Line Renderer ────────────────────────────────────────────────────
+
+/**
+ * Renders contour lines from elevation crossings stored in skyline bands.
+ * For each band, reprojects crossings to screen space, performs a near-to-far
+ * occlusion sweep per azimuth, then connects crossings at the same elevation
+ * across adjacent azimuths to form contour polylines.
+ *
+ * Colors match the ridgeline elevation palette (elevToRidgeColor).
+ */
+function renderContours(
+  ctx: CanvasRenderingContext2D,
+  skyline: SkylineData,
+  cam: CameraParams,
+  viewerElev: number,
+  globalElevMin: number,
+  globalElevMax: number,
+): void {
+  const { W, H } = cam
+  const elevRange = globalElevMax - globalElevMin
+  const hasElevRange = elevRange > 1
+  const numBands = skyline.bands.length
+
+  // Line widths per band (near=thick, far=thin) — thinner than ridgelines
+  const CONTOUR_LINE_WIDTHS = [1.5, 1.2, 1.0, 0.7, 0.5]
+  // Opacity per band (near=visible, far=subtle)
+  const CONTOUR_OPACITIES = [0.55, 0.45, 0.35, 0.25, 0.15]
+
+  // For each band, process crossings and draw contour lines
+  for (let bi = numBands - 1; bi >= 0; bi--) {
+    const band = skyline.bands[bi]
+    const bandAz = band.numAzimuths
+    const bandRes = band.resolution
+    const offsets = band.crossingOffsets
+    const data = band.crossingData
+
+    if (!data || data.length === 0) continue
+
+    const lineWidth = CONTOUR_LINE_WIDTHS[bi] ?? 0.5
+    const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
+
+    // ── Step 1: Reproject all crossings and build per-azimuth visible lists ──
+    // For each azimuth, collect visible crossings sorted near-to-far.
+    // A crossing is visible if its reprojected angle > running max (occlusion sweep).
+
+    // Map: contourLevel → array of {azIdx, screenX, screenY} for connecting
+    const contourPoints = new Map<number, Array<{ azIdx: number; x: number; y: number }>>()
+
+    for (let ai = 0; ai < bandAz; ai++) {
+      const start = offsets[ai]
+      const end = offsets[ai + 1]
+      if (start >= end) continue
+
+      const bearingDeg = ai / bandRes
+
+      // Check if this bearing is in the visible FOV
+      let relBearing = bearingDeg - cam.heading_deg
+      while (relBearing > 180) relBearing -= 360
+      while (relBearing < -180) relBearing += 360
+      if (Math.abs(relBearing) > cam.hfov * 0.55) continue  // Outside FOV
+
+      // Collect crossings for this azimuth, sorted by distance (near first)
+      const azCrossings: Array<{ elev: number; dist: number; lat: number; lng: number }> = []
+      for (let j = start; j < end; j += 4) {
+        azCrossings.push({
+          elev: data[j],
+          dist: data[j + 1],
+          lat:  data[j + 2],
+          lng:  data[j + 3],
+        })
+      }
+      // Sort near-to-far for occlusion sweep
+      azCrossings.sort((a, b) => a.dist - b.dist)
+
+      // Occlusion sweep: track running max angle, skip occluded crossings
+      let runningMaxAngle = -Math.PI / 2
+      for (const c of azCrossings) {
+        const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
+
+        if (angle <= runningMaxAngle) continue  // Occluded by nearer terrain
+        runningMaxAngle = angle
+
+        // Project to screen
+        const { x, y } = project(bearingDeg, angle, cam)
+        if (y >= H || y < 0 || x < -10 || x > W + 10) continue
+
+        // Round contour level to avoid floating point drift
+        const level = Math.round(c.elev * 100) / 100
+
+        let pts = contourPoints.get(level)
+        if (!pts) {
+          pts = []
+          contourPoints.set(level, pts)
+        }
+        pts.push({ azIdx: ai, x: Math.round(x), y: Math.round(y) })
+      }
+    }
+
+    // ── Step 2: Draw contour lines by connecting points at same elevation ────
+    ctx.lineWidth = lineWidth
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+
+    for (const [level, points] of contourPoints) {
+      if (points.length < 2) continue
+
+      // Sort by azimuth index for left-to-right drawing
+      points.sort((a, b) => a.azIdx - b.azIdx)
+
+      // Color from elevation — matches ridgeline palette
+      const tElev = hasElevRange
+        ? Math.max(0, Math.min(1, (level - globalElevMin) / elevRange))
+        : 0.5
+      const baseColor = elevToRidgeColor(tElev)
+      // Extract RGB and apply band opacity
+      const rgbMatch = baseColor.match(/\d+/g)
+      if (!rgbMatch) continue
+      ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
+
+      // Connect adjacent azimuth points into polyline segments.
+      // Break the line if azimuth gap is too large (discontinuity).
+      const maxAzGap = Math.ceil(bandRes * 2)  // Max 2° gap before breaking line
+
+      ctx.beginPath()
+      let prevAzIdx = -Infinity
+      let inPath = false
+
+      for (const pt of points) {
+        const azGap = pt.azIdx - prevAzIdx
+        if (azGap > maxAzGap) {
+          // Break — too far between azimuths
+          if (inPath) ctx.stroke()
+          ctx.beginPath()
+          ctx.moveTo(pt.x, pt.y)
+          inPath = true
+        } else {
+          ctx.lineTo(pt.x, pt.y)
+        }
+        prevAzIdx = pt.azIdx
+      }
+      if (inPath) ctx.stroke()
+    }
+  }
+}
+
 // ─── Full Canvas Draw ─────────────────────────────────────────────────────────
 
 function drawScanCanvas(
@@ -717,6 +863,21 @@ function drawScanCanvas(
   // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands)
+  }
+
+  // ── 2b. Contour lines — elevation crossings connected across azimuths ──────
+  if (skylineData) {
+    // Compute global elevation range (same as renderTerrain uses)
+    let cElevMin = Infinity, cElevMax = -Infinity
+    for (let bi = 0; bi < skylineData.bands.length; bi++) {
+      const elev = skylineData.bands[bi].elevations
+      for (let i = 0; i < elev.length; i++) {
+        if (elev[i] === -Infinity) continue
+        if (elev[i] < cElevMin) cElevMin = elev[i]
+        if (elev[i] > cElevMax) cElevMax = elev[i]
+      }
+    }
+    renderContours(ctx, skylineData, cam, eyeElev, cElevMin, cElevMax)
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
