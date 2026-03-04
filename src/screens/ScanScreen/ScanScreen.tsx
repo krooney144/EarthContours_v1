@@ -67,7 +67,7 @@ const MAX_PEAK_DIST     = 400_000     // Max distance for peak label display (m)
 const EARTH_R           = 6_371_000  // Earth radius (m)
 const REFRACTION_K      = 0.13       // Atmospheric refraction coefficient
 const DEG_TO_RAD        = Math.PI / 180
-const SKYLINE_RESOLUTION = 2         // 0.5° per step = 720 azimuths for full 360°
+const SKYLINE_RESOLUTION = 4         // 0.25° per step = 1440 azimuths for full 360°
 
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
 

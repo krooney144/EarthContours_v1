@@ -67,9 +67,9 @@ interface BandConfig {
 }
 
 const DEPTH_BANDS: BandConfig[] = [
-  { label: 'near',     minDist: 0,       maxDist: 8_000,   resolution: 4 },  // 0–8 km   (0.25°)
-  { label: 'med-near', minDist: 7_000,   maxDist: 20_000,  resolution: 4 },  // 7–20 km  (0.25°)
-  { label: 'mid',      minDist: 19_000,  maxDist: 50_000  },                  // 19–50 km (0.5°)
+  { label: 'near',     minDist: 0,       maxDist: 8_000,   resolution: 8 },  // 0–8 km   (0.125°)
+  { label: 'med-near', minDist: 7_000,   maxDist: 20_000,  resolution: 8 },  // 7–20 km  (0.125°)
+  { label: 'mid',      minDist: 19_000,  maxDist: 50_000  },                  // 19–50 km (0.25°)
   { label: 'med-far',  minDist: 48_000,  maxDist: 120_000 },                  // 48–120 km
   { label: 'far',      minDist: 115_000, maxDist: 400_000 },                  // 115–400 km
 ]
@@ -314,7 +314,7 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
   hiresLogDists.reverse()
 
   // Determine which bands are high-res vs standard
-  const HIRES_RESOLUTION = 4  // 0.25° per step
+  const HIRES_RESOLUTION = 8  // 0.125° per step
   const hiresNumAzimuths = Math.round(360 * HIRES_RESOLUTION)
   const standardBandIndices: number[] = []
   const hiresBandIndices: number[] = []
