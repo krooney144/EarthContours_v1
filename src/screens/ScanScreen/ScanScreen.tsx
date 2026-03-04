@@ -672,7 +672,7 @@ function drawScanCanvas(
 
   // ── 2b. DEBUG: Per-band ridgeline overlay (distinct colors) ─────────────────
   if (skylineData) {
-    const bandColors = ['#ff3333', '#ff9933', '#33ff33', '#3399ff', '#cc33ff']  // near=red, med-near=orange, mid=green, med-far=blue, far=purple
+    const bandColors = ['#68B0BF', '#4B8EA3', '#2F6D87', '#215C79', '#124B6B']  // near=reef, med-near=mid, mid=ocean, med-far=navy, far=deep
     const numBands = skylineData.bands.length
     for (let bi = 0; bi < numBands; bi++) {
       ctx.beginPath()
