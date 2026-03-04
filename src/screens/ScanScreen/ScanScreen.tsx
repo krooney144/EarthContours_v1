@@ -689,7 +689,6 @@ function renderContours(
   viewerElev: number,
   globalElevMin: number,
   globalElevMax: number,
-  projectedBands: ProjectedBands | null,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
@@ -762,14 +761,6 @@ function renderContours(
 
           if (angle <= runningMaxAngle) continue  // Occluded
           runningMaxAngle = angle
-
-          // Clamp to overall ridgeline — never draw above terrain fill.
-          // Elevation mismatch between worker and main thread can cause crossings
-          // to reproject above the ridgeline when AGL changes significantly.
-          if (projectedBands) {
-            const overallIdx = Math.round((ai / bandRes) * skyline.resolution) % skyline.numAzimuths
-            if (angle > projectedBands.overallAngles[overallIdx]) continue
-          }
 
           // Project to screen
           const { x, y } = project(bearingDeg, angle, cam)
@@ -939,7 +930,7 @@ function drawScanCanvas(
         if (elev[i] > cElevMax) cElevMax = elev[i]
       }
     }
-    renderContours(ctx, skylineData, cam, eyeElev, cElevMin, cElevMax, projectedBands)
+    renderContours(ctx, skylineData, cam, eyeElev, cElevMin, cElevMax)
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
