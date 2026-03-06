@@ -43,6 +43,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showWaterLabels: false,
   showTownLabels: false,        // Off by default per briefing
   showContourLines: true,
+  showBandLines: true,           // Depth band ridgeline strokes in SCAN
   contourAnimation: true,       // Slow pulse on by default
   verticalExaggeration: 4,     // 4× default — real mountains visible without being overwhelming
 
@@ -77,6 +78,7 @@ interface SettingsStore extends AppSettings {
   toggleWaterLabels: () => void
   toggleTownLabels: () => void
   toggleContourLines: () => void
+  toggleBandLines: () => void
   toggleContourAnimation: () => void
   setVerticalExaggeration: (v: VerticalExaggeration) => void
   setAppName: (name: 'Earth Contours' | 'EarthContours' | 'Earthscape') => void
@@ -144,6 +146,12 @@ export const useSettingsStore = create<SettingsStore>()(
         const next = !get().showContourLines
         log.info('Contour lines toggled', { now: next })
         set({ showContourLines: next })
+      },
+
+      toggleBandLines: () => {
+        const next = !get().showBandLines
+        log.info('Band lines toggled', { now: next })
+        set({ showBandLines: next })
       },
 
       toggleContourAnimation: () => {
@@ -267,6 +275,7 @@ export const useSettingsStore = create<SettingsStore>()(
         showWaterLabels: state.showWaterLabels,
         showTownLabels: state.showTownLabels,
         showContourLines: state.showContourLines,
+        showBandLines: state.showBandLines,
         contourAnimation: state.contourAnimation,
         verticalExaggeration: state.verticalExaggeration,
         appName: state.appName,
