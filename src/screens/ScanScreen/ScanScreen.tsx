@@ -670,6 +670,7 @@ function renderTerrain(
   skyline: SkylineData,
   cam: CameraParams,
   projected: ProjectedBands | null,
+  showBandLines: boolean = true,
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -730,7 +731,7 @@ function renderTerrain(
     }
 
     // ── Ridgeline stroke — segment-based for per-azimuth elevation color ──
-    if (hasVisiblePixels) {
+    if (hasVisiblePixels && showBandLines) {
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
 
@@ -883,6 +884,7 @@ function drawScanCanvas(
   skylineData: SkylineData | null,
   projectedBands: ProjectedBands | null,
   contourStrands: PrebuiltContourStrand[],
+  showBandLines: boolean = true,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -927,7 +929,7 @@ function drawScanCanvas(
 
   // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
   if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands)
+    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines)
   }
 
   // ── 2b. Contour lines — pre-built strands projected to screen ───────────────
@@ -1040,7 +1042,7 @@ const ScanScreen: React.FC = () => {
   } = useCameraStore()
   const { activeLat, activeLng }               = useLocationStore()
   const { peaks, meshData } = useTerrainStore()
-  const { units, showPeakLabels } = useSettingsStore()
+  const { units, showPeakLabels, showBandLines } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -1234,7 +1236,7 @@ const ScanScreen: React.FC = () => {
       heading_deg, pitch_deg, height_m,
       activeLat, activeLng,
       fov, skylineData, projectedBands,
-      contourStrands,
+      contourStrands, showBandLines,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -1247,6 +1249,7 @@ const ScanScreen: React.FC = () => {
     activeLat, activeLng,
     meshData, activePeaks,
     skylineData, projectedBands, contourStrands,
+    showBandLines,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame

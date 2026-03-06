@@ -243,6 +243,14 @@ const SettingsScreen: React.FC = () => {
               onChange={settings.toggleContourLines}
             />
           </Row>
+          <Row label="Band Lines" description="Show depth band ridgeline strokes in SCAN view">
+            <Toggle
+              id="toggle-bandlines"
+              label="Toggle band lines"
+              checked={settings.showBandLines}
+              onChange={settings.toggleBandLines}
+            />
+          </Row>
           <Row label="Contour Animation" description="Slow pulsing glow on contour lines">
             <Toggle
               id="toggle-contour-anim"

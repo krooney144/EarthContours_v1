@@ -192,6 +192,7 @@ export interface AppSettings {
   showWaterLabels: boolean
   showTownLabels: boolean
   showContourLines: boolean
+  showBandLines: boolean
   contourAnimation: boolean
   verticalExaggeration: VerticalExaggeration
 
