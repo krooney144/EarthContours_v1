@@ -630,15 +630,14 @@ interface BandStyle {
 }
 
 /** Per-band line widths: edges match at boundaries so adjacent bands are seamless.
- *  near 8→7, med-near 7→6, mid 6→5, med-far 5→4, far 4→3.
- *  Nearest 3 bands get distance-based interpolation + gaps.
- *  Far 2 bands are continuous (flat width, no gaps). */
+ *  near 4→3.5, med-near 3.5→3, mid 3→2.5, med-far 2.5→2, far 2→1.
+ *  Thinner lines let elevation color and terrain shape show through. */
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [8, 7],  // near:     8px at 0km → 7px at 8km
-  [7, 6],  // med-near: 7px at 7km → 6px at 20km
-  [6, 5],  // mid:      6px at 19km → 5px at 50km
-  [5, 4],  // med-far:  5px at 48km → 4px at 120km (continuous)
-  [4, 3],  // far:      4px at 115km → 3px at 400km (continuous)
+  [4, 3.5],  // near:     4px at 0km → 3.5px at 8km
+  [3.5, 3],  // med-near: 3.5px at 7km → 3px at 20km
+  [3, 2.5],  // mid:      3px at 19km → 2.5px at 50km
+  [2.5, 2],  // med-far:  2.5px at 48km → 2px at 120km
+  [2, 1],    // far:      2px at 115km → 1px at 400km
 ]
 
 function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
@@ -690,13 +689,16 @@ function renderTerrain(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1  // Avoid division by zero
 
-  const SEGMENT_SIZE = 4  // Columns per ridgeline color segment
+  // Per-band segment size: near bands update color/width frequently,
+  // far bands use long segments to avoid dotty appearance from stroke gaps
+  const SEGMENT_SIZES = [4, 6, 12, 24, 48]  // near → far
 
   // Draw bands far→near (painter's order: far gets painted first, near overlaps)
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
   for (let bi = numBands - 1; bi >= 0; bi--) {
     const style = bandStyleForIndex(bi, numBands)
     const bandCfg = DEPTH_BANDS[bi]
+    const segSize = SEGMENT_SIZES[bi] ?? 24
 
     // Line width interpolation helper
     const lwMin = bandCfg ? bandCfg.minDist : 0
@@ -731,13 +733,12 @@ function renderTerrain(
       ctx.fill()
     }
 
-    // ── Ridgeline stroke — segment-based for per-azimuth elevation color ──
+    // ── Ridgeline stroke — continuous paths with periodic color updates ──
     if (hasVisiblePixels && showBandLines) {
-      ctx.lineCap = 'round'
+      ctx.lineCap = 'butt'
       ctx.lineJoin = 'round'
 
       let segStartCol = -1
-      let prevClampedY = 0
 
       for (let col = 0; col < W; col++) {
         const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
@@ -766,7 +767,6 @@ function renderTerrain(
           const tElev = hasElevRange && elev > -Infinity
             ? (elev - globalElevMin) / elevRange
             : 0.5
-          // Distance-based line width interpolation
           const dist = bandDistAt(skyline, bi, bearingDeg)
           const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
           ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
@@ -774,8 +774,9 @@ function renderTerrain(
           ctx.strokeStyle = elevToRidgeColor(tElev)
           ctx.moveTo(col, clampedY)
           segStartCol = col
-        } else if (col - segStartCol >= SEGMENT_SIZE) {
-          // Flush current segment, start new one with updated color + width
+        } else if (col - segStartCol >= segSize) {
+          // Flush current segment, start new one with updated color + width.
+          // Overlap by 1px: lineTo then moveTo at same point prevents gaps.
           ctx.lineTo(col, clampedY)
           ctx.stroke()
 
@@ -793,8 +794,6 @@ function renderTerrain(
         } else {
           ctx.lineTo(col, clampedY)
         }
-
-        prevClampedY = clampedY
       }
 
       // Flush final segment
@@ -811,7 +810,6 @@ function renderTerrain(
  * Depth cues:
  *   - Per-point distance-based line width: thick near (10px), thin far (1px)
  *     using compressed power curve: width = 1 + 9 × (1 - (d/maxDist)^0.2)
- *   - Major/minor: every 5th contour interval gets 2× width multiplier
  *   - Per-band opacity (near=vivid, far=faint)
  *
  * Each point-to-point segment is drawn individually so width varies along
@@ -828,18 +826,15 @@ function renderContours(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  // Distance-based width: 1px at 400km, 10px at ~0m
+  // Distance-based width: 0.5px at 400km, 5px at ~0m
   const MAX_DIST = 400_000
-  const WIDTH_MIN = 1
-  const WIDTH_MAX = 10
+  const WIDTH_MIN = 0.5
+  const WIDTH_MAX = 5
   const WIDTH_RANGE = WIDTH_MAX - WIDTH_MIN
   const WIDTH_POWER = 0.2
 
   // Per-band opacity (near=vivid, far=faint)
   const CONTOUR_OPACITIES = [0.55, 0.45, 0.35, 0.25, 0.15]
-
-  // Major contour multiplier (every 5th interval)
-  const MAJOR_MULTIPLIER = 2
 
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
@@ -849,10 +844,6 @@ function renderContours(
 
     const bi = strand.bandIdx
     const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
-
-    // Major/minor: is this a 5th-interval contour?
-    const majorInterval = strand.interval * 5
-    const isMajor = majorInterval > 0 && Math.abs(strand.level % majorInterval) < strand.interval * 0.1
 
     const tElev = hasElevRange
       ? Math.max(0, Math.min(1, (strand.level - globalElevMin) / elevRange))
@@ -873,9 +864,7 @@ function renderContours(
       if (onScreen && prevOnScreen && i > 0) {
         // Distance-based width: compressed power curve
         const tDist = Math.min(1, pt.dist / MAX_DIST)
-        let lw = WIDTH_MIN + WIDTH_RANGE * (1 - Math.pow(tDist, WIDTH_POWER))
-        if (isMajor) lw *= MAJOR_MULTIPLIER
-
+        const lw = WIDTH_MIN + WIDTH_RANGE * (1 - Math.pow(tDist, WIDTH_POWER))
         ctx.lineWidth = lw
         ctx.beginPath()
         ctx.moveTo(prevX, prevY)
@@ -906,6 +895,7 @@ function drawScanCanvas(
   projectedBands: ProjectedBands | null,
   contourStrands: PrebuiltContourStrand[],
   showBandLines: boolean = true,
+  showPeakLabels: boolean = true,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -1041,6 +1031,59 @@ function drawScanCanvas(
       screenX,
       screenY,
     })
+  }
+
+  // ── 5. Peak ridge highlights — bright glow on ridgeline near each peak ────
+  if (showPeakLabels && skylineData && peakPositions.length > 0) {
+    ctx.save()
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+
+    // Highlight spread: ±2° of bearing around each peak
+    const HIGHLIGHT_SPREAD_DEG = 2
+    const HIGHLIGHT_STEPS = 40  // columns to draw per highlight
+
+    for (const pos of peakPositions) {
+      const peakBearing = pos.bearing
+      const startBearing = peakBearing - HIGHLIGHT_SPREAD_DEG
+      const stepDeg = (HIGHLIGHT_SPREAD_DEG * 2) / HIGHLIGHT_STEPS
+
+      // Draw outer glow pass then inner bright pass
+      for (let pass = 0; pass < 2; pass++) {
+        const isGlow = pass === 0
+        ctx.lineWidth = isGlow ? 6 : 2
+        ctx.globalAlpha = isGlow ? 0.15 : 0.5
+
+        ctx.beginPath()
+        let started = false
+
+        for (let i = 0; i <= HIGHLIGHT_STEPS; i++) {
+          const bearing = startBearing + i * stepDeg
+          const ridgeAngle = skylineAngleAt(skylineData, bearing, projectedBands)
+          if (ridgeAngle <= -Math.PI / 2 + 0.001) continue
+
+          const { x, y } = project(bearing, ridgeAngle, cam)
+          if (x < -10 || x > W + 10 || y < 0 || y >= H) continue
+
+          if (!started) {
+            ctx.moveTo(x, y)
+            started = true
+          } else {
+            ctx.lineTo(x, y)
+          }
+        }
+
+        if (started) {
+          // Brightness falls off from peak center: use solid white-cyan
+          ctx.strokeStyle = isGlow
+            ? 'rgba(167, 230, 240, 1)'
+            : 'rgba(220, 250, 255, 1)'
+          ctx.stroke()
+        }
+      }
+    }
+
+    ctx.restore()
   }
 
   log.debug('Scan canvas drawn', {
@@ -1257,7 +1300,7 @@ const ScanScreen: React.FC = () => {
       heading_deg, pitch_deg, height_m,
       activeLat, activeLng,
       fov, skylineData, projectedBands,
-      contourStrands, showBandLines,
+      contourStrands, showBandLines, showPeakLabels,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -1270,7 +1313,7 @@ const ScanScreen: React.FC = () => {
     activeLat, activeLng,
     meshData, activePeaks,
     skylineData, projectedBands, contourStrands,
-    showBandLines,
+    showBandLines, showPeakLabels,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
