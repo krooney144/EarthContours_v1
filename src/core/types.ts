@@ -210,6 +210,9 @@ export interface AppSettings {
   batteryMode: BatteryMode
   targetFPS: TargetFPS
 
+  // Debug & Developer
+  showDebugPanel: boolean
+
   // Data & Downloads
   downloadOnWifiOnly: boolean
   dataResolution: DataResolution
