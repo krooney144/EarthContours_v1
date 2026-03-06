@@ -1082,16 +1082,18 @@ function drawScanCanvas(
     })
   }
 
-  // ── 5. Peak ridge highlights — elevation-colored glow on ridgeline ────────
-  if (showPeakLabels && skylineData && peakPositions.length > 0) {
+  // ── 5. Peak ridge highlights — horizontal glow at peak's true position ─────
+  if (showPeakLabels && peakPositions.length > 0) {
     // Compute global elevation range for color mapping
     let hlElevMin = Infinity, hlElevMax = -Infinity
-    for (let bi = 0; bi < skylineData.bands.length; bi++) {
-      const elev = skylineData.bands[bi].elevations
-      for (let i = 0; i < elev.length; i++) {
-        if (elev[i] === -Infinity) continue
-        if (elev[i] < hlElevMin) hlElevMin = elev[i]
-        if (elev[i] > hlElevMax) hlElevMax = elev[i]
+    if (skylineData) {
+      for (let bi = 0; bi < skylineData.bands.length; bi++) {
+        const elev = skylineData.bands[bi].elevations
+        for (let i = 0; i < elev.length; i++) {
+          if (elev[i] === -Infinity) continue
+          if (elev[i] < hlElevMin) hlElevMin = elev[i]
+          if (elev[i] > hlElevMax) hlElevMax = elev[i]
+        }
       }
     }
     const hlElevRange = hlElevMax - hlElevMin
@@ -1099,18 +1101,12 @@ function drawScanCanvas(
 
     ctx.save()
     ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
 
-    // Highlight spread: ±2° of bearing around each peak
-    const HIGHLIGHT_SPREAD_DEG = 2
-    const HIGHLIGHT_STEPS = 40
+    // Highlight half-width in pixels — scales with canvas width
+    const HIGHLIGHT_HALF_W = Math.max(30, W * 0.04)
 
     for (const pos of peakPositions) {
-      const peakBearing = pos.bearing
-      const startBearing = peakBearing - HIGHLIGHT_SPREAD_DEG
-      const stepDeg = (HIGHLIGHT_SPREAD_DEG * 2) / HIGHLIGHT_STEPS
-
-      // Sample elevation at peak bearing for color
+      // Elevation-based color
       const peakTElev = hlHasRange
         ? Math.max(0, Math.min(1, (pos.elevation_m - hlElevMin) / hlElevRange))
         : 0.5
@@ -1118,44 +1114,30 @@ function drawScanCanvas(
       const rgbMatch = baseColor.match(/\d+/g)
       if (!rgbMatch) continue
       const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-
-      // Brightened version for inner highlight (shift toward white by 40%)
       const br = Math.round(r + (255 - r) * 0.4)
       const bg = Math.round(g + (255 - g) * 0.4)
       const bb = Math.round(b + (255 - b) * 0.4)
 
-      // Draw outer glow pass then inner bright pass
-      for (let pass = 0; pass < 2; pass++) {
-        const isGlow = pass === 0
-        ctx.lineWidth = isGlow ? 6 : 2
-        ctx.globalAlpha = isGlow ? 0.25 : 0.6
+      const cx = pos.screenX
+      const cy = pos.screenY
 
-        ctx.beginPath()
-        let started = false
+      // Outer glow — wide, faint
+      ctx.lineWidth = 6
+      ctx.globalAlpha = 0.25
+      ctx.strokeStyle = `rgba(${r},${g},${b},1)`
+      ctx.beginPath()
+      ctx.moveTo(cx - HIGHLIGHT_HALF_W, cy)
+      ctx.lineTo(cx + HIGHLIGHT_HALF_W, cy)
+      ctx.stroke()
 
-        for (let i = 0; i <= HIGHLIGHT_STEPS; i++) {
-          const bearing = startBearing + i * stepDeg
-          const ridgeAngle = skylineAngleAt(skylineData, bearing, projectedBands)
-          if (ridgeAngle <= -Math.PI / 2 + 0.001) continue
-
-          const { x, y } = project(bearing, ridgeAngle, cam)
-          if (x < -10 || x > W + 10 || y < 0 || y >= H) continue
-
-          if (!started) {
-            ctx.moveTo(x, y)
-            started = true
-          } else {
-            ctx.lineTo(x, y)
-          }
-        }
-
-        if (started) {
-          ctx.strokeStyle = isGlow
-            ? `rgba(${r},${g},${b},1)`
-            : `rgba(${br},${bg},${bb},1)`
-          ctx.stroke()
-        }
-      }
+      // Inner bright — thin, vivid
+      ctx.lineWidth = 2
+      ctx.globalAlpha = 0.6
+      ctx.strokeStyle = `rgba(${br},${bg},${bb},1)`
+      ctx.beginPath()
+      ctx.moveTo(cx - HIGHLIGHT_HALF_W * 0.6, cy)
+      ctx.lineTo(cx + HIGHLIGHT_HALF_W * 0.6, cy)
+      ctx.stroke()
     }
 
     ctx.restore()
