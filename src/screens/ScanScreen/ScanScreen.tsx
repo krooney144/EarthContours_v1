@@ -143,8 +143,7 @@ const CONTOUR_INTERVALS_M: number[] = [60.96, 60.96, 152.4, 304.8, 609.6]
 /** A pre-built contour strand — world-space data ready for per-frame projection. */
 interface PrebuiltContourStrand {
   level:    number   // Contour elevation (m), snapped to interval grid
-  bandIdx:  number   // Depth band index (for line width/opacity)
-  interval: number   // Contour interval for this band (m) — used for major/minor detection
+  bandIdx:  number   // Depth band index (for opacity)
   /** Per-point bearing + elevation angle + distance. Angle is precomputed for the current viewerElev. */
   points:   Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
 }
@@ -252,7 +251,7 @@ function buildContourStrands(
           for (const s of strands) {
             if (ai - s.lastAi > maxAzGap) {
               if (s.points.length >= 2) {
-                completed.push({ level: s.level, bandIdx: bi, interval, points: s.points })
+                completed.push({ level: s.level, bandIdx: bi, points: s.points })
               }
             } else {
               remaining.push(s)
@@ -268,7 +267,7 @@ function buildContourStrands(
     for (const [, strands] of activeStrands) {
       for (const s of strands) {
         if (s.points.length >= 2) {
-          completed.push({ level: s.level, bandIdx: bi, interval, points: s.points })
+          completed.push({ level: s.level, bandIdx: bi, points: s.points })
         }
       }
     }
@@ -808,14 +807,12 @@ function renderTerrain(
 /**
  * Renders pre-built contour strands by projecting them to screen space.
  *
- * Depth cues:
- *   - Per-point distance-based line width: thick near (10px), thin far (1px)
- *     using compressed power curve: width = 1 + 9 × (1 - (d/maxDist)^0.2)
- *   - Major/minor: every 5th contour interval gets 2× width multiplier
+ * Depth cues (both driven by strand average distance):
+ *   - Line width: near strands thick (2.5px), far strands thin (0.5px)
+ *   - Glow (shadowBlur): near strands have soft halo (6px), far strands none
  *   - Per-band opacity (near=vivid, far=faint)
  *
- * Each point-to-point segment is drawn individually so width varies along
- * a single strand. Round lineCap gives smooth joints between segments.
+ * Each strand is drawn as a single continuous path for smooth lines.
  */
 function renderContours(
   ctx: CanvasRenderingContext2D,
@@ -828,18 +825,10 @@ function renderContours(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  // Distance-based width: 1px at 400km, 10px at ~0m
   const MAX_DIST = 400_000
-  const WIDTH_MIN = 1
-  const WIDTH_MAX = 10
-  const WIDTH_RANGE = WIDTH_MAX - WIDTH_MIN
-  const WIDTH_POWER = 0.2
 
   // Per-band opacity (near=vivid, far=faint)
   const CONTOUR_OPACITIES = [0.55, 0.45, 0.35, 0.25, 0.15]
-
-  // Major contour multiplier (every 5th interval)
-  const MAJOR_MULTIPLIER = 2
 
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
@@ -850,9 +839,17 @@ function renderContours(
     const bi = strand.bandIdx
     const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
 
-    // Major/minor: is this a 5th-interval contour?
-    const majorInterval = strand.interval * 5
-    const isMajor = majorInterval > 0 && Math.abs(strand.level % majorInterval) < strand.interval * 0.1
+    // Compute average distance for this strand
+    let distSum = 0
+    for (const pt of strand.points) distSum += pt.dist
+    const avgDist = distSum / strand.points.length
+    const tDist = Math.min(1, avgDist / MAX_DIST)  // 0=near, 1=far
+
+    // Width: 2.5px near → 0.5px far (linear)
+    const lw = 0.5 + 2.0 * (1 - tDist)
+
+    // Glow: 6px near → 0 far
+    const glow = 6 * (1 - tDist)
 
     const tElev = hasElevRange
       ? Math.max(0, Math.min(1, (strand.level - globalElevMin) / elevRange))
@@ -861,33 +858,46 @@ function renderContours(
     const rgbMatch = baseColor.match(/\d+/g)
     if (!rgbMatch) continue
 
-    ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
+    const colorStr = `${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]}`
+    ctx.strokeStyle = `rgba(${colorStr},${opacity})`
+    ctx.lineWidth = lw
 
-    // Per-point segments for distance-based width tapering
-    let prevX = 0, prevY = 0, prevOnScreen = false
-    for (let i = 0; i < strand.points.length; i++) {
-      const pt = strand.points[i]
+    // Set glow
+    if (glow > 0.5) {
+      ctx.shadowBlur = glow
+      ctx.shadowColor = `rgba(${colorStr},${opacity * 0.5})`
+    } else {
+      ctx.shadowBlur = 0
+    }
+
+    // Draw strand as a single continuous path
+    ctx.beginPath()
+    let inPath = false
+    for (const pt of strand.points) {
       const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
       const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
 
-      if (onScreen && prevOnScreen && i > 0) {
-        // Distance-based width: compressed power curve
-        const tDist = Math.min(1, pt.dist / MAX_DIST)
-        let lw = WIDTH_MIN + WIDTH_RANGE * (1 - Math.pow(tDist, WIDTH_POWER))
-        if (isMajor) lw *= MAJOR_MULTIPLIER
-
-        ctx.lineWidth = lw
-        ctx.beginPath()
-        ctx.moveTo(prevX, prevY)
-        ctx.lineTo(x, y)
-        ctx.stroke()
+      if (onScreen) {
+        if (!inPath) {
+          ctx.moveTo(x, y)
+          inPath = true
+        } else {
+          ctx.lineTo(x, y)
+        }
+      } else {
+        if (inPath) {
+          ctx.stroke()
+          ctx.beginPath()
+          inPath = false
+        }
       }
-
-      prevX = x
-      prevY = y
-      prevOnScreen = onScreen
     }
+    if (inPath) ctx.stroke()
   }
+
+  // Reset shadow state
+  ctx.shadowBlur = 0
+  ctx.shadowColor = 'transparent'
 }
 
 // ─── Full Canvas Draw ─────────────────────────────────────────────────────────
