@@ -57,6 +57,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   locationAccuracy: 'high',
   autoDetectRegion: true,
 
+  // Debug & Developer
+  showDebugPanel: false,
+
   // Performance & Battery
   batteryMode: 'auto',
   targetFPS: 'auto',
@@ -85,6 +88,7 @@ interface SettingsStore extends AppSettings {
   setColorTheme: (theme: ColorTheme) => void
   setLabelSize: (size: LabelSize) => void
   toggleReduceMotion: () => void
+  toggleDebugPanel: () => void
   setLocationAccuracy: (accuracy: GPSAccuracy) => void
   toggleAutoDetectRegion: () => void
   setBatteryMode: (mode: BatteryMode) => void
@@ -188,6 +192,12 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ reduceMotion: next })
       },
 
+      toggleDebugPanel: () => {
+        const next = !get().showDebugPanel
+        log.info('Debug panel toggled', { now: next })
+        set({ showDebugPanel: next })
+      },
+
       setLocationAccuracy: (locationAccuracy) => {
         log.info('Location accuracy changed', { to: locationAccuracy })
         set({ locationAccuracy })
@@ -282,6 +292,7 @@ export const useSettingsStore = create<SettingsStore>()(
         colorTheme: state.colorTheme,
         labelSize: state.labelSize,
         reduceMotion: state.reduceMotion,
+        showDebugPanel: state.showDebugPanel,
         locationAccuracy: state.locationAccuracy,
         autoDetectRegion: state.autoDetectRegion,
         batteryMode: state.batteryMode,

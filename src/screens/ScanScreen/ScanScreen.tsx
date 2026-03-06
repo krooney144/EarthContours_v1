@@ -423,10 +423,19 @@ function projectFirstPerson(
 
 // ─── Peak Visibility Check ────────────────────────────────────────────────────
 
+/** Distance threshold for "near" peaks — shown if they have line-of-sight
+ *  regardless of whether they poke above the skyline. */
+const NEAR_PEAK_DIST = 50_000  // 50 km
+
 /**
- * Check if a peak is visible above the terrain ridgeline.
- * Uses re-projected overall angles (AGL-aware, includes high-res near bands)
- * when available, falling back to the worker-baked angles.
+ * Two-tier peak visibility:
+ *  1. Skyline peaks (any distance): visible if peak angle ≥ ridgeline angle.
+ *  2. Near peaks (< 50 km): visible if not fully occluded by terrain between
+ *     viewer and peak — approximated by checking the peak's angle against
+ *     the per-band ridgeline for bands closer than the peak's distance.
+ *
+ * FOV check uses the full horizontal FOV (not the 60% margin from before)
+ * so peaks significantly off-center still appear when they're in-frame.
  */
 function isPeakVisible(
   peak: Peak,
@@ -445,24 +454,41 @@ function isPeakVisible(
   // Bearing from viewer to peak
   const bearing = ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360
 
-  // Check if peak is within the current FOV (with margin)
+  // Full-FOV check — show peaks anywhere in the camera frustum
   let angleDiff = bearing - heading_deg
   if (angleDiff > 180) angleDiff -= 360
   if (angleDiff < -180) angleDiff += 360
-  if (Math.abs(angleDiff) > hfov * 0.6) return false  // outside FOV
+  if (Math.abs(angleDiff) > hfov * 0.5) return false
 
   // Earth curvature correction
   const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
   const peakAngle = Math.atan2(peak.elevation_m - curvDrop - viewerElev, dist)
 
-  // Ridgeline angle — uses re-projected angles (AGL-aware, includes high-res
-  // near-band contributions) with interpolation. Falls back to worker-baked.
+  // Ridgeline angle — uses re-projected angles (AGL-aware)
   const ridgeAngle = skylineAngleAt(skyline, bearing, projected)
-
-  // Peak is visible if its elevation angle is at or above the ridgeline.
-  // Allow a small tolerance (0.15°) so peaks right at the ridge still show.
   const tolerance = 0.15 * DEG_TO_RAD
-  return peakAngle >= ridgeAngle - tolerance
+
+  // Tier 1: skyline peak — above the overall ridgeline
+  if (peakAngle >= ridgeAngle - tolerance) return true
+
+  // Tier 2: near-ground peak — within 50 km, check if closer terrain occludes it.
+  // Only bands whose maxDist < peak distance can occlude; if the peak's angle is
+  // above all those closer-band ridgelines, it has line-of-sight.
+  if (dist <= NEAR_PEAK_DIST) {
+    let occluded = false
+    for (let bi = 0; bi < skyline.bands.length; bi++) {
+      const bandCfg = DEPTH_BANDS[bi]
+      if (!bandCfg || bandCfg.minDist >= dist) continue  // band is farther than peak
+      const bandAngle = bandAngleAt(skyline, bi, bearing, projected)
+      if (bandAngle > -Math.PI / 2 + 0.001 && peakAngle < bandAngle - tolerance) {
+        occluded = true
+        break
+      }
+    }
+    if (!occluded) return true
+  }
+
+  return false
 }
 
 // ─── Quick Render (SkylineData) ───────────────────────────────────────────────
@@ -808,12 +834,12 @@ function renderTerrain(
  * Renders pre-built contour strands by projecting them to screen space.
  *
  * Depth cues:
- *   - Per-point distance-based line width: thick near (10px), thin far (1px)
- *     using compressed power curve: width = 1 + 9 × (1 - (d/maxDist)^0.2)
+ *   - Per-point distance-based line width: thick near (5px), thin far (0.5px)
+ *     using compressed power curve: width = 0.5 + 4.5 × (1 - (d/maxDist)^0.2)
  *   - Per-band opacity (near=vivid, far=faint)
  *
- * Each point-to-point segment is drawn individually so width varies along
- * a single strand. Round lineCap gives smooth joints between segments.
+ * Strands are drawn as continuous paths, flushing only when line width changes
+ * by more than 20% to avoid the dotty appearance of per-segment strokes.
  */
 function renderContours(
   ctx: CanvasRenderingContext2D,
@@ -836,6 +862,9 @@ function renderContours(
   // Per-band opacity (near=vivid, far=faint)
   const CONTOUR_OPACITIES = [0.55, 0.45, 0.35, 0.25, 0.15]
 
+  // Width change threshold: flush path when width differs by >20%
+  const WIDTH_FLUSH_RATIO = 0.2
+
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
@@ -854,28 +883,46 @@ function renderContours(
 
     ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
 
-    // Per-point segments for distance-based width tapering
-    let prevX = 0, prevY = 0, prevOnScreen = false
+    // Draw as continuous path, flushing only on significant width change or gap
+    let pathStarted = false
+    let currentWidth = 0
+
     for (let i = 0; i < strand.points.length; i++) {
       const pt = strand.points[i]
       const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
       const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
 
-      if (onScreen && prevOnScreen && i > 0) {
-        // Distance-based width: compressed power curve
-        const tDist = Math.min(1, pt.dist / MAX_DIST)
-        const lw = WIDTH_MIN + WIDTH_RANGE * (1 - Math.pow(tDist, WIDTH_POWER))
-        ctx.lineWidth = lw
-        ctx.beginPath()
-        ctx.moveTo(prevX, prevY)
-        ctx.lineTo(x, y)
-        ctx.stroke()
+      if (!onScreen) {
+        // Off-screen: flush and reset
+        if (pathStarted) { ctx.stroke(); pathStarted = false }
+        continue
       }
 
-      prevX = x
-      prevY = y
-      prevOnScreen = onScreen
+      // Compute width for this point
+      const tDist = Math.min(1, pt.dist / MAX_DIST)
+      const lw = WIDTH_MIN + WIDTH_RANGE * (1 - Math.pow(tDist, WIDTH_POWER))
+
+      if (!pathStarted) {
+        // Start new path
+        ctx.lineWidth = lw
+        currentWidth = lw
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+        pathStarted = true
+      } else if (Math.abs(lw - currentWidth) > currentWidth * WIDTH_FLUSH_RATIO) {
+        // Width changed significantly — flush and start new sub-path from same point
+        ctx.lineTo(x, y)
+        ctx.stroke()
+        ctx.lineWidth = lw
+        currentWidth = lw
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+      } else {
+        ctx.lineTo(x, y)
+      }
     }
+
+    if (pathStarted) ctx.stroke()
   }
 }
 
@@ -985,12 +1032,12 @@ function drawScanCanvas(
         let angleDiff = bearing - heading_deg
         if (angleDiff > 180) angleDiff -= 360
         if (angleDiff < -180) angleDiff += 360
-        return Math.abs(angleDiff) <= hfov * 0.6
+        return Math.abs(angleDiff) <= hfov * 0.5
       })
 
   const topPeaks = visiblePeaks
     .sort((a, b) => b.elevation_m - a.elevation_m)
-    .slice(0, 8)
+    .slice(0, 15)
 
   for (const peak of topPeaks) {
     const projected = projectFirstPerson(
@@ -1003,23 +1050,25 @@ function drawScanCanvas(
     if (screenX < -50 || screenX > W + 50) continue
     if (horizDist > MAX_PEAK_DIST) continue
 
-    // Snap dot to the overall ridgeline (AGL-aware, includes high-res near
-    // bands).  Uses the same interpolated angle that isPeakVisible checks
-    // against, so the dot sits on the drawn ridgeline.  Upward-only: if the
-    // peak's true position is above the ridge, keep its real screen Y.
+    // Snap skyline peaks to the ridgeline so dots sit exactly on the drawn line.
+    // Near-ground peaks (below ridge) keep their true projected position.
     if (skylineData) {
       const bearing = calculateBearing(
         { lat: activeLat, lng: activeLng },
         { lat: peak.lat, lng: peak.lng },
       )
+      const curvDrop = (horizDist * horizDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const peakAngle = Math.atan2(peak.elevation_m - curvDrop - eyeElev, horizDist)
       const ridgeAngle = skylineAngleAt(skylineData, bearing, projectedBands)
-      if (ridgeAngle > -Math.PI / 2 + 0.001) {
+
+      // Only snap if peak is at/above the ridgeline (skyline peak)
+      if (ridgeAngle > -Math.PI / 2 + 0.001 && peakAngle >= ridgeAngle - 0.003) {
         const ridgePos = project(bearing, ridgeAngle, cam)
         screenY = Math.min(screenY, ridgePos.y)
       }
     }
 
-    const minSpacing = W * 0.10
+    const minSpacing = W * 0.06
     if (peakPositions.some(p => Math.abs(p.screenX - screenX) < minSpacing)) continue
 
     peakPositions.push({
@@ -1033,26 +1082,53 @@ function drawScanCanvas(
     })
   }
 
-  // ── 5. Peak ridge highlights — bright glow on ridgeline near each peak ────
+  // ── 5. Peak ridge highlights — elevation-colored glow on ridgeline ────────
   if (showPeakLabels && skylineData && peakPositions.length > 0) {
+    // Compute global elevation range for color mapping
+    let hlElevMin = Infinity, hlElevMax = -Infinity
+    for (let bi = 0; bi < skylineData.bands.length; bi++) {
+      const elev = skylineData.bands[bi].elevations
+      for (let i = 0; i < elev.length; i++) {
+        if (elev[i] === -Infinity) continue
+        if (elev[i] < hlElevMin) hlElevMin = elev[i]
+        if (elev[i] > hlElevMax) hlElevMax = elev[i]
+      }
+    }
+    const hlElevRange = hlElevMax - hlElevMin
+    const hlHasRange = hlElevRange > 1
+
     ctx.save()
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
 
     // Highlight spread: ±2° of bearing around each peak
     const HIGHLIGHT_SPREAD_DEG = 2
-    const HIGHLIGHT_STEPS = 40  // columns to draw per highlight
+    const HIGHLIGHT_STEPS = 40
 
     for (const pos of peakPositions) {
       const peakBearing = pos.bearing
       const startBearing = peakBearing - HIGHLIGHT_SPREAD_DEG
       const stepDeg = (HIGHLIGHT_SPREAD_DEG * 2) / HIGHLIGHT_STEPS
 
+      // Sample elevation at peak bearing for color
+      const peakTElev = hlHasRange
+        ? Math.max(0, Math.min(1, (pos.elevation_m - hlElevMin) / hlElevRange))
+        : 0.5
+      const baseColor = elevToRidgeColor(peakTElev)
+      const rgbMatch = baseColor.match(/\d+/g)
+      if (!rgbMatch) continue
+      const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+
+      // Brightened version for inner highlight (shift toward white by 40%)
+      const br = Math.round(r + (255 - r) * 0.4)
+      const bg = Math.round(g + (255 - g) * 0.4)
+      const bb = Math.round(b + (255 - b) * 0.4)
+
       // Draw outer glow pass then inner bright pass
       for (let pass = 0; pass < 2; pass++) {
         const isGlow = pass === 0
         ctx.lineWidth = isGlow ? 6 : 2
-        ctx.globalAlpha = isGlow ? 0.15 : 0.5
+        ctx.globalAlpha = isGlow ? 0.25 : 0.6
 
         ctx.beginPath()
         let started = false
@@ -1074,10 +1150,9 @@ function drawScanCanvas(
         }
 
         if (started) {
-          // Brightness falls off from peak center: use solid white-cyan
           ctx.strokeStyle = isGlow
-            ? 'rgba(167, 230, 240, 1)'
-            : 'rgba(220, 250, 255, 1)'
+            ? `rgba(${r},${g},${b},1)`
+            : `rgba(${br},${bg},${bb},1)`
           ctx.stroke()
         }
       }
@@ -1106,7 +1181,7 @@ const ScanScreen: React.FC = () => {
   } = useCameraStore()
   const { activeLat, activeLng }               = useLocationStore()
   const { peaks, meshData } = useTerrainStore()
-  const { units, showPeakLabels, showBandLines } = useSettingsStore()
+  const { units, showPeakLabels, showBandLines, showDebugPanel } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -1531,7 +1606,7 @@ const ScanScreen: React.FC = () => {
         )}
 
         {/* DEBUG: Comprehensive diagnostics panel */}
-        {skylineData && (
+        {showDebugPanel && skylineData && (
           <div style={{
             position: 'absolute', top: 58, right: 44,
             color: '#0f0', fontSize: 9, fontFamily: 'monospace',

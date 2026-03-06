@@ -259,6 +259,14 @@ const SettingsScreen: React.FC = () => {
               onChange={settings.toggleContourAnimation}
             />
           </Row>
+          <Row label="Debug Panel" description="Show diagnostics overlay on SCAN screen">
+            <Toggle
+              id="toggle-debug-panel"
+              label="Toggle debug panel"
+              checked={settings.showDebugPanel}
+              onChange={settings.toggleDebugPanel}
+            />
+          </Row>
           <Row
             label="Vertical Exaggeration"
             description="Multiply terrain heights for dramatic effect"
