@@ -55,7 +55,7 @@ import {
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
-import type { Peak, TerrainMeshData, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem } from '../../core/types'
+import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem } from '../../core/types'
 import { DEPTH_BANDS } from '../../core/types'
 import styles from './ScanScreen.module.css'
 
@@ -409,25 +409,6 @@ function getHorizonY(cam: CameraParams): number {
   const pxPerRad = cam.W / (cam.hfov * DEG_TO_RAD)
   const pitchRad = cam.pitch_deg * DEG_TO_RAD
   return cam.H * 0.5 - pitchRad * pxPerRad
-}
-
-// ─── Grid Sampler ─────────────────────────────────────────────────────────────
-
-function sampleMeshBilinear(lat: number, lng: number, mesh: TerrainMeshData): number {
-  const { bounds, width, height, elevations } = mesh
-  const nx = (lng - bounds.west)  / (bounds.east  - bounds.west)
-  const ny = (bounds.north - lat) / (bounds.north - bounds.south)
-  const sx = Math.max(0, Math.min(width  - 1, nx * (width  - 1)))
-  const sy = Math.max(0, Math.min(height - 1, ny * (height - 1)))
-  const x0 = Math.floor(sx), x1 = Math.min(x0 + 1, width  - 1)
-  const y0 = Math.floor(sy), y1 = Math.min(y0 + 1, height - 1)
-  const fx = sx - x0, fy = sy - y0
-  return (
-    elevations[y0 * width + x0] * (1 - fx) * (1 - fy) +
-    elevations[y0 * width + x1] * fx       * (1 - fy) +
-    elevations[y1 * width + x0] * (1 - fx) * fy +
-    elevations[y1 * width + x1] * fx       * fy
-  )
 }
 
 // ─── First-Person Projection ──────────────────────────────────────────────────
@@ -1334,7 +1315,6 @@ function renderPeakRidgelines(
 
 function drawScanCanvas(
   canvas: HTMLCanvasElement,
-  mesh: TerrainMeshData,
   peaks: Peak[],
   heading_deg: number,
   pitch_deg: number,
@@ -1355,12 +1335,11 @@ function drawScanCanvas(
   const W = canvas.width
   const H = canvas.height
 
-  // Use the worker's z15-corrected ground elevation when available, so peak
-  // positions, visibility checks, and snap all use the same elevation as the
-  // ridgeline and contour data. Fall back to mesh grid when skyline isn't ready.
+  // Use the worker's z15-corrected ground elevation. Before skyline is ready,
+  // we can't draw terrain anyway so groundElev = 0 is fine for initial frame.
   const groundElev = skylineData
     ? skylineData.computedAt.groundElev
-    : sampleMeshBilinear(activeLat, activeLng, mesh)
+    : 0
   const eyeElev    = groundElev + eyeHeight_m
 
   // Single camera params — shared by every projection call this frame
@@ -1518,7 +1497,7 @@ const ScanScreen: React.FC = () => {
     applyARDrag, setHeightFromSlider, applyFovScale, setFov,
   } = useCameraStore()
   const { activeLat, activeLng }               = useLocationStore()
-  const { peaks, meshData } = useTerrainStore()
+  const { peaks } = useTerrainStore()
   const { units, showPeakLabels, showBandLines, showDebugPanel } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
@@ -1654,9 +1633,7 @@ const ScanScreen: React.FC = () => {
   // Only the worker fetches tiles — main thread shows loading state until done.
 
   useEffect(() => {
-    if (!meshData) return
-
-    // ── Option 2: skip recompute for tiny moves (< 1.5 km) ─────────────────────
+    // ── Skip recompute for tiny moves (< 1.5 km) ─────────────────────────────
     // The ridgeline is virtually identical within 1.5 km, no need to re-ray-march.
     const prev = skylineDataRef.current
     if (prev) {
@@ -1669,7 +1646,7 @@ const ScanScreen: React.FC = () => {
       }
     }
 
-    // ── Option 1: stale-while-revalidate ────────────────────────────────────────
+    // ── Stale-while-revalidate ────────────────────────────────────────────────
     // DO NOT clear skylineData here — old panorama stays visible while the worker
     // recomputes in background. Progress bar still shows; canvas swaps on completion.
     setSkylineProgress(0)
@@ -1677,29 +1654,19 @@ const ScanScreen: React.FC = () => {
     const worker = skylineWorker.current
     if (!worker) return
 
-    const groundElev = sampleMeshBilinear(activeLat, activeLng, meshData)
-    const viewerElev = groundElev + height_m
-
     setIsSkylineComputing(true)
-
-    // Copy mesh elevations — worker needs its own buffer (main thread keeps original)
-    const meshCopy = Float32Array.from(meshData.elevations)
 
     const request: SkylineRequest = {
       viewerLat:      activeLat,
       viewerLng:      activeLng,
-      viewerElev:     viewerElev,
-      meshElevations: meshCopy,
-      meshWidth:      meshData.width,
-      meshHeight:     meshData.height,
-      meshBounds:     { ...meshData.bounds },
+      viewerHeightM:  height_m,
       resolution:     SKYLINE_RESOLUTION,
       maxRange:       MAX_DIST,
     }
 
-    worker.postMessage(request, [meshCopy.buffer])
+    worker.postMessage(request)
 
-  }, [activeLat, activeLng, meshData])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeLat, activeLng])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── OSM peak fetch on location change ────────────────────────────────────────
 
@@ -1890,7 +1857,7 @@ const ScanScreen: React.FC = () => {
 
   const redrawCanvas = useCallback(() => {
     const canvas = terrainCanvasRef.current
-    if (!canvas || !meshData) return
+    if (!canvas) return
     if (canvas.width === 0 || canvas.height === 0) return
 
     const dpr = window.devicePixelRatio || 1
@@ -1902,7 +1869,7 @@ const ScanScreen: React.FC = () => {
     ctx.setTransform(1, 0, 0, 1, 0, 0)
 
     const rawPos = drawScanCanvas(
-      canvas, meshData,
+      canvas,
       activePeaks,
       heading_deg, pitch_deg, height_m,
       activeLat, activeLng,
@@ -1919,7 +1886,7 @@ const ScanScreen: React.FC = () => {
   }, [
     heading_deg, pitch_deg, height_m, fov,
     activeLat, activeLng,
-    meshData, activePeaks,
+    activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs,
     showBandLines, showPeakLabels,
   ])
@@ -2083,11 +2050,11 @@ const ScanScreen: React.FC = () => {
   })()
 
   // ── Ground elevation for HUD ─────────────────────────────────────────────
-  // Prefer the worker's z15-corrected ground elevation (matches what the
-  // skyline/contours/peaks use). Fall back to mesh grid before skyline is ready.
+  // Uses the worker's z15 tile-based ground elevation. Before skyline is ready,
+  // we don't have a ground elevation yet — show 0 until the worker responds.
   const groundElev = skylineData
     ? skylineData.computedAt.groundElev
-    : (meshData ? sampleMeshBilinear(activeLat, activeLng, meshData) : 0)
+    : 0
 
   // ── Loading state ─────────────────────────────────────────────────────────
 

@@ -77,12 +77,8 @@ const CONTOUR_INTERVALS_M: number[] = [
 export interface SkylineRequest {
   viewerLat:    number
   viewerLng:    number
-  viewerElev:   number
-  /** Copy of the region elevation grid sent from main thread */
-  meshElevations: Float32Array
-  meshWidth:    number
-  meshHeight:   number
-  meshBounds:   { north: number; south: number; east: number; west: number }
+  /** Eye height above ground in metres (AGL). Worker resolves ground elevation from tiles. */
+  viewerHeightM: number
   /** Steps per degree — 2 = 0.5°/step (720 azimuths) */
   resolution:   number
   /** Maximum ray distance in metres */
@@ -164,10 +160,7 @@ let lastViewerLat          = 0
 let lastViewerLng          = 0
 let lastCorrectedViewerElev = 0
 let lastCosViewerLat       = 1
-let lastMeshElevations: Float32Array | null = null
-let lastMeshWidth          = 0
-let lastMeshHeight         = 0
-let lastMeshBounds: { north: number; south: number; east: number; west: number } | null = null
+let lastSkylineComputed = false
 
 async function fetchWorkerTile(z: number, x: number, y: number): Promise<Float32Array | null> {
   const key = `${z}/${x}/${y}`
@@ -260,53 +253,25 @@ function sampleTileGrid(
   )
 }
 
-function sampleMeshGrid(
-  lat: number, lng: number,
-  elevations: Float32Array, w: number, h: number,
-  bounds: { north: number; south: number; east: number; west: number },
-): number {
-  const nx = (lng - bounds.west)  / (bounds.east  - bounds.west)
-  const ny = (bounds.north - lat) / (bounds.north - bounds.south)
-  const sx = Math.max(0, Math.min(w - 1, nx * (w - 1)))
-  const sy = Math.max(0, Math.min(h - 1, ny * (h - 1)))
-  const x0 = Math.floor(sx), x1 = Math.min(x0 + 1, w - 1)
-  const y0 = Math.floor(sy), y1 = Math.min(y0 + 1, h - 1)
-  const fx = sx - x0, fy = sy - y0
-  return (
-    elevations[y0 * w + x0] * (1 - fx) * (1 - fy) +
-    elevations[y0 * w + x1] * fx       * (1 - fy) +
-    elevations[y1 * w + x0] * (1 - fx) * fy +
-    elevations[y1 * w + x1] * fx       * fy
-  )
-}
-
-/** Best-available elevation: tile cache first, mesh grid fallback. */
-function sampleBest(
-  lat: number, lng: number, zoom: number,
-  mesh: Float32Array, mw: number, mh: number,
-  bounds: { north: number; south: number; east: number; west: number },
-): number {
+/** Best-available elevation: tile cache first, sea-level fallback. */
+function sampleBest(lat: number, lng: number, zoom: number): number {
   const { x: tx, y: ty } = latLngToTileXY(lat, lng, zoom)
   const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
   if (grid) return sampleTileGrid(grid, lat, lng, zoom, tx, ty)
-  return sampleMeshGrid(lat, lng, mesh, mw, mh, bounds)
+  return 0  // No tile cached — assume sea level (tiles are prefetched so this rarely fires)
 }
 
 /** Hill shade at a terrain point (NW-45° light). */
-function hillShade(
-  lat: number, lng: number, zoom: number,
-  mesh: Float32Array, mw: number, mh: number,
-  bounds: { north: number; south: number; east: number; west: number },
-): number {
+function hillShade(lat: number, lng: number, zoom: number): number {
   const STEP   = zoom >= 11 ? 0.0005 : 0.002
   const cosLat = Math.cos(lat * DEG_TO_RAD)
   const dx_m   = STEP * 111_320 * cosLat
   const dy_m   = STEP * 111_132
 
-  const eE = sampleBest(lat,        lng + STEP, zoom, mesh, mw, mh, bounds)
-  const eW = sampleBest(lat,        lng - STEP, zoom, mesh, mw, mh, bounds)
-  const eN = sampleBest(lat + STEP, lng,        zoom, mesh, mw, mh, bounds)
-  const eS = sampleBest(lat - STEP, lng,        zoom, mesh, mw, mh, bounds)
+  const eE = sampleBest(lat,        lng + STEP, zoom)
+  const eW = sampleBest(lat,        lng - STEP, zoom)
+  const eN = sampleBest(lat + STEP, lng,        zoom)
+  const eS = sampleBest(lat - STEP, lng,        zoom)
 
   const dzdx = (eE - eW) / (2 * dx_m)
   const dzdy = (eN - eS) / (2 * dy_m)
@@ -388,7 +353,7 @@ const REFINED_STEP_DEG = 0.05   // ~20 samples/degree (5× finer than hi-res 0.1
 const REFINED_HALF_DEG = 6      // ±6° centered on peak = 12° total = ~240 samples
 
 async function handleRefinePeaks(peaks: PeakRefineItem[]): Promise<void> {
-  if (!lastMeshElevations || !lastMeshBounds) {
+  if (!lastSkylineComputed) {
     // No skyline computed yet — nothing to refine against
     self.postMessage({ type: 'refined-arcs', refinedArcs: [], timestamp: Date.now() })
     return
@@ -398,10 +363,6 @@ async function handleRefinePeaks(peaks: PeakRefineItem[]): Promise<void> {
   const viewerLng  = lastViewerLng
   const correctedViewerElev = lastCorrectedViewerElev
   const cosViewerLat = lastCosViewerLat
-  const meshElev   = lastMeshElevations
-  const meshW      = lastMeshWidth
-  const meshH      = lastMeshHeight
-  const meshB      = lastMeshBounds
 
   self.postMessage({ type: 'refine-progress', phase: 'tiles', total: peaks.length, done: 0 })
 
@@ -488,7 +449,7 @@ async function handleRefinePeaks(peaks: PeakRefineItem[]): Promise<void> {
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
         // Use REFINED zoom (higher than standard) for better terrain detail
         const zoom = distToRefinedZoom(dist)
-        const rawElev = sampleBest(sLat, sLng, zoom, meshElev, meshW, meshH, meshB)
+        const rawElev = sampleBest(sLat, sLng, zoom)
         const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
         const effElev  = rawElev - curvDrop
         const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
@@ -562,8 +523,7 @@ self.onmessage = async (e: MessageEvent) => {
 
 async function computeSkyline(req: SkylineRequest): Promise<void> {
   const {
-    viewerLat, viewerLng, viewerElev,
-    meshElevations, meshWidth, meshHeight, meshBounds,
+    viewerLat, viewerLng, viewerHeightM,
     resolution, maxRange,
   } = req
 
@@ -601,13 +561,10 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
   self.postMessage({ type: 'progress', phase: 'tiles', progress: 1, tilesLoaded: tileCacheW.size })
 
-  // ── Fix elevation source mismatch ─────────────────────────────────────────
-  // Use z15 (highest-res tile at viewer location, ~10m resolution) for ground
-  // truth. z13 (~40m) was averaging steep valleys and placing the viewer underground.
-  const meshGround = sampleMeshGrid(viewerLat, viewerLng, meshElevations, meshWidth, meshHeight, meshBounds)
-  const tileGround = sampleBest(viewerLat, viewerLng, 15, meshElevations, meshWidth, meshHeight, meshBounds)
-  const elevCorrection = tileGround - meshGround
-  const correctedViewerElev = viewerElev + elevCorrection
+  // ── Ground elevation from Z15 tiles (~10m resolution) ────────────────────
+  // Tiles are already prefetched above, so sampleBest will hit the cache.
+  const tileGround = sampleBest(viewerLat, viewerLng, 15)
+  const correctedViewerElev = tileGround + viewerHeightM
 
   // ── Phase 2: Build log-step distance arrays ─────────────────────────────────
 
@@ -721,7 +678,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
       const zoom    = distToZoom(dist)
-      const rawElev = sampleBest(sLat, sLng, zoom, meshElevations, meshWidth, meshHeight, meshBounds)
+      const rawElev = sampleBest(sLat, sLng, zoom)
 
       const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev   = rawElev - curvDrop
@@ -770,7 +727,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
     // Overall ridgeline shade
     const ridgeZoom = distToZoom(ridgeDist)
-    const shade = hillShade(ridgeLat, ridgeLng, ridgeZoom, meshElevations, meshWidth, meshHeight, meshBounds)
+    const shade = hillShade(ridgeLat, ridgeLng, ridgeZoom)
 
     angles[ai]    = maxAngle
     distances[ai] = ridgeDist
@@ -823,7 +780,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
         const zoom    = distToZoom(dist)
-        const rawElev = sampleBest(sLat, sLng, zoom, meshElevations, meshWidth, meshHeight, meshBounds)
+        const rawElev = sampleBest(sLat, sLng, zoom)
 
         const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
         const effElev   = rawElev - curvDrop
@@ -914,7 +871,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
         const zoom    = distToZoom(dist)
-        const rawElev = sampleBest(sLat, sLng, zoom, meshElevations, meshWidth, meshHeight, meshBounds)
+        const rawElev = sampleBest(sLat, sLng, zoom)
 
         const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
         const effElev   = rawElev - curvDrop
@@ -1000,10 +957,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   lastViewerLng          = viewerLng
   lastCorrectedViewerElev = correctedViewerElev
   lastCosViewerLat       = cosViewerLat
-  lastMeshElevations     = meshElevations
-  lastMeshWidth          = meshWidth
-  lastMeshHeight         = meshHeight
-  lastMeshBounds         = meshBounds
+  lastSkylineComputed    = true
 
   const skyline: SkylineData = {
     angles,
