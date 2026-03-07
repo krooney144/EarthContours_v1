@@ -107,13 +107,24 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
    * Left/right drag = heading change (looking around horizontally)
    * Up/down drag = pitch change (looking up/down)
    *
-   * Sensitivity values are tuned for good feel — not too fast, not too slow.
+   * Sensitivity scales proportionally with FOV so that zoomed-in views
+   * feel natural — a finger drag moves the same *visual* distance on screen
+   * regardless of zoom level. At default FOV (70°), sensitivity matches
+   * the original fixed values. At FOV 20°, sensitivity drops to ~29%.
+   *
+   * Formula: baseSensitivity × (currentFOV / defaultFOV)
+   * TODO: If gyroscope mode is active, this function is bypassed entirely.
    */
   applyARDrag: (deltaX, deltaY) => {
-    const HEADING_SENSITIVITY = 0.3  // degrees per pixel
-    const PITCH_SENSITIVITY = 0.2
+    const BASE_HEADING_SENSITIVITY = 0.3  // degrees per pixel at default FOV
+    const BASE_PITCH_SENSITIVITY = 0.2
 
-    const { heading_deg, pitch_deg } = get()
+    const { heading_deg, pitch_deg, fov } = get()
+
+    // Scale sensitivity proportionally with FOV so zoomed-in views aren't too jumpy
+    const fovScale = fov / DEFAULT_FOV
+    const HEADING_SENSITIVITY = BASE_HEADING_SENSITIVITY * fovScale
+    const PITCH_SENSITIVITY = BASE_PITCH_SENSITIVITY * fovScale
 
     // normalizeAngle keeps heading in 0–360 range
     // Negate deltaX: drag right → view pans right → heading decreases (like scrolling a panoramic photo)
