@@ -237,6 +237,10 @@ const MapScreen: React.FC = () => {
   const [centerLng, setCenterLng] = useState(DEFAULT_MAP_CENTER.lng)
   const [zoom, setZoom]           = useState(DEFAULT_MAP_ZOOM)
   const [isLoading, setIsLoading] = useState(false)
+
+  // GPS permission prompt — shown when user taps "My Location" without permission
+  const [gpsPrompt, setGpsPrompt] = useState<'needs-permission' | 'denied' | 'unavailable' | null>(null)
+  const gpsPromptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showTapHint, setShowTapHint] = useState(true)
 
   const [cursorLat, setCursorLat] = useState(DEFAULT_MAP_CENTER.lat)
@@ -792,12 +796,51 @@ const MapScreen: React.FC = () => {
    * TODO: Show a brief toast/snackbar if GPS permission is denied.
    * TODO: Animate map pan to GPS position instead of instant jump.
    */
+  const dismissGpsPrompt = useCallback(() => {
+    setGpsPrompt(null)
+    if (gpsPromptTimerRef.current) {
+      clearTimeout(gpsPromptTimerRef.current)
+      gpsPromptTimerRef.current = null
+    }
+  }, [])
+
+  const showGpsPromptTimed = useCallback((prompt: 'denied' | 'unavailable') => {
+    setGpsPrompt(prompt)
+    if (gpsPromptTimerRef.current) clearTimeout(gpsPromptTimerRef.current)
+    gpsPromptTimerRef.current = setTimeout(() => setGpsPrompt(null), 6000)
+  }, [])
+
   const handleMyLocation = useCallback(async () => {
     log.info('My Location tapped', { gpsPermission, hasGPS: gpsLat !== null })
 
-    // Request GPS if we haven't yet — this triggers the browser permission prompt
-    if (gpsPermission === 'unknown' || gpsPermission === 'unavailable') {
+    // Already denied — show the denial message with instructions
+    if (gpsPermission === 'denied') {
+      showGpsPromptTimed('denied')
+      return
+    }
+
+    // GPS API not available on this device/browser
+    if (gpsPermission === 'unavailable') {
+      showGpsPromptTimed('unavailable')
+      return
+    }
+
+    // First time — show a brief prompt explaining what we need, then request
+    if (gpsPermission === 'unknown') {
+      setGpsPrompt('needs-permission')
       await requestGPS()
+      // Check the result after the browser prompt resolves
+      const state = useLocationStore.getState()
+      if (state.gpsPermission === 'denied') {
+        showGpsPromptTimed('denied')
+        return
+      }
+      if (state.gpsPermission === 'unavailable') {
+        showGpsPromptTimed('unavailable')
+        return
+      }
+      // Permission granted — dismiss prompt and proceed
+      dismissGpsPrompt()
     }
 
     // Switch to GPS mode — sets GPS as active viewpoint for SCAN/EXPLORE
@@ -809,7 +852,7 @@ const MapScreen: React.FC = () => {
       setCenterLat(state.gpsLat)
       setCenterLng(state.gpsLng)
     }
-  }, [switchToGPS, gpsLat, gpsPermission, requestGPS])
+  }, [switchToGPS, gpsLat, gpsPermission, requestGPS, showGpsPromptTimed, dismissGpsPrompt])
 
   return (
     <div className={styles.screen}>
@@ -854,9 +897,71 @@ const MapScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* Map controls — always show location button for GPS access.
-          TODO: Add visual feedback (spinner) while waiting for GPS fix.
-          TODO: Show different icon states: no GPS / searching / locked. */}
+      {/* GPS permission prompt — appears when user taps "My Location" without permission.
+          Three states: needs-permission (brief "allow location" note before browser prompt),
+          denied (instructions to enable in browser settings), unavailable (not supported). */}
+      {gpsPrompt && (
+        <div className={styles.gpsPrompt} role="alert">
+          <div className={styles.gpsPromptContent}>
+            {gpsPrompt === 'needs-permission' && (
+              <>
+                <div className={styles.gpsPromptIcon}>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                    <circle cx="12" cy="12" r="5" />
+                    <line x1="12" y1="2" x2="12" y2="6" />
+                    <line x1="12" y1="18" x2="12" y2="22" />
+                    <line x1="2" y1="12" x2="6" y2="12" />
+                    <line x1="18" y1="12" x2="22" y2="12" />
+                  </svg>
+                </div>
+                <div className={styles.gpsPromptText}>
+                  <strong>Location access needed</strong>
+                  <span>Allow location to center the map on your position</span>
+                </div>
+              </>
+            )}
+            {gpsPrompt === 'denied' && (
+              <>
+                <div className={`${styles.gpsPromptIcon} ${styles.gpsPromptIconDenied}`}>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                  </svg>
+                </div>
+                <div className={styles.gpsPromptText}>
+                  <strong>Location access denied</strong>
+                  <span>Enable location in your browser settings to use this feature</span>
+                </div>
+              </>
+            )}
+            {gpsPrompt === 'unavailable' && (
+              <>
+                <div className={`${styles.gpsPromptIcon} ${styles.gpsPromptIconDenied}`}>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                  </svg>
+                </div>
+                <div className={styles.gpsPromptText}>
+                  <strong>Location not available</strong>
+                  <span>GPS is not supported on this device or browser</span>
+                </div>
+              </>
+            )}
+          </div>
+          {gpsPrompt !== 'needs-permission' && (
+            <button
+              className={styles.gpsPromptDismiss}
+              onClick={dismissGpsPrompt}
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Map controls — always show location button for GPS access. */}
       <div className={styles.controls}>
         <button className={styles.controlBtn} onClick={handleZoomIn}  aria-label="Zoom in">+</button>
         <button className={styles.controlBtn} onClick={handleZoomOut} aria-label="Zoom out">−</button>
