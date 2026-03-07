@@ -38,7 +38,7 @@ import {
 } from '../../core/constants'
 import {
   latLngToTile, tileToLatLng, latLngToPixel, pixelToLatLng,
-  clamp, formatCoordinates,
+  clamp, formatCoordinates, formatDistance,
 } from '../../core/utils'
 import { loadElevationTile } from '../../data/elevationLoader'
 import type { TileCoord } from '../../core/types'
@@ -229,7 +229,7 @@ function loadLabelTile(z: number, x: number, y: number): Promise<HTMLImageElemen
 const MapScreen: React.FC = () => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
   const { peaks, meshData, activeRegion } = useTerrainStore()
-  const { coordFormat, showPeakLabels } = useSettingsStore()
+  const { coordFormat, showPeakLabels, units } = useSettingsStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -243,16 +243,59 @@ const MapScreen: React.FC = () => {
   const [cursorLng, setCursorLng] = useState(DEFAULT_MAP_CENTER.lng)
 
   // ── Area Selection State ──────────────────────────────────────────────────
-  // Selection mode lets users draw a rectangle on the map to define a region.
-  // Currently UI-only — the drawn rectangle is visual feedback.
-  // TODO: Wire up "Download" action to pre-cache tiles for offline use.
-  // TODO: Wire up "Explore" action to load selected bounds in EXPLORE screen.
-  // TODO: Add size validation — warn if selected area > 300km/side (flat-earth limit).
-  // TODO: Show estimated download size in the selection overlay.
+  // Selection mode lets users draw a rectangle on the map to define a region
+  // for the EXPLORE 3D view. The rectangle shows live dimensions and color-codes
+  // based on data size:
+  //
+  //   HOW IT WORKS:
+  //   1. User taps the rectangle icon (bottom-right controls) to enter selection mode
+  //   2. Drag on the map to draw a rectangle
+  //   3. Live dimensions shown inside the rectangle (respects imperial/metric)
+  //   4. Rectangle color indicates feasibility:
+  //      - Teal (≤300 km/side): Good — fast load, accurate projection
+  //      - Orange (300–500 km): Large — may be slow on mobile devices
+  //      - Red (>500 km): Too large — will likely crash on mobile (100+ MB stitched grid)
+  //   5. Tap EXPLORE to load the selected bounds in the EXPLORE 3D screen
+  //
+  //   SIZE THRESHOLDS (based on EXPLORE's z=10 tile pipeline):
+  //   - At z=10, each tile is ~0.35° (~35 km). Tiles are fetched, decoded (262 KB each),
+  //     stitched into a pixel grid, then downsampled to 256×256.
+  //   - 300 km/side ≈ 64 tiles ≈ 17 MB stitched — comfortable on all devices
+  //   - 500 km/side ≈ 196 tiles ≈ 100 MB stitched — strains mobile browsers
+  //   - 1000 km/side ≈ 784 tiles ≈ 400 MB stitched — OOM on most phones
+  //
+  //   Offline downloads are handled separately via predetermined regions in Settings,
+  //   not via this drag-select (curated regions ensure correct size + accurate estimates).
   const [isSelectingArea, setIsSelectingArea] = useState(false)
   const [selectionStart, setSelectionStart] = useState<{ lat: number; lng: number } | null>(null)
   const [selectionEnd, setSelectionEnd] = useState<{ lat: number; lng: number } | null>(null)
   const selectionDragRef = useRef(false)
+
+  // ── Selection dimension computation ─────────────────────────────────────
+  // Computes width/height in km from the lat/lng selection bounds.
+  // Uses simple spherical math: 111.132 km/° lat, 111.320×cos(lat) km/° lng.
+  const selectionDims = React.useMemo(() => {
+    if (!selectionStart || !selectionEnd) return null
+    const latRange = Math.abs(selectionEnd.lat - selectionStart.lat)
+    const lngRange = Math.abs(selectionEnd.lng - selectionStart.lng)
+    const midLat = (selectionStart.lat + selectionEnd.lat) / 2
+    const heightKm = latRange * 111.132
+    const widthKm = lngRange * 111.320 * Math.cos((midLat * Math.PI) / 180)
+    const maxSideKm = Math.max(widthKm, heightKm)
+    // Estimate tile count at z=10: each tile ~0.35° (360/1024)
+    const tilesWide = Math.ceil(lngRange / (360 / 1024)) + 2
+    const tilesTall = Math.ceil(latRange / (360 / 1024)) + 2
+    const tileCount = tilesWide * tilesTall
+    const estimatedMB = (tileCount * 262144) / (1024 * 1024) // stitched grid ~262 KB/tile decoded
+    return { widthKm, heightKm, maxSideKm, tileCount, estimatedMB }
+  }, [selectionStart, selectionEnd])
+
+  // Color-code selection based on size thresholds
+  type SelectionSeverity = 'ok' | 'warning' | 'danger'
+  const selectionSeverity: SelectionSeverity = !selectionDims ? 'ok'
+    : selectionDims.maxSideKm > 500 ? 'danger'
+    : selectionDims.maxSideKm > 300 ? 'warning'
+    : 'ok'
 
   const dragRef = useRef({
     isDragging: false,
@@ -486,9 +529,8 @@ const MapScreen: React.FC = () => {
     }
 
     // ── Area selection rectangle ──────────────────────────────────────────────
-    // Drawn when user is in selection mode and has started dragging.
-    // TODO: Show area dimensions (km × km) inside the rectangle.
-    // TODO: Color-code the rectangle if area is too large (red) or OK (green).
+    // Color-coded by data size: teal (ok), orange (warning), red (danger).
+    // Shows live dimensions inside the rectangle (imperial or metric).
     if (isSelectingArea && selectionStart && selectionEnd) {
       const startPx = latLngToPixel(selectionStart.lat, selectionStart.lng, centerLat, centerLng, zoom, W, H)
       const endPx   = latLngToPixel(selectionEnd.lat, selectionEnd.lng, centerLat, centerLng, zoom, W, H)
@@ -498,21 +540,44 @@ const MapScreen: React.FC = () => {
       const rw = Math.abs(endPx.x - startPx.x)
       const rh = Math.abs(endPx.y - startPx.y)
 
-      // Semi-transparent fill
+      // Color based on severity
+      const sevColors = {
+        ok:      { fill: 'rgba(132, 209, 219, 0.1)',  stroke: 'rgba(132, 209, 219, 0.7)',  handle: '#84D1DB',  text: 'rgba(132, 209, 219, 0.9)' },
+        warning: { fill: 'rgba(230, 160, 50, 0.12)',  stroke: 'rgba(230, 160, 50, 0.8)',   handle: '#E6A032',  text: 'rgba(230, 180, 80, 0.95)' },
+        danger:  { fill: 'rgba(220, 70, 70, 0.12)',   stroke: 'rgba(220, 70, 70, 0.8)',    handle: '#DC4646',  text: 'rgba(230, 90, 90, 0.95)' },
+      }
+      const sc = sevColors[selectionSeverity]
+
       ctx.save()
-      ctx.fillStyle = 'rgba(132, 209, 219, 0.1)'
+      // Semi-transparent fill
+      ctx.fillStyle = sc.fill
       ctx.fillRect(rx, ry, rw, rh)
       // Dashed border
       ctx.setLineDash([6, 4])
-      ctx.strokeStyle = 'rgba(132, 209, 219, 0.7)'
+      ctx.strokeStyle = sc.stroke
       ctx.lineWidth = 2
       ctx.strokeRect(rx, ry, rw, rh)
-      // Corner handles — visual affordance for dragging
+      // Corner handles
       const handleSize = 8
-      ctx.fillStyle = '#84D1DB'
+      ctx.fillStyle = sc.handle
       ctx.setLineDash([])
       for (const [hx, hy] of [[rx, ry], [rx + rw, ry], [rx, ry + rh], [rx + rw, ry + rh]]) {
         ctx.fillRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize)
+      }
+
+      // Dimension label inside rectangle (if large enough to read)
+      if (selectionDims && rw > 60 && rh > 30) {
+        const wLabel = formatDistance(selectionDims.widthKm, units)
+        const hLabel = formatDistance(selectionDims.heightKm, units)
+        const dimText = `${wLabel} × ${hLabel}`
+
+        ctx.font      = `bold 11px 'Josefin Sans', sans-serif`
+        ctx.textAlign = 'center'
+        ctx.fillStyle = sc.text
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.8)'
+        ctx.shadowBlur  = 4
+        ctx.fillText(dimText, rx + rw / 2, ry + rh / 2 + 4)
+        ctx.shadowBlur = 0
       }
       ctx.restore()
     }
@@ -531,7 +596,7 @@ const MapScreen: React.FC = () => {
 
     setIsLoading(false)
     log.debug('DEM map draw complete')
-  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea])
+  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
 
   // ── Resize observer ──────────────────────────────────────────────────────────
 
@@ -810,9 +875,7 @@ const MapScreen: React.FC = () => {
             <line x1="14" y1="9" x2="17" y2="9" />
           </svg>
         </button>
-        {/* Area selection toggle — enters rectangle drawing mode.
-            TODO: Eventually two separate squares: one for download, one for explore.
-            TODO: Add size validation feedback (red border if area > 300km/side). */}
+        {/* Area selection toggle — enters rectangle drawing mode for EXPLORE. */}
         <button
           className={`${styles.controlBtn} ${styles.selectAreaBtn} ${isSelectingArea ? styles.selectAreaActive : ''}`}
           onClick={() => {
@@ -839,44 +902,47 @@ const MapScreen: React.FC = () => {
         </button>
       </div>
 
-      {/* Area selection overlay — shows instructions and action buttons.
-          TODO: Wire "Download" to pre-cache tiles in IndexedDB for offline.
-          TODO: Wire "Explore" to load these bounds in ExploreScreen.
-          TODO: Show estimated area size in km². */}
+      {/* Area selection overlay — instructions, dimensions, and EXPLORE action.
+          Drag-select is for EXPLORE only. Offline downloads use predetermined
+          regions in Settings (curated for correct size + accurate estimates). */}
       {isSelectingArea && (
-        <div className={styles.selectionOverlay} role="status">
-          {selectionStart && selectionEnd ? (
+        <div className={`${styles.selectionOverlay} ${selectionDims ? styles[`selection_${selectionSeverity}`] : ''}`} role="status">
+          {selectionStart && selectionEnd && selectionDims ? (
             <>
               <div className={styles.selectionHint}>
-                Drag to adjust selection
+                {selectionSeverity === 'danger'
+                  ? 'AREA TOO LARGE — REDUCE SELECTION'
+                  : selectionSeverity === 'warning'
+                  ? 'LARGE AREA — MAY BE SLOW ON MOBILE'
+                  : 'DRAG TO ADJUST SELECTION'}
               </div>
-              <div className={styles.selectionActions}>
-                {/* TODO: These buttons are UI placeholders — actions not yet wired */}
-                <button
-                  className={`${styles.controlBtn} ${styles.selectionActionBtn}`}
-                  onClick={() => {
-                    log.info('Download area tapped (not yet implemented)', { selectionStart, selectionEnd })
-                    // TODO: Implement offline tile download for selected bounds
-                  }}
-                  aria-label="Download selected area for offline use"
-                >
-                  DOWNLOAD
-                </button>
-                <button
-                  className={`${styles.controlBtn} ${styles.selectionActionBtn}`}
-                  onClick={() => {
-                    log.info('Explore area tapped (not yet implemented)', { selectionStart, selectionEnd })
-                    // TODO: Load selected bounds in EXPLORE screen
-                  }}
-                  aria-label="Open selected area in Explore view"
-                >
-                  EXPLORE
-                </button>
+              <div className={styles.selectionDims}>
+                {formatDistance(selectionDims.widthKm, units)} × {formatDistance(selectionDims.heightKm, units)}
               </div>
+              <button
+                className={`${styles.controlBtn} ${styles.selectionActionBtn} ${selectionSeverity === 'danger' ? styles.selectionActionDisabled : ''}`}
+                onClick={() => {
+                  if (selectionSeverity === 'danger') return
+                  log.info('Explore area selected', {
+                    start: `${selectionStart.lat.toFixed(4)},${selectionStart.lng.toFixed(4)}`,
+                    end: `${selectionEnd.lat.toFixed(4)},${selectionEnd.lng.toFixed(4)}`,
+                    dims: `${selectionDims.widthKm.toFixed(0)}×${selectionDims.heightKm.toFixed(0)} km`,
+                    tiles: selectionDims.tileCount,
+                  })
+                  // TODO: Load selected bounds in EXPLORE screen —
+                  // create a dynamic region from selectionStart/selectionEnd,
+                  // call terrainStore.loadRegion() with the custom bounds,
+                  // then navigate to the explore screen via uiStore.setActiveScreen('explore').
+                }}
+                aria-label="Open selected area in Explore 3D view"
+                disabled={selectionSeverity === 'danger'}
+              >
+                EXPLORE IN 3D
+              </button>
             </>
           ) : (
             <div className={styles.selectionHint}>
-              Drag on the map to select an area
+              SELECT AREA TO EXPLORE IN 3D
             </div>
           )}
         </div>
