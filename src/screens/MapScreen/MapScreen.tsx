@@ -260,7 +260,7 @@ function zoomToCameraZ(zoom: number): number {
 /** Convert sphere rotation (euler Y=lng, euler X=lat) to lat/lng facing camera */
 function sphereRotationToLatLng(rotX: number, rotY: number): { lat: number; lng: number } {
   let lat = rotX * (180 / Math.PI)
-  let lng = -rotY * (180 / Math.PI)
+  let lng = rotY * (180 / Math.PI)
   lat = clamp(lat, -85, 85)
   lng = ((lng + 180) % 360 + 360) % 360 - 180
   return { lat, lng }
@@ -269,11 +269,9 @@ function sphereRotationToLatLng(rotX: number, rotY: number): { lat: number; lng:
 /** Convert lat/lng to sphere rotation euler angles */
 function latLngToSphereRotation(lat: number, lng: number): { rotX: number; rotY: number } {
   // Positive rotX tilts north toward camera (matches 1-mercV UV convention)
-  // Negate lng: camera at +Z sees u=0.5 (prime meridian). To show western
-  // longitudes (negative lng), rotate sphere clockwise (negative rotY).
   return {
     rotX: lat * (Math.PI / 180),
-    rotY: -lng * (Math.PI / 180),
+    rotY: lng * (Math.PI / 180),
   }
 }
 
@@ -1152,9 +1150,7 @@ const MapScreen: React.FC = () => {
     const dx = deltaX * rotScale
     const dy = deltaY * rotScale
 
-    // Negate dx for Y rotation: rotY = -lng, so dragging right (positive dx)
-    // should decrease rotY to increase longitude (move east)
-    threeRef.current.earth.rotation.y -= dx
+    threeRef.current.earth.rotation.y += dx
     threeRef.current.earth.rotation.x += dy
     threeRef.current.earth.rotation.x = clamp(
       threeRef.current.earth.rotation.x,
@@ -1162,7 +1158,7 @@ const MapScreen: React.FC = () => {
       Math.PI / 2 - 0.05,
     )
 
-    gd.velocityX = -dx
+    gd.velocityX = dx
     gd.velocityY = dy
 
     // Sync centerLat/centerLng from globe rotation (single source of truth)
