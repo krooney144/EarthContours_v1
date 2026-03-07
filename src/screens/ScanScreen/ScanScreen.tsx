@@ -926,6 +926,167 @@ function renderContours(
   }
 }
 
+// ─── Peak Ridgeline Profiles ──────────────────────────────────────────────────
+//
+// For each visible peak, draw the actual terrain ridgeline profile in a wedge-
+// shaped arc centered on the peak's bearing.  The arc spans ±5° for far peaks,
+// expanding to ±8–10° for peaks closer than 10 km.  Each point is colored by
+// its elevation through the standard RIDGE_PALETTE.  Alpha fades smoothly to
+// transparent at the arc edges for a natural appearance.
+
+/** Angular half-width of the peak ridgeline arc (degrees). */
+const PEAK_ARC_HALF_FAR  = 5    // ±5° for peaks ≥ 10 km
+const PEAK_ARC_HALF_NEAR = 10   // ±10° for peaks < 10 km (linearly interpolated)
+const PEAK_ARC_NEAR_DIST = 10_000  // Distance (m) below which arc widens
+
+/** Bearing step size for sampling the ridgeline within the arc (degrees). */
+const PEAK_ARC_STEP = 0.25
+
+function renderPeakRidgelines(
+  ctx: CanvasRenderingContext2D,
+  skyline: SkylineData,
+  projected: ProjectedBands | null,
+  peakPositions: PeakScreenPos[],
+  cam: CameraParams,
+): void {
+  const { W, H } = cam
+  const numBands = skyline.bands.length
+
+  // Global elevation range for color normalization (same as renderTerrain)
+  let globalElevMin = Infinity
+  let globalElevMax = -Infinity
+  for (let bi = 0; bi < numBands; bi++) {
+    const elev = skyline.bands[bi].elevations
+    for (let i = 0; i < elev.length; i++) {
+      if (elev[i] === -Infinity) continue
+      if (elev[i] < globalElevMin) globalElevMin = elev[i]
+      if (elev[i] > globalElevMax) globalElevMax = elev[i]
+    }
+  }
+  const elevRange = globalElevMax - globalElevMin
+  const hasElevRange = elevRange > 1
+
+  ctx.save()
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  for (const pos of peakPositions) {
+    const peakBearing = pos.bearing
+    const peakDist_m  = pos.dist_km * 1000
+
+    // Determine arc half-width: wider for nearby peaks, narrower for far
+    const distT = Math.max(0, Math.min(1, peakDist_m / PEAK_ARC_NEAR_DIST))
+    const arcHalf = PEAK_ARC_HALF_NEAR + distT * (PEAK_ARC_HALF_FAR - PEAK_ARC_HALF_NEAR)
+
+    // Determine which band(s) are relevant for this peak's distance.
+    // Find the band whose distance range contains the peak, and also draw
+    // adjacent bands for context (the peak ridgeline shows all bands in the arc).
+    // We draw all bands in painter's order (far→near) within the arc.
+
+    // Two passes: first a wider glow, then a crisp inner line
+    for (let pass = 0; pass < 2; pass++) {
+      const baseLineWidth = pass === 0 ? 5 : 2
+      const baseAlpha     = pass === 0 ? 0.3 : 0.7
+
+      // Draw each band's ridgeline within the arc (far→near painter's order)
+      for (let bi = numBands - 1; bi >= 0; bi--) {
+        // Band depth cue: near bands are brighter/thicker
+        const bandT = numBands <= 1 ? 1 : 1 - bi / (numBands - 1)
+        const bandAlpha = baseAlpha * (0.3 + bandT * 0.7)
+        const lineWidth = baseLineWidth * (0.5 + bandT * 0.5)
+
+        ctx.lineWidth = lineWidth
+
+        // Walk through the arc in small bearing steps, batching ~6 steps
+        // per draw call for performance.  Color/alpha update at batch boundaries.
+        const totalSteps = Math.ceil(arcHalf * 2 / PEAK_ARC_STEP)
+        const BATCH_SIZE = 6
+        let segCount = 0
+        let pathStarted = false
+
+        for (let s = 0; s <= totalSteps; s++) {
+          const bearingOffset = -arcHalf + (s / (totalSteps || 1)) * arcHalf * 2
+          const bearing = peakBearing + bearingOffset
+
+          const angle = bandAngleAt(skyline, bi, bearing, projected)
+          if (angle <= -Math.PI / 2 + 0.001) {
+            if (pathStarted) ctx.stroke()
+            pathStarted = false
+            segCount = 0
+            continue
+          }
+
+          const { x, y } = project(bearing, angle, cam)
+          if (x < -50 || x > W + 50 || y < 0 || y > H) {
+            if (pathStarted) ctx.stroke()
+            pathStarted = false
+            segCount = 0
+            continue
+          }
+
+          // Edge fade: alpha falls off smoothly toward arc edges (cosine curve)
+          const edgeT = Math.abs(bearingOffset) / arcHalf  // 0 at center, 1 at edge
+          const edgeFade = Math.cos(edgeT * Math.PI * 0.5) // 1 at center, 0 at edge
+          const alpha = bandAlpha * edgeFade
+          if (alpha < 0.01) {
+            if (pathStarted) ctx.stroke()
+            pathStarted = false
+            segCount = 0
+            continue
+          }
+
+          if (!pathStarted) {
+            // Start new path — compute color at this bearing
+            const elev = bandElevAt(skyline, bi, bearing)
+            const tElev = hasElevRange && elev > -Infinity
+              ? (elev - globalElevMin) / elevRange : 0.5
+            const color = elevToRidgeColor(tElev)
+            const rgbMatch = color.match(/\d+/g)
+            if (!rgbMatch) continue
+            const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+            const cr = pass === 0 ? r : Math.round(r + (255 - r) * 0.35)
+            const cg = pass === 0 ? g : Math.round(g + (255 - g) * 0.35)
+            const cb = pass === 0 ? b : Math.round(b + (255 - b) * 0.35)
+
+            ctx.beginPath()
+            ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
+            ctx.moveTo(x, y)
+            pathStarted = true
+            segCount = 0
+          } else if (segCount >= BATCH_SIZE) {
+            // Flush batch — overlap by 1px (lineTo then new moveTo at same point)
+            ctx.lineTo(x, y)
+            ctx.stroke()
+
+            const elev = bandElevAt(skyline, bi, bearing)
+            const tElev = hasElevRange && elev > -Infinity
+              ? (elev - globalElevMin) / elevRange : 0.5
+            const color = elevToRidgeColor(tElev)
+            const rgbMatch = color.match(/\d+/g)
+            if (!rgbMatch) { pathStarted = false; segCount = 0; continue }
+            const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+            const cr = pass === 0 ? r : Math.round(r + (255 - r) * 0.35)
+            const cg = pass === 0 ? g : Math.round(g + (255 - g) * 0.35)
+            const cb = pass === 0 ? b : Math.round(b + (255 - b) * 0.35)
+
+            ctx.beginPath()
+            ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
+            ctx.moveTo(x, y)
+            segCount = 0
+          } else {
+            ctx.lineTo(x, y)
+            segCount++
+          }
+        }
+
+        if (pathStarted) ctx.stroke()
+      }
+    }
+  }
+
+  ctx.restore()
+}
+
 // ─── Full Canvas Draw ─────────────────────────────────────────────────────────
 
 function drawScanCanvas(
@@ -1082,65 +1243,9 @@ function drawScanCanvas(
     })
   }
 
-  // ── 5. Peak ridge highlights — horizontal glow at peak's true position ─────
-  if (showPeakLabels && peakPositions.length > 0) {
-    // Compute global elevation range for color mapping
-    let hlElevMin = Infinity, hlElevMax = -Infinity
-    if (skylineData) {
-      for (let bi = 0; bi < skylineData.bands.length; bi++) {
-        const elev = skylineData.bands[bi].elevations
-        for (let i = 0; i < elev.length; i++) {
-          if (elev[i] === -Infinity) continue
-          if (elev[i] < hlElevMin) hlElevMin = elev[i]
-          if (elev[i] > hlElevMax) hlElevMax = elev[i]
-        }
-      }
-    }
-    const hlElevRange = hlElevMax - hlElevMin
-    const hlHasRange = hlElevRange > 1
-
-    ctx.save()
-    ctx.lineCap = 'round'
-
-    // Highlight half-width in pixels — scales with canvas width
-    const HIGHLIGHT_HALF_W = Math.max(30, W * 0.04)
-
-    for (const pos of peakPositions) {
-      // Elevation-based color
-      const peakTElev = hlHasRange
-        ? Math.max(0, Math.min(1, (pos.elevation_m - hlElevMin) / hlElevRange))
-        : 0.5
-      const baseColor = elevToRidgeColor(peakTElev)
-      const rgbMatch = baseColor.match(/\d+/g)
-      if (!rgbMatch) continue
-      const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-      const br = Math.round(r + (255 - r) * 0.4)
-      const bg = Math.round(g + (255 - g) * 0.4)
-      const bb = Math.round(b + (255 - b) * 0.4)
-
-      const cx = pos.screenX
-      const cy = pos.screenY
-
-      // Outer glow — wide, faint
-      ctx.lineWidth = 6
-      ctx.globalAlpha = 0.25
-      ctx.strokeStyle = `rgba(${r},${g},${b},1)`
-      ctx.beginPath()
-      ctx.moveTo(cx - HIGHLIGHT_HALF_W, cy)
-      ctx.lineTo(cx + HIGHLIGHT_HALF_W, cy)
-      ctx.stroke()
-
-      // Inner bright — thin, vivid
-      ctx.lineWidth = 2
-      ctx.globalAlpha = 0.6
-      ctx.strokeStyle = `rgba(${br},${bg},${bb},1)`
-      ctx.beginPath()
-      ctx.moveTo(cx - HIGHLIGHT_HALF_W * 0.6, cy)
-      ctx.lineTo(cx + HIGHLIGHT_HALF_W * 0.6, cy)
-      ctx.stroke()
-    }
-
-    ctx.restore()
+  // ── 5. Peak ridgeline profiles — wedge-shaped terrain profiles around peaks ──
+  if (showPeakLabels && peakPositions.length > 0 && skylineData) {
+    renderPeakRidgelines(ctx, skylineData, projectedBands, peakPositions, cam)
   }
 
   log.debug('Scan canvas drawn', {
