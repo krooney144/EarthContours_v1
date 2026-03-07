@@ -276,14 +276,16 @@ export interface DepthBandConfig {
   resolution?: number
 }
 
-/** 6-band configuration: ultra-near through far, with scaled overlaps.
- *  Bands 0–2 are high-res (8 steps/°, 2880 azimuths).
- *  Bands 3–5 are standard-res (4 steps/°, 1440 azimuths). */
+/** 7-band configuration: immediate through far, with scaled overlaps.
+ *  Band 0 is immediate-res (2 steps/°, 720 azimuths).
+ *  Bands 1–3 are high-res (8 steps/°, 2880 azimuths).
+ *  Bands 4–6 are standard-res (4 steps/°, 1440 azimuths). */
 export const DEPTH_BANDS: DepthBandConfig[] = [
-  { label: 'ultra-near', minDist: 0,       maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az) — 0.5 km overlap into near
+  { label: 'immediate',  minDist: 0,       maxDist: 1_000,   resolution: 2 },  // 0–1 km     (0.5°, 720 az)    — 0.5 km overlap into ultra-near
+  { label: 'ultra-near', minDist: 500,     maxDist: 4_500,   resolution: 8 },  // 0.5–4.5 km (0.125°, 2880 az) — 0.5 km overlap into near
   { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },  // 4–10.5 km  (0.125°, 2880 az) — 0.5 km overlap into mid-near
   { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },  // 10–31 km   (0.125°, 2880 az) — 1 km overlap into mid
-  { label: 'mid',        minDist: 30_000,  maxDist: 81_000  },                  // 30–81 km   (0.25°, 1440 az)  — 1 km overlap into med-far
+  { label: 'mid',        minDist: 30_000,  maxDist: 81_000  },                  // 30–81 km   (0.25°, 1440 az)  — 1 km overlap into mid-far
   { label: 'mid-far',    minDist: 80_000,  maxDist: 152_000 },                  // 80–152 km  (0.25°, 1440 az)  — 2 km overlap into far
   { label: 'far',        minDist: 150_000, maxDist: 400_000 },                  // 150–400 km (0.25°, 1440 az)
 ]

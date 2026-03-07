@@ -1,5 +1,5 @@
 /**
- * EarthContours — SCAN Screen  (v2.2)
+ * EarthContours — SCAN Screen  (v2.3)
  *
  * First-person terrain panorama with depth-layered ridgeline rendering.
  *
@@ -11,8 +11,8 @@
  *    Ridgeline, peak dots, peak labels all call this ONE function.
  *
  *  Layer 2 — SCENE DATA (what exists in the world):
- *    Worker produces SkylineData with 6 depth bands
- *    (ultra-near/near/mid-near/mid/mid-far/far).
+ *    Worker produces SkylineData with 7 depth bands
+ *    (immediate/ultra-near/near/mid-near/mid/mid-far/far).
  *    Each band stores raw elevation + distance per azimuth.
  *    Main-thread reprojectBands() re-derives angles when AGL changes
  *    — no worker round-trip needed.
@@ -22,7 +22,8 @@
  *      - Far: thin lines (1px), low opacity (0.15), light fill
  *      - Mid: medium lines (2.5px), mid opacity (0.4), medium fill
  *      - Near: thick lines (4.5px), high opacity (0.8), dark fill
- *      - Ultra-near: thickest lines (5px), vivid opacity (0.9), deep fill
+ *      - Ultra-near: thick lines (5px), vivid opacity (0.9), deep fill
+ *      - Immediate: thickest lines (6px), highest opacity (0.95), deepest fill
  *    Adding bands = pushing to DEPTH_BANDS array; renderer auto-scales.
  *
  * ── Painter's order ─────────────────────────────────────────────────────────
@@ -137,9 +138,9 @@ function reprojectBands(
 // ─── Contour Strand Precomputation ────────────────────────────────────────────
 
 /** Contour interval in metres for each depth band index.
- *  Progressive density: ultra-near = 50ft, near = 100ft, mid-near = 200ft,
- *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
-const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
+ *  Progressive density: immediate = 20ft, ultra-near = 50ft, near = 100ft,
+ *  mid-near = 200ft, mid = 500ft, mid-far = 1000ft, far = 2000ft. */
+const CONTOUR_INTERVALS_M: number[] = [6.096, 15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
 
 /** A pre-built contour strand — world-space data ready for per-frame projection. */
 interface PrebuiltContourStrand {
@@ -198,14 +199,14 @@ function buildContourStrands(
         azCrossings.sort((a, b) => a.dist - b.dist)
 
         // Occlusion sweep: skip crossings hidden behind nearer terrain.
-        // For near bands (0–2), disable within-band occlusion — these bands span
-        // wide depth ranges (e.g. 0–4.5km) where a hillside at 200m would wrongly
-        // occlude all contours out to 4.5km. Painter's order rendering handles
-        // visual overlap correctly without data-level occlusion.
-        // For far bands (3+), within-band occlusion remains useful since crossings
-        // are at similar depths where true occlusion is meaningful.
+        // For near bands (0–3: immediate/ultra-near/near/mid-near), disable
+        // within-band occlusion — these bands span wide depth ranges where a
+        // hillside at close range would wrongly occlude all contours behind it.
+        // Painter's order rendering handles visual overlap correctly.
+        // For far bands (4+: mid/mid-far/far), within-band occlusion remains
+        // useful since crossings are at similar depths.
         let runningMaxAngle = -Math.PI / 2
-        const useOcclusion = bi >= 3  // Only occlude within mid/mid-far/far bands
+        const useOcclusion = bi >= 4  // Only occlude within mid/mid-far/far bands
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
@@ -226,9 +227,9 @@ function buildContourStrands(
           // Match to closest strand by distance proximity
           // Per-band tolerance: tight for close bands (prevents jumpy connections),
           // looser for far bands where large gaps are natural
-          const maxDistDiff = bi <= 1
-            ? Math.max(10, c.dist * 0.02)   // ultra-near + near: 2%, floor 10m
-            : bi === 2
+          const maxDistDiff = bi <= 2
+            ? Math.max(10, c.dist * 0.02)   // immediate + ultra-near + near: 2%, floor 10m
+            : bi === 3
             ? Math.max(50, c.dist * 0.03)   // mid-near: 3%, floor 50m
             : Math.max(200, c.dist * 0.05)  // mid/mid-far/far: 5%, floor 200m (original)
           let bestIdx = -1
@@ -664,6 +665,7 @@ function bandGpsAt(
  *  Near terrain has tight radius (ridge points are close together),
  *  far terrain needs wider radius (ridge points are spread far apart). */
 const BAND_GPS_RADIUS: number[] = [
+  200,     // immediate:  0.2 km
   500,     // ultra-near: 0.5 km
   2_000,   // near:       2 km
   5_000,   // mid-near:   5 km
@@ -715,10 +717,12 @@ interface BandStyle {
 }
 
 /** Per-band line widths: edges match at boundaries so adjacent bands are seamless.
- *  ultra-near 5→4.5, near 4.5→3.5, mid-near 3.5→3, mid 3→2.5, mid-far 2.5→2, far 2→1.
+ *  immediate 6→5, ultra-near 5→4.5, near 4.5→3.5, mid-near 3.5→3,
+ *  mid 3→2.5, mid-far 2.5→2, far 2→1.
  *  Thinner lines let elevation color and terrain shape show through. */
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [5, 4.5],  // ultra-near: 5px at 0km → 4.5px at 4.5km
+  [6, 5],    // immediate:  6px at 0km → 5px at 1km
+  [5, 4.5],  // ultra-near: 5px at 0.5km → 4.5px at 4.5km
   [4.5, 3.5],// near:       4.5px at 4km → 3.5px at 10.5km
   [3.5, 3],  // mid-near:   3.5px at 10km → 3px at 31km
   [3, 2.5],  // mid:        3px at 30km → 2.5px at 81km
@@ -777,7 +781,7 @@ function renderTerrain(
 
   // Per-band segment size: near bands update color/width frequently,
   // far bands use long segments to avoid dotty appearance from stroke gaps
-  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48]  // ultra-near → far
+  const SEGMENT_SIZES = [2, 3, 4, 6, 12, 24, 48]  // immediate → far
 
   // Draw bands far→near (painter's order: far gets painted first, near overlaps)
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
@@ -1885,7 +1889,7 @@ const ScanScreen: React.FC = () => {
 
               return (
                 <>
-                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.2 DEBUG — 6-Band Near-Field</div>
+                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.3 DEBUG — 7-Band Immediate</div>
 
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>CAMERA</div>
                   <div>hdg:{heading_deg.toFixed(1)}° pit:{pitch_deg.toFixed(1)}° fov:{fov.toFixed(0)}°</div>
