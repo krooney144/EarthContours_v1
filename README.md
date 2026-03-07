@@ -2,7 +2,7 @@
 
 **Terrain visualization web app** — explore US elevation data through AR, 3D orbit, and topographic map views.
 
-![Version](https://img.shields.io/badge/version-2.0-blue) ![Status](https://img.shields.io/badge/status-active-green)
+![Version](https://img.shields.io/badge/version-2.2-blue) ![Status](https://img.shields.io/badge/status-active-green)
 
 ---
 
@@ -12,7 +12,7 @@ EarthContours renders geographic elevation data across the United States in thre
 
 | Screen | Description |
 |--------|-------------|
-| **SCAN** | AR first-person panorama — depth-layered ridgeline renderer (near/mid/far bands), single `project()` camera function, AGL re-projection without worker round-trip, 250 km range, ocean-depth palette |
+| **SCAN** | AR first-person panorama — 6-band depth-layered ridgeline renderer (ultra-near/near/mid-near/mid/mid-far/far), single `project()` camera function, AGL re-projection without worker round-trip, 400 km range, progressive contour intervals (50ft→2000ft), ocean-depth palette |
 | **EXPLORE** | 3D terrain explorer — free-roam pan/zoom/orbit, real peak label projection, location pin from MAP |
 | **MAP** | Dark topographic map — Carto Dark Matter tiles on Canvas, with peak/river overlays |
 | **SETTINGS** | User preferences — units, labels, performance, data resolution |
@@ -85,7 +85,7 @@ EarthContours_v1/
 │   │   ├── simulatedData.ts       # Real Colorado/Alaska/Cascades peak coords
 │   │   ├── simulatedTerrain.ts    # Procedural terrain generator (Tier 5 fallback)
 │   │   ├── elevationLoader.ts     # 4-tier elevation fallback loader
-│   │   ├── ScanTileCache.ts       # Multi-zoom tile cache (z8–z13) for SCAN 250km range
+│   │   ├── ScanTileCache.ts       # Multi-zoom tile cache (z8–z15) for SCAN 400km range
 │   │   └── peakLoader.ts          # OSM Overpass peak fetcher with 24h IndexedDB cache
 │   ├── workers/
 │   │   └── skylineWorker.ts       # Web Worker — 360° skyline precomputation (720 azimuths)
@@ -120,7 +120,7 @@ EarthContours_v1/
 **Active data source (as of Session 2):** AWS Terrarium tiles (Tier 4). Mount Elbert test region (39.1°N, 106.4°W) should show max elevation ~4400m (14,440 ft). Open the browser console and filter for `ELEVATION LOAD` or `TERRAIN SOURCE` to see which tier is active at runtime.
 
 **Rendering approaches per screen:**
-- SCAN (v2.0): **Depth-layered architecture** — Single `project()` camera function for all coordinate conversions. Worker produces depth-banded skyline (near 0–12km, mid 8–60km, far 50–300km) with raw elevation+distance per azimuth. `renderTerrain()` draws bands in painter's order (far→near) with depth cues: line weight 0.5→3px, opacity 0.15→0.8, progressive fill darkness. `reprojectBands()` re-derives angles when AGL changes — no worker round-trip. Debug panel shows camera state, re-projection validation, per-band health, peak funnel. Stale-while-revalidate; skip recompute < 1.5km. Peak labels max 8, ridgeline snap via `project()`. Pinch-zoom FOV 15°–100°. OSM Overpass worldwide peaks with 24h cache.
+- SCAN (v2.2): **6-band depth-layered architecture** — Single `project()` camera function for all coordinate conversions. Worker produces depth-banded skyline (ultra-near 0–4.5km, near 4–10.5km, mid-near 10–31km, mid 30–81km, mid-far 80–152km, far 150–400km) with raw elevation+distance per azimuth. Progressive contour intervals (50ft→2000ft). z15/z14 tile zoom for ultra-near, hybrid ray march (360-az 20–200m + 2880-az 200m–31km). `renderTerrain()` draws bands in painter's order (far→near) with depth cues: line weight 1→5px, opacity 0.15→0.9, progressive fill darkness. `reprojectBands()` re-derives angles when AGL changes — no worker round-trip. Debug panel shows camera state, re-projection validation, per-band health + contour intervals, peak funnel. Stale-while-revalidate; skip recompute < 1.5km. Peak labels max 8, ridgeline snap via `project()`. Pinch-zoom FOV 15°–100°. OSM Overpass worldwide peaks with 24h cache.
 - EXPLORE: Marching squares (extracts contour line segments at elevation thresholds). Free-roam navigation: left-drag/1-finger = pan, right-drag = rotate+tilt, scroll/pinch = zoom, double-click = fly-to. Peak labels use real `project3D()` projection from actual lat/lng. Pulsing gold location pin appears when MAP sets an explore point.
 - MAP: Canvas tile fetching with overlay graphics. Tap anywhere to set the explore location (synced to EXPLORE and SCAN via `locationStore`).
 
@@ -143,7 +143,8 @@ EarthContours_v1/
 | **v1.4 (done)** | SCAN performance overhaul: worker-only rendering (removed main-thread ray march + double tile fetch), canvas RAF gating + ResizeObserver-only resize, ridgeline peak visibility filter (max 15), peak dot snap to ridgeline Y, natural drag direction |
 | **v1.4.1 (done)** | SCAN bugfixes: DPR coordinate mismatch, stale-while-revalidate skyline, skip recompute < 1.5 km, peak label dedup |
 | **v2.0 (done)** | SCAN architectural overhaul: single `project()` camera, depth-banded skyline (near/mid/far), AGL re-projection, layered renderer with depth cues, comprehensive debug panel |
-| **v2.1** | Interior contour fragments (slope-driven linework, Phase 5) |
+| **v2.2 (done)** | Near-field enhancement: 6-band system (ultra-near/near/mid-near/mid/mid-far/far), progressive contour intervals (50ft→2000ft), z15/z14 tile zoom, hybrid ray march, scaled overlaps |
+| **v2.3** | Interior contour fragments (slope-driven linework, Phase 5) |
 | **3** | Real GPS, DeviceOrientation/magnetometer for true AR, Three.js WebGL renderer |
 | **Future** | Museum exhibit mode (7680×1080 triple ultra-wide) |
 

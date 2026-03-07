@@ -4,11 +4,13 @@
  * Provides elevation data at multiple zoom levels for the SCAN screen's
  * ray-height-field renderer. Zoom selection is based on ray distance:
  *
- *   dist < 5 km    → z13  (~19 m/px — fine foreground detail)
- *   5–20 km        → z11  (~76 m/px)
- *   20–80 km       → z10  (~152 m/px — region grid baseline)
- *   80–150 km      → z9   (~305 m/px)
- *   150–250 km     → z8   (~610 m/px — far panorama)
+ *   dist < 1 km    → z15  (~4.8 m/px — ultra-near 50ft contour detail)
+ *   1–4.5 km       → z14  (~9.5 m/px — ultra-near outer)
+ *   4.5–10.5 km    → z13  (~19 m/px — near foreground detail)
+ *   10.5–31 km     → z11  (~76 m/px — mid-near)
+ *   31–81 km       → z10  (~152 m/px — mid)
+ *   81–152 km      → z9   (~305 m/px — mid-far)
+ *   152–400 km     → z8   (~610 m/px — far panorama)
  *
  * Tiles are decoded from Terrarium RGB format to Float32Array on first load.
  * Failed fetches are silently ignored — the calling code falls back to the
@@ -32,12 +34,18 @@ const TILE_PX = 256
  * Higher zoom = more detail but more tiles to fetch.
  * We match zoom to distance so nearby terrain gets high-res data
  * and distant terrain uses coarser (but wider-coverage) tiles.
+ *
+ * z15 (~4.8 m/px) for ultra-near 0–1 km: 50ft contour precision
+ * z14 (~9.5 m/px) for ultra-near 1–4.5 km
+ * z13 (~19 m/px) for near 4.5–10.5 km
  */
 export function distanceToZoom(distM: number): number {
-  if (distM < 5_000)   return 13
-  if (distM < 20_000)  return 11
-  if (distM < 80_000)  return 10
-  if (distM < 150_000) return 9
+  if (distM < 1_000)   return 15
+  if (distM < 4_500)   return 14
+  if (distM < 10_500)  return 13
+  if (distM < 31_000)  return 11
+  if (distM < 81_000)  return 10
+  if (distM < 152_000) return 9
   return 8
 }
 
@@ -153,20 +161,24 @@ export class ScanTileCache {
   }
 
   /**
-   * Pre-fetch all zoom levels needed for a full 250 km panorama from `viewerLat/Lng`.
+   * Pre-fetch all zoom levels needed for a full 400 km panorama from `viewerLat/Lng`.
    * Runs all zoom levels in parallel. Call this when the viewer's location changes.
    *
    * Tile count estimate:
-   *   z13 (0–5 km):   ~4–9 tiles   — tiny download, critical for foreground ridgelines
-   *   z11 (5–20 km):  ~4–9 tiles   — sharp mid-range terrain
-   *   z8 (20–250 km): ~4–16 tiles  — wide-coverage far panorama
+   *   z15 (0–1 km):    ~4–9 tiles   — ultra-near detail for 50ft contours
+   *   z14 (1–4.5 km):  ~12–20 tiles — ultra-near outer
+   *   z13 (4.5–10 km): ~4–9 tiles   — near foreground ridgelines
+   *   z11 (10–31 km):  ~4–9 tiles   — mid-near terrain
+   *   z8 (31–400 km):  ~4–16 tiles  — wide-coverage far panorama
    */
   async prefetchForViewer(viewerLat: number, viewerLng: number): Promise<void> {
     log.info('Panorama tile prefetch starting', { viewerLat, viewerLng })
     await Promise.all([
-      this.prefetchArea(viewerLat, viewerLng,   5_000, 13),
-      this.prefetchArea(viewerLat, viewerLng,  20_000, 11),
-      this.prefetchArea(viewerLat, viewerLng, 250_000,  8),
+      this.prefetchArea(viewerLat, viewerLng,   1_000, 15),
+      this.prefetchArea(viewerLat, viewerLng,   4_500, 14),
+      this.prefetchArea(viewerLat, viewerLng,  10_500, 13),
+      this.prefetchArea(viewerLat, viewerLng,  31_000, 11),
+      this.prefetchArea(viewerLat, viewerLng, 400_000,  8),
     ])
     log.info('Panorama tile prefetch complete', { cachedTiles: this.elevGrids.size })
   }

@@ -1,5 +1,5 @@
 /**
- * EarthContours — SCAN Screen  (v2.0)
+ * EarthContours — SCAN Screen  (v2.2)
  *
  * First-person terrain panorama with depth-layered ridgeline rendering.
  *
@@ -11,16 +11,18 @@
  *    Ridgeline, peak dots, peak labels all call this ONE function.
  *
  *  Layer 2 — SCENE DATA (what exists in the world):
- *    Worker produces SkylineData with depth bands (near/mid/far).
+ *    Worker produces SkylineData with 6 depth bands
+ *    (ultra-near/near/mid-near/mid/mid-far/far).
  *    Each band stores raw elevation + distance per azimuth.
  *    Main-thread reprojectBands() re-derives angles when AGL changes
  *    — no worker round-trip needed.
  *
  *  Layer 3 — THE RENDERER (draws the scene in painter's order):
  *    renderTerrain() draws bands far→near with depth cues:
- *      - Far: thin lines (0.5px), low opacity (0.15), light fill
- *      - Mid: medium lines (1.5px), mid opacity (0.45), medium fill
- *      - Near: thick lines (3px), high opacity (0.8), dark fill
+ *      - Far: thin lines (1px), low opacity (0.15), light fill
+ *      - Mid: medium lines (2.5px), mid opacity (0.4), medium fill
+ *      - Near: thick lines (4.5px), high opacity (0.8), dark fill
+ *      - Ultra-near: thickest lines (5px), vivid opacity (0.9), deep fill
  *    Adding bands = pushing to DEPTH_BANDS array; renderer auto-scales.
  *
  * ── Painter's order ─────────────────────────────────────────────────────────
@@ -135,9 +137,9 @@ function reprojectBands(
 // ─── Contour Strand Precomputation ────────────────────────────────────────────
 
 /** Contour interval in metres for each depth band index.
- *  near/med-near = 200ft (60.96m), mid = 500ft (152.4m),
- *  med-far = 1000ft (304.8m), far = 2000ft (609.6m). */
-const CONTOUR_INTERVALS_M: number[] = [60.96, 60.96, 152.4, 304.8, 609.6]
+ *  Progressive density: ultra-near = 50ft, near = 100ft, mid-near = 200ft,
+ *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
+const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
 
 /** A pre-built contour strand — world-space data ready for per-frame projection. */
 interface PrebuiltContourStrand {
@@ -649,11 +651,12 @@ function bandGpsAt(
  *  Near terrain has tight radius (ridge points are close together),
  *  far terrain needs wider radius (ridge points are spread far apart). */
 const BAND_GPS_RADIUS: number[] = [
-  1_000,   // near:     1 km
-  5_000,   // med-near: 5 km
-  10_000,  // mid:      10 km
-  10_000,  // med-far:  10 km
-  15_000,  // far:      15 km
+  500,     // ultra-near: 0.5 km
+  2_000,   // near:       2 km
+  5_000,   // mid-near:   5 km
+  10_000,  // mid:        10 km
+  10_000,  // mid-far:    10 km
+  15_000,  // far:        15 km
 ]
 
 // ─── Elevation → Palette Color ────────────────────────────────────────────────
@@ -699,14 +702,15 @@ interface BandStyle {
 }
 
 /** Per-band line widths: edges match at boundaries so adjacent bands are seamless.
- *  near 4→3.5, med-near 3.5→3, mid 3→2.5, med-far 2.5→2, far 2→1.
+ *  ultra-near 5→4.5, near 4.5→3.5, mid-near 3.5→3, mid 3→2.5, mid-far 2.5→2, far 2→1.
  *  Thinner lines let elevation color and terrain shape show through. */
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [4, 3.5],  // near:     4px at 0km → 3.5px at 8km
-  [3.5, 3],  // med-near: 3.5px at 7km → 3px at 20km
-  [3, 2.5],  // mid:      3px at 19km → 2.5px at 50km
-  [2.5, 2],  // med-far:  2.5px at 48km → 2px at 120km
-  [2, 1],    // far:      2px at 115km → 1px at 400km
+  [5, 4.5],  // ultra-near: 5px at 0km → 4.5px at 4.5km
+  [4.5, 3.5],// near:       4.5px at 4km → 3.5px at 10.5km
+  [3.5, 3],  // mid-near:   3.5px at 10km → 3px at 31km
+  [3, 2.5],  // mid:        3px at 30km → 2.5px at 81km
+  [2.5, 2],  // mid-far:    2.5px at 80km → 2px at 152km
+  [2, 1],    // far:        2px at 150km → 1px at 400km
 ]
 
 function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
@@ -760,7 +764,7 @@ function renderTerrain(
 
   // Per-band segment size: near bands update color/width frequently,
   // far bands use long segments to avoid dotty appearance from stroke gaps
-  const SEGMENT_SIZES = [4, 6, 12, 24, 48]  // near → far
+  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48]  // ultra-near → far
 
   // Draw bands far→near (painter's order: far gets painted first, near overlaps)
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
@@ -903,7 +907,7 @@ function renderContours(
   const WIDTH_POWER = 0.2
 
   // Per-band opacity (near=vivid, far=faint)
-  const CONTOUR_OPACITIES = [0.55, 0.45, 0.35, 0.25, 0.15]
+  const CONTOUR_OPACITIES = [0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
 
   // Width change threshold: flush path when width differs by >20%
   const WIDTH_FLUSH_RATIO = 0.2
@@ -1860,7 +1864,7 @@ const ScanScreen: React.FC = () => {
 
               return (
                 <>
-                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.1 DEBUG — Layered + Interp</div>
+                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.2 DEBUG — 6-Band Near-Field</div>
 
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>CAMERA</div>
                   <div>hdg:{heading_deg.toFixed(1)}° pit:{pitch_deg.toFixed(1)}° fov:{fov.toFixed(0)}°</div>
@@ -1902,12 +1906,12 @@ const ScanScreen: React.FC = () => {
                       const bStyle = bandStyleForIndex(i, bandStats.length)
                       return (
                         <div key={bs.label} style={{ color: bandColor }}>
-                          {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel} lw:{bStyle.lineWidthNear.toFixed(0)}→{bStyle.lineWidthFar.toFixed(0)}px
+                          {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel} lw:{bStyle.lineWidthNear.toFixed(0)}→{bStyle.lineWidthFar.toFixed(0)}px c:{Math.round((CONTOUR_INTERVALS_M[i] || 0) / 0.3048)}ft
                           {bs.active > 0 && (
                             <>
                               {' '}∠{(bs.centerAngle * 180 / Math.PI).toFixed(2)}°
                               {' '}e:{bs.eMin.toFixed(0)}–{bs.eMax.toFixed(0)}m
-                              {' '}d:{(bs.dMin/1000).toFixed(0)}–{(bs.dMax/1000).toFixed(0)}km
+                              {' '}d:{(bs.dMin/1000).toFixed(1)}–{(bs.dMax/1000).toFixed(1)}km
                             </>
                           )}
                         </div>

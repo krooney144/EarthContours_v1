@@ -261,8 +261,9 @@ export interface ContourLine {
  * Each band stores per-azimuth raw elevation + distance so the main thread can
  * re-project angles when AGL changes without a worker round-trip.
  *
- * Band overlap (near extends to 12 km, mid starts at 8 km) prevents seams at
- * boundaries where a ridge straddles the cutoff.
+ * Overlaps are scaled by distance (0.5 km close, 1 km mid, 2 km far) to prevent
+ * seams at boundaries where a ridge straddles the cutoff.  Painter's order
+ * (far drawn first, near on top) handles the visual overlap.
  */
 export interface DepthBandConfig {
   /** Unique label for debugging */
@@ -275,13 +276,16 @@ export interface DepthBandConfig {
   resolution?: number
 }
 
-/** 5-band configuration with high-res near bands and tightened overlaps. */
+/** 6-band configuration: ultra-near through far, with scaled overlaps.
+ *  Bands 0–2 are high-res (8 steps/°, 2880 azimuths).
+ *  Bands 3–5 are standard-res (4 steps/°, 1440 azimuths). */
 export const DEPTH_BANDS: DepthBandConfig[] = [
-  { label: 'near',     minDist: 0,       maxDist: 8_000,   resolution: 8 },  // 0–8 km   (0.125°, 2880 az)
-  { label: 'med-near', minDist: 7_000,   maxDist: 20_000,  resolution: 8 },  // 7–20 km  (0.125°, 2880 az)
-  { label: 'mid',      minDist: 19_000,  maxDist: 50_000  },                  // 19–50 km (0.25°, 1440 az)
-  { label: 'med-far',  minDist: 48_000,  maxDist: 120_000 },                  // 48–120 km
-  { label: 'far',      minDist: 115_000, maxDist: 400_000 },                  // 115–400 km
+  { label: 'ultra-near', minDist: 0,       maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az) — 0.5 km overlap into near
+  { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },  // 4–10.5 km  (0.125°, 2880 az) — 0.5 km overlap into mid-near
+  { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },  // 10–31 km   (0.125°, 2880 az) — 1 km overlap into mid
+  { label: 'mid',        minDist: 30_000,  maxDist: 81_000  },                  // 30–81 km   (0.25°, 1440 az)  — 1 km overlap into med-far
+  { label: 'mid-far',    minDist: 80_000,  maxDist: 152_000 },                  // 80–152 km  (0.25°, 1440 az)  — 2 km overlap into far
+  { label: 'far',        minDist: 150_000, maxDist: 400_000 },                  // 150–400 km (0.25°, 1440 az)
 ]
 
 /**
