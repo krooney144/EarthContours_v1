@@ -299,6 +299,34 @@
   margin-top: var(--space-3);
 }
 
+/* Success message after feedback is submitted — shows link to GitHub issue */
+.feedbackSuccess {
+  margin-top: var(--space-3);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: #4CAF8F;
+  letter-spacing: 0.04em;
+}
+
+.feedbackLink {
+  color: var(--ec-glow);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.feedbackLink:hover {
+  color: var(--ec-foam);
+}
+
+/* Error message when feedback submission fails */
+.feedbackErrorMsg {
+  margin-top: var(--space-3);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: #E64B4B;
+  letter-spacing: 0.04em;
+}
+
 /* ── Exaggeration buttons ───────────────────────────────────────────────────── */
 
 .exagOptions {
