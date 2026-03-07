@@ -228,14 +228,38 @@ function loadLabelTile(z: number, x: number, y: number): Promise<HTMLImageElemen
 // ─── Globe Constants ──────────────────────────────────────────────────────────
 
 /** Zoom thresholds for globe / flat map crossfade */
-const GLOBE_FULL_ZOOM = 4    // Globe fully visible at zoom <= 4
-const GLOBE_GONE_ZOOM = 7    // Globe fully hidden at zoom >= 7
+const GLOBE_FULL_ZOOM = 5      // Globe fully visible at zoom <= 5
+const GLOBE_GONE_ZOOM = 6.5    // Globe fully hidden at zoom >= 6.5
 
-/** Compute globe opacity from current zoom: 1 at <=4, 0 at >=7, linear between */
+/** Compute globe opacity from current zoom with ease-in-out curve.
+ *  1.0 at zoom <= 5, 0.0 at zoom >= 6.5, smooth cosine blend between.
+ *  Cosine easing starts/ends slowly and accelerates through the middle —
+ *  feels more natural than a linear ramp during crossfade. */
 function globeOpacity(zoom: number): number {
   if (zoom <= GLOBE_FULL_ZOOM) return 1
   if (zoom >= GLOBE_GONE_ZOOM) return 0
-  return 1 - (zoom - GLOBE_FULL_ZOOM) / (GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM)
+  const t = (zoom - GLOBE_FULL_ZOOM) / (GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM)
+  return 0.5 + 0.5 * Math.cos(Math.PI * t)
+}
+
+/** Compute the flat-map zoom level that matches the globe's visible scale.
+ *  This ensures the flat map renders at the same geographic extent as the globe
+ *  during the crossfade, so features align pixel-perfectly at screen center.
+ *
+ *  Derivation: On a unit sphere at camera distance d with FOV θ, the globe
+ *  subtends ~2*atan(1/d) radians of arc. A Mercator flat map at zoom z shows
+ *  360 / 2^z degrees across TILE_SIZE pixels. We match degrees-per-pixel. */
+function globeEquivFlatZoom(camZ: number, viewHeight: number): number {
+  const fovRad = 45 * Math.PI / 180
+  const halfFovTan = Math.tan(fovRad / 2)
+  // Globe: visible degrees across screen ≈ 2 * asin(min(1, 1/camZ)) * (180/π)
+  // But for scale matching we want deg/px: (visible arc in degrees) / viewHeight
+  const visibleArcRad = camZ > 1 ? 2 * Math.asin(1 / camZ) : Math.PI
+  const globeDegPerPx = (visibleArcRad * (180 / Math.PI)) / viewHeight
+  // Flat map: degPerPx = 360 / (TILE_SIZE * 2^z)
+  // Solve: 2^z = 360 / (TILE_SIZE * globeDegPerPx)
+  const equivZoom = Math.log2(360 / (TILE_SIZE * globeDegPerPx))
+  return equivZoom
 }
 
 /** Map zoom level to camera Z distance from globe center.
@@ -493,7 +517,7 @@ const MapScreen: React.FC = () => {
     atmosphere: THREE.Mesh
     stars: THREE.Points
     earthMaterial: THREE.MeshBasicMaterial
-    locationMarker: THREE.Mesh
+    locationMarker: THREE.Sprite
     animFrameId: number
     needsRender: boolean
   } | null>(null)
@@ -632,12 +656,17 @@ const MapScreen: React.FC = () => {
 
     // Use integer zoom for tile operations — tiles are only available at integer levels.
     // Fractional zoom is used for smooth slider/pinch feel; tiles snap to the nearest int.
-    // During globe→flat transition (zoom 5-7), cap tile zoom to avoid loading dozens of
-    // high-detail tiles while the flat map is still mostly transparent. z4 tiles are already
-    // cached from the globe texture build and cover the whole screen cheaply.
-    const rawTileZoom = Math.round(zoom)
+    // During globe→flat transition, render the flat map at the globe's equivalent zoom
+    // so both views show the same geographic extent — features align during crossfade.
     const gOp = globeOpacity(zoom)
-    const tileZoom = gOp > 0 ? Math.min(rawTileZoom, 4) : rawTileZoom
+    let effectiveZoom = zoom
+    if (gOp > 0 && gOp < 1) {
+      const camZ = zoomToCameraZ(zoom)
+      const equivZ = globeEquivFlatZoom(camZ, H)
+      // Blend from globe-equivalent zoom toward the actual zoom as globe fades
+      effectiveZoom = equivZ + (1 - gOp) * (zoom - equivZ)
+    }
+    const tileZoom = Math.max(2, Math.round(effectiveZoom))
 
     log.debug('Drawing DEM map', { W, H, zoom, tileZoom, center: `${centerLat.toFixed(4)},${centerLng.toFixed(4)}` })
 
@@ -975,11 +1004,42 @@ const MapScreen: React.FC = () => {
     earth.rotation.y = initRot.rotY
     scene.add(earth)
 
-    // Location marker — small teal sphere on the globe surface, child of earth so it rotates with it
-    const markerGeo = new THREE.SphereGeometry(0.02, 12, 12)
-    const markerMat = new THREE.MeshBasicMaterial({ color: 0x84D1DB, transparent: true, depthTest: false })
-    const locationMarker = new THREE.Mesh(markerGeo, markerMat)
-    locationMarker.renderOrder = 999  // always on top
+    // Location marker — sprite with canvas-rendered texture matching the flat map dot.
+    // 3-layer design: outer halo, ring, inner dot with glow — consistent across views.
+    const markerCanvas = document.createElement('canvas')
+    markerCanvas.width = 64
+    markerCanvas.height = 64
+    const mCtx = markerCanvas.getContext('2d')!
+    const mc = 32 // center
+    // Outer halo
+    mCtx.beginPath()
+    mCtx.arc(mc, mc, 28, 0, Math.PI * 2)
+    mCtx.fillStyle = 'rgba(132, 209, 219, 0.15)'
+    mCtx.fill()
+    // Ring
+    mCtx.beginPath()
+    mCtx.arc(mc, mc, 20, 0, Math.PI * 2)
+    mCtx.strokeStyle = 'rgba(132, 209, 219, 0.5)'
+    mCtx.lineWidth = 2
+    mCtx.stroke()
+    // Inner dot with glow
+    mCtx.beginPath()
+    mCtx.arc(mc, mc, 10, 0, Math.PI * 2)
+    mCtx.fillStyle = '#84D1DB'
+    mCtx.shadowColor = '#84D1DB'
+    mCtx.shadowBlur = 12
+    mCtx.fill()
+    mCtx.shadowBlur = 0
+    const markerTex = new THREE.CanvasTexture(markerCanvas)
+    const markerSpriteMat = new THREE.SpriteMaterial({
+      map: markerTex,
+      transparent: true,
+      depthTest: false,
+      sizeAttenuation: true,
+    })
+    const locationMarker = new THREE.Sprite(markerSpriteMat)
+    locationMarker.scale.set(0.06, 0.06, 1)
+    locationMarker.renderOrder = 999
     locationMarker.visible = false
     earth.add(locationMarker)
 
@@ -1103,6 +1163,23 @@ const MapScreen: React.FC = () => {
         setGlobeTextureZoom(3)
         requestGlobeRenderRef.current()
         log.info('Globe z3 texture applied (upgrade)')
+
+        // Pre-cache z4 flat map tiles around center for smooth transition.
+        // z4 has 16×16 = 256 tiles total, but we only need the ~6 visible ones.
+        // These cache into demTileCache so the flat map draws instantly during crossfade.
+        const precacheZ = 4
+        const ct = latLngToTile(centerLat, centerLng, precacheZ)
+        const radius = 2
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            const tx = ((ct.x + dx) % (1 << precacheZ) + (1 << precacheZ)) % (1 << precacheZ)
+            const ty = ct.y + dy
+            if (ty >= 0 && ty < (1 << precacheZ)) {
+              loadDEMTile(precacheZ, tx, ty).catch(() => {})
+            }
+          }
+        }
+        log.info('Pre-cached z4 flat tiles for transition')
       })
     })
 
@@ -1112,6 +1189,9 @@ const MapScreen: React.FC = () => {
         cancelAnimationFrame(threeRef.current.animFrameId)
         threeRef.current.renderer.dispose()
         threeRef.current.earthMaterial.dispose()
+        const smMat = threeRef.current.locationMarker.material as THREE.SpriteMaterial
+        smMat.map?.dispose()
+        smMat.dispose()
         earthGeo.dispose()
         atmosGeo.dispose()
         atmosMat.dispose()
@@ -1130,37 +1210,67 @@ const MapScreen: React.FC = () => {
     requestGlobeRender()
   }, [zoom, requestGlobeRender])
 
-  // Sync globe rotation when centerLat/centerLng change from flat map interaction
+  // Sync globe rotation when centerLat/centerLng change from flat map interaction.
+  // Always sync — the globe should reflect centerLat/centerLng at every zoom level.
+  // The isDragging guard prevents feedback loops during active globe drag.
   useEffect(() => {
     const t = threeRef.current
     if (!t) return
-    // Only sync if user is NOT currently dragging the globe
     if (globeDragRef.current.isDragging) return
-    // Only sync when flat map is visible (zoom >= transition zone)
-    if (zoom < GLOBE_GONE_ZOOM) return
     const { rotX, rotY } = latLngToSphereRotation(centerLat, centerLng)
     t.earth.rotation.x = rotX
     t.earth.rotation.y = rotY
     requestGlobeRender()
   }, [centerLat, centerLng, zoom, requestGlobeRender])
 
-  // Sync location marker on globe when active location changes
+  // Sync location marker on globe when active location or mode changes.
+  // Updates position, color (blue=GPS, teal=exploring), and size (scales with zoom).
   useEffect(() => {
     const t = threeRef.current
     if (!t) return
-    // Position marker on the unrotated unit sphere (it's a child of earth, so rotation is handled)
-    // SphereGeometry: x = cos(lat)*cos(lng), y = sin(lat), z = -cos(lat)*sin(lng)
     const latRad = activeLat * (Math.PI / 180)
     const lngRad = activeLng * (Math.PI / 180)
-    const r = 1.015  // slightly above surface so it's always visible
+    const r = 1.015
     t.locationMarker.position.set(
       r * Math.cos(latRad) * Math.cos(lngRad),
       r * Math.sin(latRad),
       r * -Math.cos(latRad) * Math.sin(lngRad),
     )
+    // Scale inversely with camera distance so marker stays a consistent screen size
+    const camZ = zoomToCameraZ(zoom)
+    const s = 0.06 * (camZ / 3)
+    t.locationMarker.scale.set(s, s, 1)
+    // Redraw marker texture with the right color
+    const isGps = mode === 'gps'
+    const color = isGps ? '#4682E6' : '#84D1DB'
+    const colorAlpha = isGps ? 'rgba(70, 130, 230,' : 'rgba(132, 209, 219,'
+    const markerTex = t.locationMarker.material as THREE.SpriteMaterial
+    if (markerTex.map) {
+      const mc = 32
+      const mCanvas = markerTex.map.image as HTMLCanvasElement
+      const mCtx = mCanvas.getContext('2d')!
+      mCtx.clearRect(0, 0, 64, 64)
+      mCtx.beginPath()
+      mCtx.arc(mc, mc, 28, 0, Math.PI * 2)
+      mCtx.fillStyle = `${colorAlpha} 0.15)`
+      mCtx.fill()
+      mCtx.beginPath()
+      mCtx.arc(mc, mc, 20, 0, Math.PI * 2)
+      mCtx.strokeStyle = `${colorAlpha} 0.5)`
+      mCtx.lineWidth = 2
+      mCtx.stroke()
+      mCtx.beginPath()
+      mCtx.arc(mc, mc, 10, 0, Math.PI * 2)
+      mCtx.fillStyle = color
+      mCtx.shadowColor = color
+      mCtx.shadowBlur = 12
+      mCtx.fill()
+      mCtx.shadowBlur = 0
+      markerTex.map.needsUpdate = true
+    }
     t.locationMarker.visible = true
     requestGlobeRender()
-  }, [activeLat, activeLng, requestGlobeRender])
+  }, [activeLat, activeLng, zoom, mode, requestGlobeRender])
 
   // ── Globe Pointer Handlers ────────────────────────────────────────────────
 
@@ -1535,7 +1645,7 @@ const MapScreen: React.FC = () => {
       <canvas
         ref={globeCanvasRef}
         className={styles.globeCanvas}
-        style={{ opacity: gOpacity, pointerEvents: gOpacity > 0 ? 'auto' : 'none' }}
+        style={{ opacity: gOpacity, pointerEvents: gOpacity >= 0.5 ? 'auto' : 'none' }}
         onPointerDown={handleGlobePointerDown}
         onPointerMove={handleGlobePointerMove}
         onPointerUp={handleGlobePointerUp}
@@ -1551,7 +1661,7 @@ const MapScreen: React.FC = () => {
       <canvas
         ref={canvasRef}
         className={styles.mapCanvas}
-        style={{ opacity: fOpacity, pointerEvents: fOpacity > 0 ? 'auto' : 'none' }}
+        style={{ opacity: fOpacity, pointerEvents: gOpacity < 0.5 ? 'auto' : 'none' }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -1779,23 +1889,28 @@ const MapScreen: React.FC = () => {
 
       {/* Globe debug panel */}
       {showGlobeDebug && (() => {
-        const rawTileZ = Math.round(zoom)
-        const gOp = globeOpacity(zoom)
-        const effectiveTileZ = gOp > 0 ? Math.min(rawTileZ, 4) : rawTileZ
         const camZ = zoomToCameraZ(zoom)
+        const gOp = globeOpacity(zoom)
 
         // Globe scale: degrees per pixel at center of visible face
-        // On a unit sphere at distance d with FOV θ, deg/px = d * 2*tan(θ/2) / H * (180/π)
         const globeCanvas = globeCanvasRef.current
         const viewH = globeCanvas ? globeCanvas.clientHeight : 700
         const globeDegPerPx = camZ * 2 * Math.tan(22.5 * Math.PI / 180) / viewH * (180 / Math.PI)
 
+        // Globe equivalent flat zoom
+        const equivZ = globeEquivFlatZoom(camZ, viewH)
+        // Effective tile zoom during transition (blended)
+        let effectiveZ = zoom
+        if (gOp > 0 && gOp < 1) {
+          effectiveZ = equivZ + (1 - gOp) * (zoom - equivZ)
+        }
+        const effectiveTileZ = Math.max(2, Math.round(effectiveZ))
+
         // Flat map scale: degrees per pixel at tileZoom
         const flatDegPerPx = 360 / (TILE_SIZE * Math.pow(2, effectiveTileZ))
 
-        // Globe visible arc: how much of the sphere surface is visible
+        // Globe visible arc
         const visibleArcDeg = camZ > 1 ? 2 * Math.asin(1 / camZ) * (180 / Math.PI) : 180
-        // Does the globe fill the screen? (visible arc > FOV)
         const globeFillsScreen = visibleArcDeg > 45
 
         const scaleRatio = globeDegPerPx / flatDegPerPx
@@ -1804,15 +1919,14 @@ const MapScreen: React.FC = () => {
         <div className={styles.globeDebug} style={{ top: 78 }}>
           <strong>Globe Debug</strong><br />
           Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'}<br />
-          Zoom: {zoom.toFixed(2)} · Tile Z: {rawTileZ} {gOp > 0 && rawTileZ > 4 ? `→ capped z${effectiveTileZ}` : ''}<br />
-          Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
+          Zoom: {zoom.toFixed(2)} · Tile Z: {effectiveTileZ} {gOp > 0 && gOp < 1 ? `(equiv z${equivZ.toFixed(1)})` : ''}<br />
+          Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)} (cos ease)<br />
           Transition: ≤{GLOBE_FULL_ZOOM} globe → {GLOBE_FULL_ZOOM}–{GLOBE_GONE_ZOOM} crossfade → ≥{GLOBE_GONE_ZOOM} flat<br />
-          Camera Z: {camZ.toFixed(2)}<br />
-          <strong>── Flat Map Source ──</strong><br />
+          Camera Z: {camZ.toFixed(2)} · Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'}<br />
+          <strong>── Alignment ──</strong><br />
           Flat center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
-          <strong>Scale Matching</strong><br />
           Globe: {globeDegPerPx.toFixed(4)}°/px · Flat: {flatDegPerPx.toFixed(4)}°/px<br />
-          Ratio: {scaleRatio.toFixed(2)}× (1.0 = perfect match)<br />
+          Ratio: {scaleRatio.toFixed(2)}× (1.0 = match)<br />
           Globe arc: {visibleArcDeg.toFixed(0)}° of 45° FOV · {globeFillsScreen ? 'FILLS screen' : 'visible edge'}<br />
           <strong>Texture</strong><br />
           Globe tex: {globeTextureZoom !== null ? `z${globeTextureZoom}` : 'loading...'} · UV: Mercator (1−V)<br />
