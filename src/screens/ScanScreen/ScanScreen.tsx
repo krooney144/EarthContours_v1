@@ -1550,6 +1550,8 @@ const ScanScreen: React.FC = () => {
   const [skylineProgress, setSkylineProgress] = useState(0)
   // Refined arcs from second-pass peak refinement (separate from skylineData)
   const [refinedArcs, setRefinedArcs] = useState<RefinedArc[]>([])
+  // Refinement progress: null = not refining, string = status message
+  const [refineStatus, setRefineStatus] = useState<string | null>(null)
 
   // ── Active peak set: OSM peaks when available, fallback to hardcoded ────────
   const activePeaks: Peak[] = osmPeaks.length > 0 ? osmPeaks : peaks
@@ -1609,6 +1611,14 @@ const ScanScreen: React.FC = () => {
         setSkylineProgress(1)
         // Clear old refined arcs — new ones will arrive via 'refined-arcs' after peak refinement
         setRefinedArcs([])
+      } else if (type === 'refine-progress') {
+        // Progress from second-pass peak refinement
+        const { phase: rPhase, total, done } = e.data as { phase: string; total: number; done: number }
+        if (rPhase === 'tiles') {
+          setRefineStatus(`Fetching detail tiles for ${total} peaks…`)
+        } else {
+          setRefineStatus(`Refining peaks… ${done}/${total}`)
+        }
       } else if (type === 'refined-arcs') {
         // Second pass complete — worker sent back dense arc data for visible peaks
         const arcs = e.data.refinedArcs as RefinedArc[]
@@ -1617,6 +1627,7 @@ const ScanScreen: React.FC = () => {
           totalSamples: arcs.reduce((s: number, a: RefinedArc) => s + a.numSamples, 0),
         })
         setRefinedArcs(arcs)
+        setRefineStatus(null)
       }
     }
 
@@ -2059,6 +2070,19 @@ const ScanScreen: React.FC = () => {
             </div>
             <span className={styles.loadingLabel}>{loadingLabel}</span>
             <span className={styles.loadingLabel} style={{ marginTop: 4 }}>v1.0.4-MVP</span>
+          </div>
+        )}
+
+        {/* Refinement progress indicator — shown while second-pass peak refinement runs */}
+        {refineStatus && !isLoading && (
+          <div style={{
+            position: 'absolute', bottom: 70, left: '50%', transform: 'translateX(-50%)',
+            color: 'rgba(104, 176, 191, 0.85)', fontSize: 11, fontFamily: 'monospace',
+            background: 'rgba(0,0,0,0.5)', padding: '4px 12px',
+            borderRadius: 10, zIndex: 100, whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+          }}>
+            {refineStatus}
           </div>
         )}
 
