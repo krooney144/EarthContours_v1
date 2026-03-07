@@ -72,13 +72,13 @@ export const useLocationStore = create<LocationStore>()((set, get) => ({
    * We use watchPosition() instead of getCurrentPosition() so we get
    * continuous updates as the device moves.
    */
-  requestGPS: async () => {
+  requestGPS: () => {
     log.info('Requesting GPS permission...')
 
     if (!navigator.geolocation) {
       log.warn('Geolocation API not available on this device/browser')
       set({ gpsPermission: 'unavailable' })
-      return
+      return Promise.resolve()
     }
 
     // Stop any existing watch before starting a new one
@@ -88,66 +88,86 @@ export const useLocationStore = create<LocationStore>()((set, get) => ({
       navigator.geolocation.clearWatch(gpsWatchId)
     }
 
-    try {
-      const watchId = navigator.geolocation.watchPosition(
-        (position) => {
-          const { latitude, longitude, altitude, accuracy } = position.coords
-          log.info('GPS position update', {
-            lat: latitude.toFixed(5),
-            lng: longitude.toFixed(5),
-            accuracy: accuracy ? `${accuracy.toFixed(0)}m` : 'unknown',
-            altitude: altitude ? `${altitude.toFixed(0)}m` : 'unknown',
-          })
+    // Return a promise that resolves on the FIRST position fix (or error),
+    // so callers can await it and know GPS is ready.
+    return new Promise<void>((resolve) => {
+      let resolved = false
 
-          const newState: Partial<LocationStore> = {
-            gpsLat: latitude,
-            gpsLng: longitude,
-            gpsAltitude_m: altitude,
-            gpsAccuracy_m: accuracy,
-            gpsPermission: 'granted',
-          }
+      try {
+        const watchId = navigator.geolocation.watchPosition(
+          (position) => {
+            const { latitude, longitude, altitude, accuracy } = position.coords
+            log.info('GPS position update', {
+              lat: latitude.toFixed(5),
+              lng: longitude.toFixed(5),
+              accuracy: accuracy ? `${accuracy.toFixed(0)}m` : 'unknown',
+              altitude: altitude ? `${altitude.toFixed(0)}m` : 'unknown',
+            })
 
-          // Only update active location if in GPS mode (not exploring)
-          if (get().mode === 'gps') {
-            newState.activeLat = latitude
-            newState.activeLng = longitude
-          }
+            const newState: Partial<LocationStore> = {
+              gpsLat: latitude,
+              gpsLng: longitude,
+              gpsAltitude_m: altitude,
+              gpsAccuracy_m: accuracy,
+              gpsPermission: 'granted',
+            }
 
-          set(newState)
-        },
+            // Only update active location if in GPS mode (not exploring)
+            if (get().mode === 'gps') {
+              newState.activeLat = latitude
+              newState.activeLng = longitude
+            }
 
-        (error) => {
-          log.error('GPS position error', {
-            code: error.code,
-            message: error.message,
-          })
+            set(newState)
 
-          if (isPermissionDenied(error)) {
-            const permError = new LocationPermissionError()
-            log.warn('GPS permission denied — will use simulated position', permError)
-            set({ gpsPermission: 'denied', gpsWatchId: null })
-          } else {
-            const gpsError = new GPSError(error.message, { code: error.code })
-            log.warn('GPS error — will use simulated position', gpsError)
-            // Keep gpsPermission as 'granted' (the error might be temporary)
-          }
-        },
+            // Resolve on first fix so callers know GPS position is available
+            if (!resolved) {
+              resolved = true
+              resolve()
+            }
+          },
 
-        {
-          // High accuracy uses GPS chip (more battery) vs cell tower triangulation
-          enableHighAccuracy: true,
-          timeout: 15000,          // Wait up to 15s for a fix
-          maximumAge: 0,           // Always want a fresh position
-        },
-      )
+          (error) => {
+            log.error('GPS position error', {
+              code: error.code,
+              message: error.message,
+            })
 
-      log.info('GPS watch started', { watchId })
-      set({ gpsWatchId: watchId, gpsPermission: 'granted' })
+            if (isPermissionDenied(error)) {
+              const permError = new LocationPermissionError()
+              log.warn('GPS permission denied — will use simulated position', permError)
+              set({ gpsPermission: 'denied', gpsWatchId: null })
+            } else {
+              const gpsError = new GPSError(error.message, { code: error.code })
+              log.warn('GPS error — will use simulated position', gpsError)
+            }
 
-    } catch (err) {
-      log.error('Failed to start GPS watch', err)
-      set({ gpsPermission: 'unavailable' })
-    }
+            // Resolve even on error so callers don't hang forever
+            if (!resolved) {
+              resolved = true
+              resolve()
+            }
+          },
+
+          {
+            enableHighAccuracy: true,
+            timeout: 15000,
+            maximumAge: 0,
+          },
+        )
+
+        log.info('GPS watch started', { watchId })
+        set({ gpsWatchId: watchId })
+
+      } catch (err) {
+        log.error('Failed to start GPS watch', err)
+        set({ gpsPermission: 'unavailable' })
+        if (!resolved) {
+          resolved = true
+          resolve()
+        }
+      }
+    })
   },
 
   stopGPS: () => {
