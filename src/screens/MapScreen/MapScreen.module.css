@@ -32,6 +32,76 @@
   cursor: grabbing;
 }
 
+/* ── Globe (Three.js) Canvas ───────────────────────────────────────────────── */
+
+.globeCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  touch-action: none;
+  transition: opacity 600ms ease-in-out;
+}
+
+.mapCanvas {
+  z-index: 1;
+}
+
+/* ── Globe Debug Panel ─────────────────────────────────────────────────────── */
+
+.globeDebug {
+  position: absolute;
+  top: 44px;
+  left: var(--space-2);
+  background: rgba(0, 8, 16, 0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  z-index: var(--z-hud);
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  line-height: 1.5;
+  max-width: 220px;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.globeDebug strong {
+  color: var(--ec-foam);
+  font-family: var(--font-display);
+  letter-spacing: 0.08em;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.globeDebugToggle {
+  position: absolute;
+  top: 44px;
+  left: var(--space-2);
+  width: 28px;
+  height: 28px;
+  background: rgba(0, 8, 16, 0.8);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-sm);
+  color: var(--ec-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-hud);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.globeDebugToggle:hover {
+  border-color: var(--ec-border-active);
+  color: var(--ec-glow);
+}
+
 /* ── Location Banner ────────────────────────────────────────────────────────── */
 /* Shows the active viewpoint — either a tapped location (teal) or GPS (blue). */
 

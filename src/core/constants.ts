@@ -108,7 +108,7 @@ export const TOPO_TILE_SUBDOMAINS = MAP_TILE_SUBDOMAINS
 export const TILE_SIZE = 256
 
 /** Min and max zoom levels for the map */
-export const MAP_MIN_ZOOM = 4
+export const MAP_MIN_ZOOM = 1
 export const MAP_MAX_ZOOM = 16
 
 // ─── Terrain ──────────────────────────────────────────────────────────────────
