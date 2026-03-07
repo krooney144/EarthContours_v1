@@ -1045,7 +1045,15 @@ function renderPeakRidgelines(
     const distT = Math.max(0, Math.min(1, peakDist_m / PEAK_ARC_NEAR_DIST))
     const arcHalf = PEAK_ARC_HALF_NEAR + distT * (PEAK_ARC_HALF_FAR - PEAK_ARC_HALF_NEAR)
 
-    const lineWidth = 2.5
+    // Inherit band's distance-based line width + small boost so it stands out
+    const lw = BAND_LINE_WIDTHS[bestBand] ?? BAND_LINE_WIDTHS[BAND_LINE_WIDTHS.length - 1]
+    const bandCfg = DEPTH_BANDS[bestBand]
+    const lwMin = bandCfg?.minDist ?? 0
+    const lwMax = bandCfg?.maxDist ?? MAX_DIST
+    const lwRange = lwMax - lwMin
+    const lwT = lwRange > 0 ? Math.max(0, Math.min(1, (peakDist_m - lwMin) / lwRange)) : 0
+    const bandLineWidth = lw[0] + lwT * (lw[1] - lw[0])
+    const lineWidth = bandLineWidth + 1  // slight boost over band line
     const baseAlpha = 0.75
     ctx.lineWidth = lineWidth
 
@@ -1103,9 +1111,9 @@ function renderPeakRidgelines(
         const rgbMatch = color.match(/\d+/g)
         if (!rgbMatch) continue
         const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-        const cr = Math.round(r + (255 - r) * 0.35)
-        const cg = Math.round(g + (255 - g) * 0.35)
-        const cb = Math.round(b + (255 - b) * 0.35)
+        const cr = Math.round(r + (255 - r) * 0.15)
+        const cg = Math.round(g + (255 - g) * 0.15)
+        const cb = Math.round(b + (255 - b) * 0.15)
 
         ctx.beginPath()
         ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
@@ -1123,9 +1131,9 @@ function renderPeakRidgelines(
         const rgbMatch = color.match(/\d+/g)
         if (!rgbMatch) { pathStarted = false; segCount = 0; continue }
         const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-        const cr = Math.round(r + (255 - r) * 0.35)
-        const cg = Math.round(g + (255 - g) * 0.35)
-        const cb = Math.round(b + (255 - b) * 0.35)
+        const cr = Math.round(r + (255 - r) * 0.15)
+        const cg = Math.round(g + (255 - g) * 0.15)
+        const cb = Math.round(b + (255 - b) * 0.15)
 
         ctx.beginPath()
         ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
