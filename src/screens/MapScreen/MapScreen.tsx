@@ -973,7 +973,7 @@ const MapScreen: React.FC = () => {
       renderer, scene, camera, earth, atmosphere, stars,
       earthMaterial: earthMat as THREE.MeshBasicMaterial,
       animFrameId: 0,
-      needsRender: true,
+      needsRender: false,
     }
 
     // Resize handler for globe canvas
