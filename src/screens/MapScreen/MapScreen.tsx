@@ -240,22 +240,20 @@ function globeOpacity(zoom: number): number {
 
 /** Map zoom level to camera Z distance from globe center.
  *
- * Formula: z = 1.1 + 5.0 * 0.54^zoom
+ * Formula: z = 1.2 + 4.5 * 0.65^zoom
  *
- * Tuned so that globe deg/px ≈ flat-map deg/px at the crossfade midpoint (zoom ~5.5),
- * minimizing the visual scale jump during globe→flat transition.
- * Flat map uses z4 tiles (capped) during transition → 0.0879°/px.
- * Globe scale = camZ × 47.45 / viewH. At zoom 5.5, camZ ≈ 1.27 → ratio ≈ 1.1.
+ * Designed so the globe fills the viewport by the transition zone (zoom 4+),
+ * eliminating the visible circle-over-map artifact during crossfade.
  *
- *   Zoom 1: d≈3.8 → globe subtends ~30° of 45° FOV → full globe with space
- *   Zoom 2: d≈2.6 → ~45° → globe just fills screen
- *   Zoom 3: d≈1.9 → ~63° → globe overflows viewport, no visible edge
- *   Zoom 4: d≈1.5 → ~82° → globe surface looks nearly flat
- *   Zoom 5: d≈1.3 → ~97° → approaching hemisphere visible
- *   Zoom 6: d≈1.2 → ~110° → max magnification before clamp
+ *   Zoom 1: d≈4.1 → globe subtends ~32° of 45° FOV → full globe with space
+ *   Zoom 2: d≈3.1 → ~38° → globe nearly fills screen
+ *   Zoom 3: d≈2.4 → ~48° → globe just fills screen (edge at viewport border)
+ *   Zoom 4: d≈2.0 → ~60° → globe overflows viewport, no visible edge
+ *   Zoom 5: d≈1.7 → ~68° → globe surface looks nearly flat
+ *   Zoom 6: d≈1.5 → ~77° → globe surface looks flat, max magnification
  */
 function zoomToCameraZ(zoom: number): number {
-  const z = 1.1 + 5.0 * Math.pow(0.54, zoom)
+  const z = 1.2 + 4.5 * Math.pow(0.65, zoom)
   return clamp(z, 1.15, 5.0)
 }
 
@@ -285,39 +283,6 @@ function latLngToSphereRotation(lat: number, lng: number): { rotX: number; rotY:
     rotX: lat * (Math.PI / 180),
     rotY: -(lng + 90) * (Math.PI / 180),
   }
-}
-
-/** Create a canvas texture for the globe location marker (halo + ring + dot).
- *  Drawn in white with alpha — material.color tints it to the desired hue. */
-function createMarkerTexture(): THREE.CanvasTexture {
-  const size = 64
-  const c = document.createElement('canvas')
-  c.width = size
-  c.height = size
-  const ctx = c.getContext('2d')!
-  const cx = size / 2
-  // Outer halo
-  ctx.beginPath()
-  ctx.arc(cx, cx, 28, 0, Math.PI * 2)
-  ctx.fillStyle = 'rgba(255,255,255,0.15)'
-  ctx.fill()
-  // Ring
-  ctx.beginPath()
-  ctx.arc(cx, cx, 20, 0, Math.PI * 2)
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)'
-  ctx.lineWidth = 3
-  ctx.stroke()
-  // Inner dot with glow
-  ctx.shadowColor = 'white'
-  ctx.shadowBlur = 8
-  ctx.beginPath()
-  ctx.arc(cx, cx, 10, 0, Math.PI * 2)
-  ctx.fillStyle = 'white'
-  ctx.fill()
-  ctx.shadowBlur = 0
-  const tex = new THREE.CanvasTexture(c)
-  tex.needsUpdate = true
-  return tex
 }
 
 // ─── Mercator UV Remapping ───────────────────────────────────────────────────
@@ -528,7 +493,7 @@ const MapScreen: React.FC = () => {
     atmosphere: THREE.Mesh
     stars: THREE.Points
     earthMaterial: THREE.MeshBasicMaterial
-    locationMarker: THREE.Sprite
+    locationMarker: THREE.Mesh
     animFrameId: number
     needsRender: boolean
   } | null>(null)
@@ -1010,17 +975,11 @@ const MapScreen: React.FC = () => {
     earth.rotation.y = initRot.rotY
     scene.add(earth)
 
-    // Location marker — sprite with halo/ring/dot pattern matching the flat map style.
-    // White texture tinted by material.color (teal for explore, blue for GPS).
-    const markerMat = new THREE.SpriteMaterial({
-      map: createMarkerTexture(),
-      color: 0x84D1DB,
-      transparent: true,
-      depthTest: true,
-      sizeAttenuation: true,
-    })
-    const locationMarker = new THREE.Sprite(markerMat)
-    locationMarker.scale.set(0.07, 0.07, 1)
+    // Location marker — small teal sphere on the globe surface, child of earth so it rotates with it
+    const markerGeo = new THREE.SphereGeometry(0.02, 12, 12)
+    const markerMat = new THREE.MeshBasicMaterial({ color: 0x84D1DB, transparent: true, depthTest: false })
+    const locationMarker = new THREE.Mesh(markerGeo, markerMat)
+    locationMarker.renderOrder = 999  // always on top
     locationMarker.visible = false
     earth.add(locationMarker)
 
@@ -1171,18 +1130,19 @@ const MapScreen: React.FC = () => {
     requestGlobeRender()
   }, [zoom, requestGlobeRender])
 
-  // Sync globe rotation when centerLat/centerLng change (from flat map drag, tap, etc.)
-  // Always sync — both canvases share the same center, regardless of which is visible.
+  // Sync globe rotation when centerLat/centerLng change from flat map interaction
   useEffect(() => {
     const t = threeRef.current
     if (!t) return
-    // Only skip if user is currently dragging the globe (globe is the source of truth then)
+    // Only sync if user is NOT currently dragging the globe
     if (globeDragRef.current.isDragging) return
+    // Only sync when flat map is visible (zoom >= transition zone)
+    if (zoom < GLOBE_GONE_ZOOM) return
     const { rotX, rotY } = latLngToSphereRotation(centerLat, centerLng)
     t.earth.rotation.x = rotX
     t.earth.rotation.y = rotY
     requestGlobeRender()
-  }, [centerLat, centerLng, requestGlobeRender])
+  }, [centerLat, centerLng, zoom, requestGlobeRender])
 
   // Sync location marker on globe when active location changes
   useEffect(() => {
@@ -1192,18 +1152,15 @@ const MapScreen: React.FC = () => {
     // SphereGeometry: x = cos(lat)*cos(lng), y = sin(lat), z = -cos(lat)*sin(lng)
     const latRad = activeLat * (Math.PI / 180)
     const lngRad = activeLng * (Math.PI / 180)
-    const r = 1.02  // slightly above surface to avoid z-fighting
+    const r = 1.015  // slightly above surface so it's always visible
     t.locationMarker.position.set(
       r * Math.cos(latRad) * Math.cos(lngRad),
       r * Math.sin(latRad),
       r * -Math.cos(latRad) * Math.sin(lngRad),
     )
-    // Tint: blue for GPS, teal for explore (matches flat map dot color)
-    const mat = t.locationMarker.material as THREE.SpriteMaterial
-    mat.color.set(mode === 'gps' ? 0x4682E6 : 0x84D1DB)
     t.locationMarker.visible = true
     requestGlobeRender()
-  }, [activeLat, activeLng, mode, requestGlobeRender])
+  }, [activeLat, activeLng, requestGlobeRender])
 
   // ── Globe Pointer Handlers ────────────────────────────────────────────────
 
