@@ -1728,7 +1728,8 @@ const MapScreen: React.FC = () => {
           Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
           Transition: ≤{GLOBE_FULL_ZOOM} globe → {GLOBE_FULL_ZOOM}–{GLOBE_GONE_ZOOM} crossfade → ≥{GLOBE_GONE_ZOOM} flat<br />
           Camera Z: {camZ.toFixed(2)}<br />
-          Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
+          <strong>── Flat Map Source ──</strong><br />
+          Flat center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
           <strong>Scale Matching</strong><br />
           Globe: {globeDegPerPx.toFixed(4)}°/px · Flat: {flatDegPerPx.toFixed(4)}°/px<br />
           Ratio: {scaleRatio.toFixed(2)}× (1.0 = perfect match)<br />
@@ -1746,9 +1747,15 @@ const MapScreen: React.FC = () => {
           Sphere: 96×96 segments<br />
           {threeRef.current && (() => {
             const facing = sphereRotationToLatLng(threeRef.current.earth.rotation.x, threeRef.current.earth.rotation.y)
+            const dLat = facing.lat - centerLat
+            const dLng = facing.lng - centerLng
             return (<>
-              Globe facing: {facing.lat.toFixed(4)}°, {facing.lng.toFixed(4)}°<br />
-              Earth rot: x={threeRef.current.earth.rotation.x.toFixed(3)} y={threeRef.current.earth.rotation.y.toFixed(3)}<br />
+              <strong>── Globe Source ──</strong><br />
+              Globe center: {facing.lat.toFixed(4)}°, {facing.lng.toFixed(4)}°<br />
+              Raw rotation: x={threeRef.current.earth.rotation.x.toFixed(4)} y={threeRef.current.earth.rotation.y.toFixed(4)}<br />
+              <strong style={{ color: (Math.abs(dLat) > 0.5 || Math.abs(dLng) > 0.5) ? '#ff4444' : '#44ff44' }}>
+                ── Mismatch ──</strong><br />
+              Δlat: {dLat.toFixed(4)}° · Δlng: {dLng.toFixed(4)}°<br />
               Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}<br />
             </>)
           })()}
