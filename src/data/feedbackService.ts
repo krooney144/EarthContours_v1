@@ -1,41 +1,26 @@
 /**
  * EarthContours — Feedback Service
  *
- * Creates GitHub Issues in the project repo from the in-app feedback form.
- * Uses the GitHub REST API with a Personal Access Token stored in a Vite
- * environment variable (VITE_GITHUB_TOKEN).
+ * Submits user feedback via the /api/feedback serverless function,
+ * which creates GitHub Issues in the project repo. The GitHub token
+ * lives server-side only — never in the client bundle.
  *
  * Setup:
- *   1. Create a GitHub Personal Access Token with `public_repo` scope
- *      (or `repo` for private repos) at https://github.com/settings/tokens
- *   2. Create a `.env.local` file in the project root:
- *        VITE_GITHUB_TOKEN=ghp_your_token_here
- *   3. Restart the dev server — Vite injects it at build time.
+ *   Production (Vercel):
+ *     Add GITHUB_TOKEN in Vercel dashboard → Settings → Environment Variables
  *
- * Security note:
- *   The token is embedded in the client bundle. This is acceptable for
- *   personal/internal use. For a public deployment, replace this with a
- *   server-side proxy (e.g., Vercel Edge Function, Cloudflare Worker)
- *   that holds the token and forwards the request.
+ *   Local development:
+ *     Add to .env.local:  GITHUB_TOKEN=ghp_your_token_here
+ *     The Vite dev server proxies /api/* to the Vercel dev server,
+ *     or you can run `vercel dev` locally.
  *
- * TODO: Add server-side proxy for production deployment.
  * TODO: Add rate limiting to prevent abuse.
- * TODO: Attach device/browser info automatically.
  * TODO: Support image attachments (screenshots).
  */
 
 import { createLogger } from '../core/logger'
 
 const log = createLogger('FEEDBACK')
-
-// ─── Configuration ──────────────────────────────────────────────────────────
-
-/** GitHub repo owner/name — issues are created here */
-const GITHUB_OWNER = 'krooney144'
-const GITHUB_REPO  = 'EarthContours_v1'
-
-/** GitHub API endpoint for creating issues */
-const GITHUB_ISSUES_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues`
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -70,94 +55,42 @@ function getDeviceInfo(): string {
 // ─── Submit Feedback ────────────────────────────────────────────────────────
 
 /**
- * Submit user feedback as a GitHub Issue.
+ * Submit user feedback via the server-side API route.
  *
- * The issue is created with:
+ * The API route (/api/feedback) creates a GitHub Issue with:
  *   - Title: first 80 chars of the feedback text
  *   - Body: full feedback + device info
- *   - Label: "user-feedback" (created automatically if it doesn't exist)
+ *   - Label: "user-feedback"
  *
  * @param feedbackText - The user's feedback message
  * @returns Result with success status and issue URL or error
  */
 export async function submitFeedback(feedbackText: string): Promise<FeedbackResult> {
-  const token = import.meta.env.VITE_GITHUB_TOKEN as string | undefined
-
-  if (!token) {
-    log.warn('No GitHub token configured — feedback cannot be submitted')
-    return {
-      success: false,
-      error: 'GitHub token not configured. Add VITE_GITHUB_TOKEN to .env.local',
-    }
-  }
-
-  // Build the issue title from the first line / 80 chars
-  const firstLine = feedbackText.split('\n')[0].trim()
-  const title = `[Feedback] ${firstLine.length > 80 ? firstLine.slice(0, 77) + '...' : firstLine}`
-
-  // Build the issue body with device info
-  const body = [
-    '## User Feedback',
-    '',
-    feedbackText,
-    '',
-    '---',
-    '',
-    '## Device Info',
-    '',
-    getDeviceInfo(),
-    '',
-    `*Submitted from EarthContours v1 at ${new Date().toISOString()}*`,
-  ].join('\n')
-
-  log.info('Submitting feedback to GitHub', { titleLength: title.length, bodyLength: body.length })
+  log.info('Submitting feedback', { textLength: feedbackText.length })
 
   try {
-    const response = await fetch(GITHUB_ISSUES_URL, {
+    const response = await fetch('/api/feedback', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        title,
-        body,
-        labels: ['user-feedback'],
+        text: feedbackText,
+        deviceInfo: getDeviceInfo(),
       }),
     })
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      log.error('GitHub API error', { status: response.status, body: errorText })
+    const data = await response.json()
 
-      // Common error cases
-      if (response.status === 401) {
-        return { success: false, error: 'Invalid GitHub token — check VITE_GITHUB_TOKEN' }
-      }
-      if (response.status === 403) {
-        return { success: false, error: 'GitHub token lacks permission to create issues' }
-      }
-      if (response.status === 422) {
-        return { success: false, error: 'GitHub rejected the issue — check repo access' }
-      }
-
-      return { success: false, error: `GitHub API error (${response.status})` }
+    if (!response.ok || !data.success) {
+      const error = data.error ?? `Server error (${response.status})`
+      log.error('Feedback submission failed', { status: response.status, error })
+      return { success: false, error }
     }
 
-    const data = await response.json()
-    const issueUrl = data.html_url as string
-
-    log.info('Feedback submitted successfully', { issueUrl, issueNumber: data.number })
-
-    return { success: true, issueUrl }
+    log.info('Feedback submitted successfully', { issueUrl: data.issueUrl })
+    return { success: true, issueUrl: data.issueUrl }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     log.error('Failed to submit feedback', { error: message })
-
-    return {
-      success: false,
-      error: `Network error: ${message}`,
-    }
+    return { success: false, error: `Network error: ${message}` }
   }
 }
