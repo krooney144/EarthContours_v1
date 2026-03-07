@@ -403,16 +403,18 @@ async function handleRefinePeaks(peaks: PeakRefineItem[]): Promise<void> {
   const meshH      = lastMeshHeight
   const meshB      = lastMeshBounds
 
+  self.postMessage({ type: 'refine-progress', phase: 'tiles', total: peaks.length, done: 0 })
+
   // ── Step 1: Prefetch higher-zoom tiles around each peak ─────────────────
-  const tileFetches: Promise<Float32Array | null>[] = []
+  // Deduplicate tile requests across all peaks to avoid redundant fetches.
+  const tileSet = new Set<string>()
   for (const peak of peaks) {
     const refinedZoom = distToRefinedZoom(peak.distance)
-    // Compute peak's approximate GPS position
     const azRad = peak.bearing * DEG_TO_RAD
     const peakLat = viewerLat + (Math.cos(azRad) * peak.distance) / 111_132
     const peakLng = viewerLng + (Math.sin(azRad) * peak.distance) / (111_320 * cosViewerLat)
 
-    // Fetch a small cluster of tiles around the peak (±1 tile for coverage of ±6° arc)
+    // Fetch tiles covering the arc span (±6° at peak distance)
     const arcSpanM = peak.distance * Math.tan(REFINED_HALF_DEG * DEG_TO_RAD)
     const dLat = (arcSpanM / 111_132) * 1.3
     const dLng = (arcSpanM / (111_320 * cosViewerLat)) * 1.3
@@ -422,33 +424,47 @@ async function handleRefinePeaks(peaks: PeakRefineItem[]): Promise<void> {
     const minY = Math.min(sw.y, ne.y), maxY = Math.max(sw.y, ne.y)
     for (let x = minX; x <= maxX; x++) {
       for (let y = minY; y <= maxY; y++) {
-        tileFetches.push(fetchWorkerTile(refinedZoom, x, y))
+        tileSet.add(`${refinedZoom}/${x}/${y}`)
       }
     }
   }
+
+  // Fetch all unique tiles in parallel
+  const tileFetches = Array.from(tileSet).map(key => {
+    const [z, x, y] = key.split('/').map(Number)
+    return fetchWorkerTile(z, x, y)
+  })
   await Promise.all(tileFetches)
 
+  self.postMessage({ type: 'refine-progress', phase: 'march', total: peaks.length, done: 0 })
+
   // ── Step 2: Dense ray-march around each peak ───────────────────────────
+  // Optimization: only march ±40% around the peak's known distance (from first
+  // pass) instead of the entire band range.  The ridgeline near a peak is at
+  // roughly the same distance; ±40% margin catches any adjacent terrain.
   const refinedArcs: RefinedArc[] = []
 
-  for (const peak of peaks) {
+  for (let pi = 0; pi < peaks.length; pi++) {
+    const peak = peaks[pi]
     const numSamples = Math.round((REFINED_HALF_DEG * 2) / REFINED_STEP_DEG) + 1
     const elevations = new Float32Array(numSamples).fill(-Infinity)
     const dists      = new Float32Array(numSamples)
     const lats       = new Float32Array(numSamples)
     const lngs       = new Float32Array(numSamples)
 
-    // Distance range: march through the peak's band range with fine steps
+    // Narrow distance range: ±40% of peak distance, clamped to band bounds
     const bandCfg = DEPTH_BANDS[peak.bandIndex]
-    const marchMin = bandCfg.minDist || 20
-    const marchMax = bandCfg.maxDist
+    const bandMin = bandCfg.minDist || 20
+    const bandMax = bandCfg.maxDist
+    const marchMin = Math.max(bandMin, peak.distance * 0.6)
+    const marchMax = Math.min(bandMax, peak.distance * 1.4)
 
-    // Build fine distance steps — always use 1.005× for maximum resolution
+    // Build fine distance steps — 1.005× for maximum resolution
     const arcDists: number[] = []
     let arcD = Math.max(20, marchMin)
     while (arcD <= marchMax) {
       arcDists.push(arcD)
-      arcD *= 1.005  // Fine steps everywhere — this is the refinement pass
+      arcD *= 1.005
     }
     arcDists.reverse()  // far → near (nearer terrain wins)
 
@@ -508,6 +524,11 @@ async function handleRefinePeaks(peaks: PeakRefineItem[]): Promise<void> {
       featureElev:    elevations[Math.floor(numSamples / 2)],  // Center sample elevation
       featureBearing: peak.bearing,
     })
+
+    // Report progress every 5 peaks (avoid flooding main thread)
+    if ((pi + 1) % 5 === 0 || pi === peaks.length - 1) {
+      self.postMessage({ type: 'refine-progress', phase: 'march', total: peaks.length, done: pi + 1 })
+    }
   }
 
   // Transfer refined arc buffers (zero-copy)
