@@ -261,13 +261,55 @@ function latLngToSphereRotation(lat: number, lng: number): { rotX: number; rotY:
   }
 }
 
+// ─── Mercator UV Remapping ───────────────────────────────────────────────────
+
+/**
+ * Remap a SphereGeometry's UV coordinates from equirectangular to Web Mercator.
+ *
+ * Standard SphereGeometry UVs map V linearly with latitude:
+ *   v_equirect = (π/2 - φ) / π   where φ is geographic latitude in radians
+ *
+ * Web Mercator tiles use:
+ *   v_mercator = (1 - ln(tan(φ) + sec(φ)) / π) / 2
+ *
+ * Without this fix, continents appear distorted — the poles are stretched
+ * and mid-latitudes are compressed compared to the Mercator tile texture.
+ *
+ * We also clamp to the Mercator limit of ±85.051° to avoid singularities.
+ */
+function remapSphereUVsToMercator(geometry: THREE.SphereGeometry): void {
+  const uvAttr = geometry.getAttribute('uv')
+  const posAttr = geometry.getAttribute('position')
+  const count = posAttr.count
+
+  for (let i = 0; i < count; i++) {
+    const y = posAttr.getY(i) // on a unit sphere, y = cos(θ) where θ is polar angle
+    // Geographic latitude: φ = asin(y) for a unit sphere
+    let lat = Math.asin(clamp(y, -1, 1))
+    // Clamp to Mercator limit (~85.051°)
+    const MERC_LIMIT = 85.051 * (Math.PI / 180)
+    lat = clamp(lat, -MERC_LIMIT, MERC_LIMIT)
+
+    // Mercator V: 0 at north pole, 1 at south pole
+    const mercV = (1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2
+
+    uvAttr.setY(i, mercV)
+  }
+  uvAttr.needsUpdate = true
+}
+
 // ─── Globe Texture Builder ───────────────────────────────────────────────────
 
 const globeTextureCache = new Map<number, HTMLCanvasElement>()
 
 /**
- * Build a world DEM texture by stitching tiles at the given zoom level.
- * z=2: 4x4 = 16 tiles -> 1024x1024.  z=3: 8x8 = 64 tiles -> 2048x2048.
+ * Build a globe-ready DEM texture by stitching tiles and brightening for globe view.
+ *
+ * The standard DEM colors are very dark (sea level is near-black). On the flat map
+ * this works because the screen is close and the eye adapts. On a globe floating in
+ * space, it looks like a dark blob. We apply a brightness lift:
+ *   - Boost RGB channels by ~40% to make terrain features visible from space
+ *   - This only affects the globe texture, not the flat map tiles
  */
 async function buildGlobeTexture(
   z: number,
@@ -282,7 +324,7 @@ async function buildGlobeTexture(
   canvas.height = texSize
   const ctx = canvas.getContext('2d')!
 
-  ctx.fillStyle = '#000810'
+  ctx.fillStyle = '#0a1628'
   ctx.fillRect(0, 0, texSize, texSize)
 
   const total = tilesPerSide * tilesPerSide
@@ -308,6 +350,18 @@ async function buildGlobeTexture(
   }
 
   await Promise.all(promises)
+
+  // Brightness lift for globe view — make terrain features visible from space
+  const imageData = ctx.getImageData(0, 0, texSize, texSize)
+  const data = imageData.data
+  for (let i = 0; i < data.length; i += 4) {
+    // Lift: add a base floor + scale up. Keeps relative differences but raises the floor.
+    data[i]     = Math.min(255, Math.round(data[i]     * 1.5 + 18)) // R
+    data[i + 1] = Math.min(255, Math.round(data[i + 1] * 1.4 + 22)) // G
+    data[i + 2] = Math.min(255, Math.round(data[i + 2] * 1.3 + 28)) // B
+  }
+  ctx.putImageData(imageData, 0, 0)
+
   globeTextureCache.set(z, canvas)
   log.info('Globe texture built', { z, tilesPerSide, texSize })
   return canvas
@@ -316,8 +370,9 @@ async function buildGlobeTexture(
 // ─── Star Field ──────────────────────────────────────────────────────────────
 
 function createStarField(): THREE.Points {
-  const count = 200
+  const count = 300
   const positions = new Float32Array(count * 3)
+  const sizes = new Float32Array(count)
   for (let i = 0; i < count; i++) {
     const theta = Math.random() * Math.PI * 2
     const phi = Math.acos(2 * Math.random() - 1)
@@ -325,32 +380,50 @@ function createStarField(): THREE.Points {
     positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta)
     positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
     positions[i * 3 + 2] = r * Math.cos(phi)
+    sizes[i] = 0.03 + Math.random() * 0.1
   }
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1))
   const material = new THREE.PointsMaterial({
-    color: 0xc0d8e8,
-    size: 0.08,
+    color: 0xd0e4f0,
+    size: 0.1,
     sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.7,
   })
   return new THREE.Points(geometry, material)
 }
 
 // ─── Atmosphere Shader ───────────────────────────────────────────────────────
 
+/**
+ * Fresnel-based atmosphere glow.  The key change from v1:
+ *   - Larger glow sphere (r=1.04 vs 1.015) so the halo extends further
+ *   - Lower Fresnel power (2.0 vs 3.0) for a wider, softer glow
+ *   - Brighter base color with higher alpha
+ *   - BackSide rendering so glow is visible as a rim behind the Earth
+ */
 const atmosphereVertexShader = `
   varying vec3 vNormal;
+  varying vec3 vPosition;
   void main() {
     vNormal = normalize(normalMatrix * normal);
+    vPosition = (modelViewMatrix * vec4(position, 1.0)).xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `
 
 const atmosphereFragmentShader = `
   varying vec3 vNormal;
+  varying vec3 vPosition;
   void main() {
-    float intensity = pow(0.65 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 3.0);
-    gl_FragColor = vec4(0.12, 0.64, 0.85, 1.0) * intensity;
+    vec3 viewDir = normalize(-vPosition);
+    float rim = 1.0 - max(0.0, dot(vNormal, viewDir));
+    float intensity = pow(rim, 2.0) * 1.2;
+    // Ocean-depth palette glow: mix of ec-mid (#4B8EA3) and ec-glow (#84D1DB)
+    vec3 glowColor = mix(vec3(0.29, 0.56, 0.64), vec3(0.52, 0.82, 0.86), rim);
+    gl_FragColor = vec4(glowColor * intensity, intensity * 0.8);
   }
 `
 
@@ -384,7 +457,7 @@ const MapScreen: React.FC = () => {
     earth: THREE.Mesh
     atmosphere: THREE.Mesh
     stars: THREE.Points
-    earthMaterial: THREE.MeshLambertMaterial
+    earthMaterial: THREE.MeshBasicMaterial
     animFrameId: number
   } | null>(null)
 
@@ -484,6 +557,13 @@ const MapScreen: React.FC = () => {
     const canvas = canvasRef.current
     if (!canvas) return
 
+    // Skip flat map rendering entirely when globe is fully visible — saves
+    // massive tile loading work at zoom 1-5 where the flat map is invisible
+    if (globeOpacity(zoom) >= 1) {
+      log.debug('Skipping flat map draw — globe fully visible', { zoom })
+      return
+    }
+
     const ctx = canvas.getContext('2d')
     if (!ctx) { log.error('Canvas 2D context unavailable'); return }
 
@@ -497,7 +577,11 @@ const MapScreen: React.FC = () => {
 
     const thisGeneration = ++loadingRef.current
 
-    log.debug('Drawing DEM map', { W, H, zoom, center: `${centerLat.toFixed(4)},${centerLng.toFixed(4)}` })
+    // Use integer zoom for tile operations — tiles are only available at integer levels.
+    // Fractional zoom is used for smooth slider/pinch feel; tiles snap to the nearest int.
+    const tileZoom = Math.round(zoom)
+
+    log.debug('Drawing DEM map', { W, H, zoom, tileZoom, center: `${centerLat.toFixed(4)},${centerLng.toFixed(4)}` })
 
     // Dark ocean base — fills any gaps between tiles while loading
     ctx.fillStyle = '#000810'
@@ -507,11 +591,11 @@ const MapScreen: React.FC = () => {
     const tileCountX = Math.ceil(W / TILE_SIZE) + 2
     const tileCountY = Math.ceil(H / TILE_SIZE) + 2
 
-    const centerTile    = latLngToTile(centerLat, centerLng, zoom)
-    const centerTileTopLeft = tileToLatLng(centerTile.x, centerTile.y, zoom)
+    const centerTile    = latLngToTile(centerLat, centerLng, tileZoom)
+    const centerTileTopLeft = tileToLatLng(centerTile.x, centerTile.y, tileZoom)
     const centerTilePixel = latLngToPixel(
       centerTileTopLeft.lat, centerTileTopLeft.lng,
-      centerLat, centerLng, zoom, W, H,
+      centerLat, centerLng, tileZoom, W, H,
     )
 
     const startTileX = centerTile.x - Math.floor(tileCountX / 2)
@@ -527,14 +611,14 @@ const MapScreen: React.FC = () => {
       for (let tx = 0; tx < tileCountX; tx++) {
         const tileX    = startTileX + tx
         const tileY    = startTileY + ty
-        const maxTile  = Math.pow(2, zoom)
+        const maxTile  = Math.pow(2, tileZoom)
         const wrappedX = ((tileX % maxTile) + maxTile) % maxTile
         if (tileY < 0 || tileY >= maxTile) continue
 
-        const tileTL    = tileToLatLng(wrappedX, tileY, zoom)
+        const tileTL    = tileToLatLng(wrappedX, tileY, tileZoom)
         const tilePixel = latLngToPixel(
           tileTL.lat, tileTL.lng,
-          centerLat, centerLng, zoom, W, H,
+          centerLat, centerLng, tileZoom, W, H,
         )
         tileJobs.push({
           wrappedX,
@@ -547,7 +631,7 @@ const MapScreen: React.FC = () => {
 
     // ── Pass 1: DEM elevation tiles ─────────────────────────────────────────
     await Promise.all(tileJobs.map(({ wrappedX, tileY, pixelX, pixelY }) =>
-      loadDEMTile(zoom, wrappedX, tileY)
+      loadDEMTile(tileZoom, wrappedX, tileY)
         .then((tileCanvas) => {
           if (thisGeneration !== loadingRef.current) return
           ctx.drawImage(tileCanvas, pixelX, pixelY, TILE_SIZE, TILE_SIZE)
@@ -560,7 +644,7 @@ const MapScreen: React.FC = () => {
 
     // ── Pass 2: Label overlay (towns, cities, roads) ─────────────────────────
     await Promise.all(tileJobs.map(({ wrappedX, tileY, pixelX, pixelY }) =>
-      loadLabelTile(zoom, wrappedX, tileY)
+      loadLabelTile(tileZoom, wrappedX, tileY)
         .then((img) => {
           if (thisGeneration !== loadingRef.current) return
           ctx.drawImage(img, pixelX, pixelY, TILE_SIZE, TILE_SIZE)
@@ -574,8 +658,8 @@ const MapScreen: React.FC = () => {
     // ── Loaded region border ───────────────────────────────────────────────
     if (activeRegion && meshData) {
       const { bounds } = activeRegion
-      const nw = latLngToPixel(bounds.north, bounds.west, centerLat, centerLng, zoom, W, H)
-      const se = latLngToPixel(bounds.south, bounds.east, centerLat, centerLng, zoom, W, H)
+      const nw = latLngToPixel(bounds.north, bounds.west, centerLat, centerLng, tileZoom, W, H)
+      const se = latLngToPixel(bounds.south, bounds.east, centerLat, centerLng, tileZoom, W, H)
 
       const rx = Math.round(nw.x)
       const ry = Math.round(nw.y)
@@ -613,7 +697,7 @@ const MapScreen: React.FC = () => {
     // TODO: Animate the accuracy ring pulse when GPS is actively updating.
     // TODO: Show accuracy radius scaled to map zoom level.
     if (mode === 'exploring' && gpsLat !== null && gpsLng !== null) {
-      const gpsPx = latLngToPixel(gpsLat, gpsLng, centerLat, centerLng, zoom, W, H)
+      const gpsPx = latLngToPixel(gpsLat, gpsLng, centerLat, centerLng, tileZoom, W, H)
       if (gpsPx.x >= 0 && gpsPx.x <= W && gpsPx.y >= 0 && gpsPx.y <= H) {
         // Dimmed accuracy halo
         ctx.beginPath()
@@ -644,7 +728,7 @@ const MapScreen: React.FC = () => {
       const color = isGps ? '#4682E6' : '#84D1DB'
       const colorRgba = isGps ? 'rgba(70, 130, 230,' : 'rgba(132, 209, 219,'
 
-      const dotPx = latLngToPixel(dotLat, dotLng, centerLat, centerLng, zoom, W, H)
+      const dotPx = latLngToPixel(dotLat, dotLng, centerLat, centerLng, tileZoom, W, H)
       if (dotPx.x >= 0 && dotPx.x <= W && dotPx.y >= 0 && dotPx.y <= H) {
         // Outer halo
         ctx.beginPath()
@@ -669,12 +753,12 @@ const MapScreen: React.FC = () => {
     }
 
     // ── Peak markers ─────────────────────────────────────────────────────────
-    if (showPeakLabels && zoom >= 8) {
+    if (showPeakLabels && tileZoom >= 8) {
       ctx.font      = `bold 11px 'Josefin Sans', sans-serif`
       ctx.textAlign = 'center'
 
       for (const peak of peaks.slice(0, 20)) {
-        const px = latLngToPixel(peak.lat, peak.lng, centerLat, centerLng, zoom, W, H)
+        const px = latLngToPixel(peak.lat, peak.lng, centerLat, centerLng, tileZoom, W, H)
         if (px.x < -20 || px.x > W + 20 || px.y < -20 || px.y > H + 20) continue
 
         ctx.fillStyle   = '#A7DDE5'
@@ -683,7 +767,7 @@ const MapScreen: React.FC = () => {
         ctx.fillText('▲', px.x, px.y)
         ctx.shadowBlur  = 0
 
-        if (zoom >= 10) {
+        if (tileZoom >= 10) {
           ctx.font      = `10px 'Josefin Sans', sans-serif`
           ctx.fillStyle = 'rgba(167, 221, 229, 0.9)'
           ctx.fillText(peak.name, px.x, px.y + 14)
@@ -695,8 +779,8 @@ const MapScreen: React.FC = () => {
     // Color-coded by data size: teal (ok), orange (warning), red (danger).
     // Shows live dimensions inside the rectangle (imperial or metric).
     if (isSelectingArea && selectionStart && selectionEnd) {
-      const startPx = latLngToPixel(selectionStart.lat, selectionStart.lng, centerLat, centerLng, zoom, W, H)
-      const endPx   = latLngToPixel(selectionEnd.lat, selectionEnd.lng, centerLat, centerLng, zoom, W, H)
+      const startPx = latLngToPixel(selectionStart.lat, selectionStart.lng, centerLat, centerLng, tileZoom, W, H)
+      const endPx   = latLngToPixel(selectionEnd.lat, selectionEnd.lng, centerLat, centerLng, tileZoom, W, H)
 
       const rx = Math.min(startPx.x, endPx.x)
       const ry = Math.min(startPx.y, endPx.y)
@@ -809,16 +893,14 @@ const MapScreen: React.FC = () => {
     const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100)
     camera.position.set(0, 0, zoomToCameraZ(zoom))
 
-    // Lights
-    const ambient = new THREE.AmbientLight(0xffffff, 0.4)
-    scene.add(ambient)
-    const directional = new THREE.DirectionalLight(0xffffff, 0.8)
-    directional.position.set(5, 3, 5)
-    scene.add(directional)
+    // No lights needed — MeshBasicMaterial is unlit (texture colors are the final output).
+    // This prevents Lambert lighting from darkening our already-dark DEM colors.
 
-    // Earth sphere
-    const earthGeo = new THREE.SphereGeometry(1, 64, 64)
-    const earthMat = new THREE.MeshLambertMaterial({ color: 0x000810 })
+    // Earth sphere with Mercator-corrected UVs
+    const earthGeo = new THREE.SphereGeometry(1, 96, 96)
+    remapSphereUVsToMercator(earthGeo)
+    // MeshBasicMaterial — unlit, shows texture colors as-is without lighting darkening
+    const earthMat = new THREE.MeshBasicMaterial({ color: 0x111111 })
     const earth = new THREE.Mesh(earthGeo, earthMat)
     // Set initial rotation from current centerLat/centerLng
     const initRot = latLngToSphereRotation(centerLat, centerLng)
@@ -826,14 +908,16 @@ const MapScreen: React.FC = () => {
     earth.rotation.y = initRot.rotY
     scene.add(earth)
 
-    // Atmosphere glow
-    const atmosGeo = new THREE.SphereGeometry(1.015, 64, 64)
+    // Atmosphere glow — larger sphere (r=1.04) with BackSide rendering
+    // creates a visible rim/halo behind the Earth edge
+    const atmosGeo = new THREE.SphereGeometry(1.04, 64, 64)
     const atmosMat = new THREE.ShaderMaterial({
       vertexShader: atmosphereVertexShader,
       fragmentShader: atmosphereFragmentShader,
       transparent: true,
       blending: THREE.AdditiveBlending,
-      side: THREE.FrontSide,
+      side: THREE.BackSide,
+      depthWrite: false,
     })
     const atmosphere = new THREE.Mesh(atmosGeo, atmosMat)
     scene.add(atmosphere)
@@ -845,7 +929,7 @@ const MapScreen: React.FC = () => {
     // Store refs
     threeRef.current = {
       renderer, scene, camera, earth, atmosphere, stars,
-      earthMaterial: earthMat,
+      earthMaterial: earthMat as THREE.MeshBasicMaterial,
       animFrameId: 0,
     }
 
@@ -1010,11 +1094,11 @@ const MapScreen: React.FC = () => {
     globeDragRef.current.isDragging = false
   }, [])
 
-  // Globe wheel zoom
+  // Globe wheel zoom — smooth fractional steps
   const handleGlobeWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
-    const delta = e.deltaY > 0 ? -1 : 1
-    setZoom((z) => clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
+    const delta = e.deltaY > 0 ? -0.5 : 0.5
+    setZoom((z: number) => clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
   }, [])
 
   // Globe pinch zoom
@@ -1158,8 +1242,8 @@ const MapScreen: React.FC = () => {
 
   const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
-    const delta = e.deltaY > 0 ? -1 : 1
-    setZoom((z) => {
+    const delta = e.deltaY > 0 ? -0.5 : 0.5
+    setZoom((z: number) => {
       const newZ = clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM)
       log.debug('Map zoom', { from: z, to: newZ })
       return newZ
@@ -1402,9 +1486,21 @@ const MapScreen: React.FC = () => {
         </div>
       )}
 
-      {/* Map controls — always show location button for GPS access. */}
+      {/* Map controls — zoom slider + location + area selection */}
       <div className={styles.controls}>
         <button className={styles.controlBtn} onClick={handleZoomIn}  aria-label="Zoom in">+</button>
+        <div className={styles.zoomSliderWrap}>
+          <input
+            type="range"
+            className={styles.zoomSlider}
+            min={MAP_MIN_ZOOM}
+            max={MAP_MAX_ZOOM}
+            step={0.1}
+            value={zoom}
+            onChange={(e) => setZoom(parseFloat(e.target.value))}
+            aria-label="Zoom level"
+          />
+        </div>
         <button className={styles.controlBtn} onClick={handleZoomOut} aria-label="Zoom out">−</button>
         <button
           className={`${styles.controlBtn} ${styles.locationBtn} ${gpsLat !== null ? styles.locationActive : ''}`}
@@ -1519,18 +1615,25 @@ const MapScreen: React.FC = () => {
         <div className={styles.globeDebug} style={{ top: 78 }}>
           <strong>Globe Debug</strong><br />
           Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'}<br />
-          Zoom: {zoom.toFixed(2)} · Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
+          Zoom: {zoom.toFixed(2)} · Tile Z: {Math.round(zoom)}<br />
+          Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
           Camera Z: {zoomToCameraZ(zoom).toFixed(2)}<br />
           Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
-          Globe tex: {globeTextureZoom !== null ? `z${globeTextureZoom}` : 'loading...'}<br />
+          <strong>Texture</strong><br />
+          Globe tex: {globeTextureZoom !== null ? `z${globeTextureZoom}` : 'loading...'} · UV: Mercator<br />
+          Material: MeshBasic (unlit)<br />
           {globeTilesTotal > 0 && globeTilesLoaded < globeTilesTotal && (
-            <>Tiles: {globeTilesLoaded}/{globeTilesTotal}<br /></>
+            <>Tiles loading: {globeTilesLoaded}/{globeTilesTotal}<br /></>
           )}
           Globe ready: {globeReady ? 'yes' : 'no'}<br />
+          <strong>Scene</strong><br />
+          Atmos: r=1.04 BackSide · Fresnel p=2.0<br />
+          Sphere: 96×96 segments<br />
           {threeRef.current && (
             <>
               Earth rot: x={threeRef.current.earth.rotation.x.toFixed(3)} y={threeRef.current.earth.rotation.y.toFixed(3)}<br />
-              Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}
+              Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}<br />
+              Flat map skip: {globeOpacity(zoom) >= 1 ? 'YES (saving perf)' : 'no'}
             </>
           )}
         </div>
