@@ -260,7 +260,7 @@ function zoomToCameraZ(zoom: number): number {
 /** Convert sphere rotation (euler Y=lng, euler X=lat) to lat/lng facing camera */
 function sphereRotationToLatLng(rotX: number, rotY: number): { lat: number; lng: number } {
   let lat = rotX * (180 / Math.PI)
-  let lng = -rotY * (180 / Math.PI)
+  let lng = rotY * (180 / Math.PI)
   lat = clamp(lat, -85, 85)
   lng = ((lng + 180) % 360 + 360) % 360 - 180
   return { lat, lng }
@@ -269,11 +269,9 @@ function sphereRotationToLatLng(rotX: number, rotY: number): { lat: number; lng:
 /** Convert lat/lng to sphere rotation euler angles */
 function latLngToSphereRotation(lat: number, lng: number): { rotX: number; rotY: number } {
   // Positive rotX tilts north toward camera (matches 1-mercV UV convention)
-  // Negate lng: camera at +Z sees u=0.5 (prime meridian). To show western
-  // longitudes (negative lng), rotate sphere clockwise (negative rotY).
   return {
     rotX: lat * (Math.PI / 180),
-    rotY: -lng * (Math.PI / 180),
+    rotY: lng * (Math.PI / 180),
   }
 }
 
@@ -1152,9 +1150,7 @@ const MapScreen: React.FC = () => {
     const dx = deltaX * rotScale
     const dy = deltaY * rotScale
 
-    // Negate dx for Y rotation: rotY = -lng, so dragging right (positive dx)
-    // should decrease rotY to increase longitude (move east)
-    threeRef.current.earth.rotation.y -= dx
+    threeRef.current.earth.rotation.y += dx
     threeRef.current.earth.rotation.x += dy
     threeRef.current.earth.rotation.x = clamp(
       threeRef.current.earth.rotation.x,
@@ -1162,7 +1158,7 @@ const MapScreen: React.FC = () => {
       Math.PI / 2 - 0.05,
     )
 
-    gd.velocityX = -dx
+    gd.velocityX = dx
     gd.velocityY = dy
 
     // Sync centerLat/centerLng from globe rotation (single source of truth)
@@ -1732,7 +1728,8 @@ const MapScreen: React.FC = () => {
           Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
           Transition: ≤{GLOBE_FULL_ZOOM} globe → {GLOBE_FULL_ZOOM}–{GLOBE_GONE_ZOOM} crossfade → ≥{GLOBE_GONE_ZOOM} flat<br />
           Camera Z: {camZ.toFixed(2)}<br />
-          Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
+          <strong>── Flat Map Source ──</strong><br />
+          Flat center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
           <strong>Scale Matching</strong><br />
           Globe: {globeDegPerPx.toFixed(4)}°/px · Flat: {flatDegPerPx.toFixed(4)}°/px<br />
           Ratio: {scaleRatio.toFixed(2)}× (1.0 = perfect match)<br />
@@ -1750,9 +1747,15 @@ const MapScreen: React.FC = () => {
           Sphere: 96×96 segments<br />
           {threeRef.current && (() => {
             const facing = sphereRotationToLatLng(threeRef.current.earth.rotation.x, threeRef.current.earth.rotation.y)
+            const dLat = facing.lat - centerLat
+            const dLng = facing.lng - centerLng
             return (<>
-              Globe facing: {facing.lat.toFixed(4)}°, {facing.lng.toFixed(4)}°<br />
-              Earth rot: x={threeRef.current.earth.rotation.x.toFixed(3)} y={threeRef.current.earth.rotation.y.toFixed(3)}<br />
+              <strong>── Globe Source ──</strong><br />
+              Globe center: {facing.lat.toFixed(4)}°, {facing.lng.toFixed(4)}°<br />
+              Raw rotation: x={threeRef.current.earth.rotation.x.toFixed(4)} y={threeRef.current.earth.rotation.y.toFixed(4)}<br />
+              <strong style={{ color: (Math.abs(dLat) > 0.5 || Math.abs(dLng) > 0.5) ? '#ff4444' : '#44ff44' }}>
+                ── Mismatch ──</strong><br />
+              Δlat: {dLat.toFixed(4)}° · Δlng: {dLng.toFixed(4)}°<br />
               Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}<br />
             </>)
           })()}
