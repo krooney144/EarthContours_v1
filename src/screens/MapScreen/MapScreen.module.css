@@ -154,9 +154,8 @@
 }
 
 /**
- * Area selection button — toggle for rectangle drawing mode.
+ * Area selection button — toggle for rectangle drawing mode (EXPLORE only).
  * Highlighted when selection mode is active.
- * TODO: Eventually split into two buttons: "Download Area" and "Explore Area".
  */
 .selectAreaBtn {
   margin-top: var(--space-1);
@@ -169,10 +168,8 @@
 }
 
 /**
- * Selection overlay — floating panel with instructions and action buttons.
- * Appears above the map when selection mode is active.
- * TODO: Add area size display (e.g., "~150 × 200 km").
- * TODO: Color-code based on whether area is downloadable (green) or too large (amber).
+ * Selection overlay — floating panel with instructions, dimensions, and EXPLORE button.
+ * Border color changes based on area size severity (teal → orange → red).
  */
 .selectionOverlay {
   position: absolute;
@@ -189,8 +186,22 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
   min-width: 200px;
+  transition: border-color 200ms ease;
+}
+
+/* Severity color overrides for selection overlay border */
+.selectionOverlay.selection_ok {
+  border-color: var(--ec-border-active);
+}
+
+.selectionOverlay.selection_warning {
+  border-color: rgba(230, 160, 50, 0.7);
+}
+
+.selectionOverlay.selection_danger {
+  border-color: rgba(220, 70, 70, 0.7);
 }
 
 .selectionHint {
@@ -200,17 +211,29 @@
   letter-spacing: 0.1em;
   text-transform: uppercase;
   text-align: center;
+  transition: color 200ms ease;
 }
 
-.selectionActions {
-  display: flex;
-  gap: var(--space-3);
+/* Warning/danger hint colors */
+.selection_warning .selectionHint {
+  color: rgba(230, 180, 80, 0.95);
+}
+
+.selection_danger .selectionHint {
+  color: rgba(230, 90, 90, 0.95);
+}
+
+/** Dimension display — shows width × height of selection */
+.selectionDims {
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--ec-text-secondary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
 }
 
 /**
- * Selection action buttons — "Download" and "Explore".
- * Wider than standard control buttons to fit text labels.
- * TODO: Add loading/progress state for download action.
+ * EXPLORE action button — wider than standard control buttons.
  */
 .selectionActionBtn {
   width: auto;
@@ -219,6 +242,14 @@
   font-family: var(--font-display);
   font-size: 10px;
   letter-spacing: 0.1em;
+  margin-top: var(--space-1);
+}
+
+/** Disabled state for EXPLORE button when area is too large */
+.selectionActionBtn.selectionActionDisabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 /* ── Coordinates bar ─────────────────────────────────────────────────────────── */

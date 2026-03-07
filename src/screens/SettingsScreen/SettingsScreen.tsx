@@ -114,6 +114,7 @@ const SettingsScreen: React.FC = () => {
   const [feedbackError, setFeedbackError] = useState<string | null>(null)
   const [feedbackIssueUrl, setFeedbackIssueUrl] = useState<string | null>(null)
   const [resetConfirm, setResetConfirm] = useState(false)
+  const [showLocationHelp, setShowLocationHelp] = useState(false)
 
   log.debug('SettingsScreen render', {
     units: settings.units,
@@ -345,7 +346,14 @@ const SettingsScreen: React.FC = () => {
 
         {/* ── Section 4: Location & Sensors ── */}
         <Section icon="◎" title="Location & Sensors">
-          <Row label="GPS Permission" description="Required for real-time position tracking">
+          <Row
+            label="GPS Permission"
+            description={
+              gpsPermission === 'denied'
+                ? 'Location was denied — tap HOW TO ENABLE for instructions'
+                : 'Required for real-time position tracking'
+            }
+          >
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
               <span className={`${styles.statusBadge} ${
                 gpsPermission === 'granted'     ? styles.statusGranted :
@@ -357,13 +365,49 @@ const SettingsScreen: React.FC = () => {
                  gpsPermission === 'unavailable' ? '— N/A'     :
                                                    '? UNKNOWN' }
               </span>
-              {gpsPermission !== 'granted' && (
+              {gpsPermission === 'denied' ? (
+                <button
+                  className={styles.actionBtn}
+                  onClick={() => setShowLocationHelp((v) => !v)}
+                >
+                  {showLocationHelp ? 'HIDE' : 'HOW TO ENABLE'}
+                </button>
+              ) : gpsPermission !== 'granted' ? (
                 <button className={styles.actionBtn} onClick={handleRequestGPS}>
                   REQUEST
                 </button>
-              )}
+              ) : null}
             </div>
           </Row>
+          {showLocationHelp && gpsPermission === 'denied' && (
+            <div className={styles.locationHelp} role="note">
+              <div className={styles.locationHelpTitle}>Re-enable Location Access</div>
+              <div className={styles.locationHelpBody}>
+                <p><strong>iPhone (Safari):</strong></p>
+                <p>Settings &gt; Privacy &amp; Security &gt; Location Services &gt; Safari Websites &gt; While Using the App</p>
+                <p><strong>iPhone (Chrome):</strong></p>
+                <p>Settings &gt; Chrome &gt; Location &gt; While Using the App</p>
+                <p><strong>Android (Chrome):</strong></p>
+                <p>Tap the lock icon in the address bar &gt; Permissions &gt; Location &gt; Allow</p>
+                <p><strong>Desktop Chrome:</strong></p>
+                <p>Click the lock icon left of the URL &gt; Site settings &gt; Location &gt; Allow</p>
+                <p><strong>Desktop Safari:</strong></p>
+                <p>Safari &gt; Settings &gt; Websites &gt; Location &gt; Allow</p>
+                <p><strong>Desktop Firefox:</strong></p>
+                <p>Click the lock icon left of the URL &gt; Clear permission &gt; Reload page</p>
+              </div>
+              <button
+                className={styles.actionBtn}
+                onClick={() => {
+                  log.info('User attempting GPS re-request after reading help')
+                  handleRequestGPS()
+                }}
+                style={{ marginTop: 'var(--space-3)' }}
+              >
+                TRY AGAIN
+              </button>
+            </div>
+          )}
           <Row label="GPS Accuracy" description="Higher accuracy uses more battery">
             <Segmented<GPSAccuracy>
               options={[
