@@ -29,6 +29,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import * as THREE from 'three'
 import { useLocationStore, useTerrainStore, useSettingsStore } from '../../store'
 import { createLogger } from '../../core/logger'
 import {
@@ -224,6 +225,135 @@ function loadLabelTile(z: number, x: number, y: number): Promise<HTMLImageElemen
   })
 }
 
+// ─── Globe Constants ──────────────────────────────────────────────────────────
+
+/** Zoom thresholds for globe / flat map crossfade */
+const GLOBE_FULL_ZOOM = 5    // Globe fully visible at zoom <= 5
+const GLOBE_GONE_ZOOM = 7    // Globe fully hidden at zoom >= 7
+
+/** Compute globe opacity from current zoom: 1 at <=5, 0 at >=7, linear between */
+function globeOpacity(zoom: number): number {
+  if (zoom <= GLOBE_FULL_ZOOM) return 1
+  if (zoom >= GLOBE_GONE_ZOOM) return 0
+  return 1 - (zoom - GLOBE_FULL_ZOOM) / (GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM)
+}
+
+/** Map zoom level to camera Z distance from globe center */
+function zoomToCameraZ(zoom: number): number {
+  const z = 2.5 * Math.pow(2, (6 - zoom) * 0.6)
+  return clamp(z, 1.15, 18.0)
+}
+
+/** Convert sphere rotation (euler Y=lng, euler X=lat) to lat/lng facing camera */
+function sphereRotationToLatLng(rotX: number, rotY: number): { lat: number; lng: number } {
+  let lat = -rotX * (180 / Math.PI)
+  let lng = rotY * (180 / Math.PI)
+  lat = clamp(lat, -85, 85)
+  lng = ((lng + 180) % 360 + 360) % 360 - 180
+  return { lat, lng }
+}
+
+/** Convert lat/lng to sphere rotation euler angles */
+function latLngToSphereRotation(lat: number, lng: number): { rotX: number; rotY: number } {
+  return {
+    rotX: -lat * (Math.PI / 180),
+    rotY: lng * (Math.PI / 180),
+  }
+}
+
+// ─── Globe Texture Builder ───────────────────────────────────────────────────
+
+const globeTextureCache = new Map<number, HTMLCanvasElement>()
+
+/**
+ * Build a world DEM texture by stitching tiles at the given zoom level.
+ * z=2: 4x4 = 16 tiles -> 1024x1024.  z=3: 8x8 = 64 tiles -> 2048x2048.
+ */
+async function buildGlobeTexture(
+  z: number,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<HTMLCanvasElement> {
+  if (globeTextureCache.has(z)) return globeTextureCache.get(z)!
+
+  const tilesPerSide = Math.pow(2, z)
+  const texSize = tilesPerSide * TILE_SIZE
+  const canvas = document.createElement('canvas')
+  canvas.width = texSize
+  canvas.height = texSize
+  const ctx = canvas.getContext('2d')!
+
+  ctx.fillStyle = '#000810'
+  ctx.fillRect(0, 0, texSize, texSize)
+
+  const total = tilesPerSide * tilesPerSide
+  let loaded = 0
+
+  const promises: Promise<void>[] = []
+  for (let ty = 0; ty < tilesPerSide; ty++) {
+    for (let tx = 0; tx < tilesPerSide; tx++) {
+      promises.push(
+        loadDEMTile(z, tx, ty)
+          .then((tileCanvas) => {
+            ctx.drawImage(tileCanvas, tx * TILE_SIZE, ty * TILE_SIZE)
+            loaded++
+            onProgress?.(loaded, total)
+          })
+          .catch(() => {
+            loaded++
+            onProgress?.(loaded, total)
+            log.debug('Globe tile unavailable', { z, tx, ty })
+          })
+      )
+    }
+  }
+
+  await Promise.all(promises)
+  globeTextureCache.set(z, canvas)
+  log.info('Globe texture built', { z, tilesPerSide, texSize })
+  return canvas
+}
+
+// ─── Star Field ──────────────────────────────────────────────────────────────
+
+function createStarField(): THREE.Points {
+  const count = 200
+  const positions = new Float32Array(count * 3)
+  for (let i = 0; i < count; i++) {
+    const theta = Math.random() * Math.PI * 2
+    const phi = Math.acos(2 * Math.random() - 1)
+    const r = 40 + Math.random() * 20
+    positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta)
+    positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
+    positions[i * 3 + 2] = r * Math.cos(phi)
+  }
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  const material = new THREE.PointsMaterial({
+    color: 0xc0d8e8,
+    size: 0.08,
+    sizeAttenuation: true,
+  })
+  return new THREE.Points(geometry, material)
+}
+
+// ─── Atmosphere Shader ───────────────────────────────────────────────────────
+
+const atmosphereVertexShader = `
+  varying vec3 vNormal;
+  void main() {
+    vNormal = normalize(normalMatrix * normal);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`
+
+const atmosphereFragmentShader = `
+  varying vec3 vNormal;
+  void main() {
+    float intensity = pow(0.65 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 3.0);
+    gl_FragColor = vec4(0.12, 0.64, 0.85, 1.0) * intensity;
+  }
+`
+
 // ─── Main Component ────────────────────────────────────────────────────────────
 
 const MapScreen: React.FC = () => {
@@ -232,11 +362,40 @@ const MapScreen: React.FC = () => {
   const { coordFormat, showPeakLabels, units } = useSettingsStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const globeCanvasRef = useRef<HTMLCanvasElement>(null)
 
   const [centerLat, setCenterLat] = useState(DEFAULT_MAP_CENTER.lat)
   const [centerLng, setCenterLng] = useState(DEFAULT_MAP_CENTER.lng)
   const [zoom, setZoom]           = useState(DEFAULT_MAP_ZOOM)
   const [isLoading, setIsLoading] = useState(false)
+
+  // ── Globe State ──────────────────────────────────────────────────────────
+  const [globeReady, setGlobeReady] = useState(false)
+  const [globeTextureZoom, setGlobeTextureZoom] = useState<number | null>(null)
+  const [globeTilesLoaded, setGlobeTilesLoaded] = useState(0)
+  const [globeTilesTotal, setGlobeTilesTotal] = useState(0)
+  const [showGlobeDebug, setShowGlobeDebug] = useState(false)
+
+  // Three.js refs (persist across renders, cleaned up on unmount)
+  const threeRef = useRef<{
+    renderer: THREE.WebGLRenderer
+    scene: THREE.Scene
+    camera: THREE.PerspectiveCamera
+    earth: THREE.Mesh
+    atmosphere: THREE.Mesh
+    stars: THREE.Points
+    earthMaterial: THREE.MeshLambertMaterial
+    animFrameId: number
+  } | null>(null)
+
+  // Globe drag state
+  const globeDragRef = useRef({
+    isDragging: false,
+    lastX: 0,
+    lastY: 0,
+    velocityX: 0,
+    velocityY: 0,
+  })
 
   // GPS permission prompt — shown when user taps "My Location" without permission
   const [gpsPrompt, setGpsPrompt] = useState<'needs-permission' | 'denied' | 'unavailable' | null>(null)
@@ -628,6 +787,267 @@ const MapScreen: React.FC = () => {
     drawMap()
   }, [drawMap])
 
+  // ── Three.js Globe Setup ──────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const canvas = globeCanvasRef.current
+    if (!canvas) return
+
+    // Renderer
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: false,
+    })
+    renderer.setClearColor(0x000810)
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+
+    // Scene
+    const scene = new THREE.Scene()
+
+    // Camera
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100)
+    camera.position.set(0, 0, zoomToCameraZ(zoom))
+
+    // Lights
+    const ambient = new THREE.AmbientLight(0xffffff, 0.4)
+    scene.add(ambient)
+    const directional = new THREE.DirectionalLight(0xffffff, 0.8)
+    directional.position.set(5, 3, 5)
+    scene.add(directional)
+
+    // Earth sphere
+    const earthGeo = new THREE.SphereGeometry(1, 64, 64)
+    const earthMat = new THREE.MeshLambertMaterial({ color: 0x000810 })
+    const earth = new THREE.Mesh(earthGeo, earthMat)
+    // Set initial rotation from current centerLat/centerLng
+    const initRot = latLngToSphereRotation(centerLat, centerLng)
+    earth.rotation.x = initRot.rotX
+    earth.rotation.y = initRot.rotY
+    scene.add(earth)
+
+    // Atmosphere glow
+    const atmosGeo = new THREE.SphereGeometry(1.015, 64, 64)
+    const atmosMat = new THREE.ShaderMaterial({
+      vertexShader: atmosphereVertexShader,
+      fragmentShader: atmosphereFragmentShader,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      side: THREE.FrontSide,
+    })
+    const atmosphere = new THREE.Mesh(atmosGeo, atmosMat)
+    scene.add(atmosphere)
+
+    // Stars
+    const stars = createStarField()
+    scene.add(stars)
+
+    // Store refs
+    threeRef.current = {
+      renderer, scene, camera, earth, atmosphere, stars,
+      earthMaterial: earthMat,
+      animFrameId: 0,
+    }
+
+    // Resize handler for globe canvas
+    const resizeGlobe = () => {
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      if (w === 0 || h === 0) return
+      renderer.setSize(w, h, false)
+      camera.aspect = w / h
+      camera.updateProjectionMatrix()
+    }
+    resizeGlobe()
+
+    const resizeObs = new ResizeObserver(resizeGlobe)
+    resizeObs.observe(canvas)
+
+    // Animation loop
+    const animate = () => {
+      const t = threeRef.current
+      if (!t) return
+      t.animFrameId = requestAnimationFrame(animate)
+
+      // Apply momentum if not dragging
+      const gd = globeDragRef.current
+      if (!gd.isDragging && (Math.abs(gd.velocityX) > 0.0001 || Math.abs(gd.velocityY) > 0.0001)) {
+        t.earth.rotation.y += gd.velocityX
+        t.earth.rotation.x += gd.velocityY
+        // Clamp latitude rotation to prevent flipping
+        t.earth.rotation.x = clamp(t.earth.rotation.x, -Math.PI / 2 + 0.05, Math.PI / 2 - 0.05)
+        gd.velocityX *= 0.95
+        gd.velocityY *= 0.95
+
+        // Sync centerLat/centerLng from globe rotation
+        const { lat, lng } = sphereRotationToLatLng(t.earth.rotation.x, t.earth.rotation.y)
+        setCenterLat(lat)
+        setCenterLng(lng)
+      }
+
+      t.renderer.render(t.scene, t.camera)
+    }
+    animate()
+
+    // Load globe texture: z=2 first (fast), then z=3 (detail)
+    setGlobeReady(false)
+    buildGlobeTexture(2, (loaded, total) => {
+      setGlobeTilesLoaded(loaded)
+      setGlobeTilesTotal(total)
+    }).then((tex2) => {
+      if (!threeRef.current) return
+      const t = new THREE.CanvasTexture(tex2)
+      t.colorSpace = THREE.SRGBColorSpace
+      threeRef.current.earthMaterial.map = t
+      threeRef.current.earthMaterial.color.set(0xffffff)
+      threeRef.current.earthMaterial.needsUpdate = true
+      setGlobeReady(true)
+      setGlobeTextureZoom(2)
+      log.info('Globe z2 texture applied')
+
+      // Upgrade to z=3 in background
+      buildGlobeTexture(3, (loaded, total) => {
+        setGlobeTilesLoaded(loaded)
+        setGlobeTilesTotal(total)
+      }).then((tex3) => {
+        if (!threeRef.current) return
+        const t3 = new THREE.CanvasTexture(tex3)
+        t3.colorSpace = THREE.SRGBColorSpace
+        threeRef.current.earthMaterial.map = t3
+        threeRef.current.earthMaterial.needsUpdate = true
+        setGlobeTextureZoom(3)
+        log.info('Globe z3 texture applied (upgrade)')
+      })
+    })
+
+    return () => {
+      resizeObs.disconnect()
+      if (threeRef.current) {
+        cancelAnimationFrame(threeRef.current.animFrameId)
+        threeRef.current.renderer.dispose()
+        threeRef.current.earthMaterial.dispose()
+        earthGeo.dispose()
+        atmosGeo.dispose()
+        atmosMat.dispose()
+      }
+      threeRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── Sync globe camera Z and rotation from zoom/center ─────────────────────
+
+  useEffect(() => {
+    const t = threeRef.current
+    if (!t) return
+    t.camera.position.z = zoomToCameraZ(zoom)
+  }, [zoom])
+
+  // Sync globe rotation when centerLat/centerLng change from flat map interaction
+  useEffect(() => {
+    const t = threeRef.current
+    if (!t) return
+    // Only sync if user is NOT currently dragging the globe
+    if (globeDragRef.current.isDragging) return
+    // Only sync when flat map is visible (zoom >= transition zone)
+    if (zoom < GLOBE_GONE_ZOOM) return
+    const { rotX, rotY } = latLngToSphereRotation(centerLat, centerLng)
+    t.earth.rotation.x = rotX
+    t.earth.rotation.y = rotY
+  }, [centerLat, centerLng, zoom])
+
+  // ── Globe Pointer Handlers ────────────────────────────────────────────────
+
+  const isGlobeActive = zoom < GLOBE_GONE_ZOOM
+
+  const handleGlobePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isGlobeActive) return
+    globeCanvasRef.current?.setPointerCapture(e.pointerId)
+    globeDragRef.current = {
+      isDragging: true,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      velocityX: 0,
+      velocityY: 0,
+    }
+  }, [isGlobeActive])
+
+  const handleGlobePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    const gd = globeDragRef.current
+    if (!gd.isDragging || !threeRef.current) return
+
+    const deltaX = e.clientX - gd.lastX
+    const deltaY = e.clientY - gd.lastY
+    gd.lastX = e.clientX
+    gd.lastY = e.clientY
+
+    const rotScale = 0.005
+    const dx = deltaX * rotScale
+    const dy = deltaY * rotScale
+
+    threeRef.current.earth.rotation.y += dx
+    threeRef.current.earth.rotation.x += dy
+    threeRef.current.earth.rotation.x = clamp(
+      threeRef.current.earth.rotation.x,
+      -Math.PI / 2 + 0.05,
+      Math.PI / 2 - 0.05,
+    )
+
+    gd.velocityX = dx
+    gd.velocityY = dy
+
+    // Sync centerLat/centerLng from globe rotation (single source of truth)
+    const { lat, lng } = sphereRotationToLatLng(
+      threeRef.current.earth.rotation.x,
+      threeRef.current.earth.rotation.y,
+    )
+    setCenterLat(lat)
+    setCenterLng(lng)
+  }, [])
+
+  const handleGlobePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    globeCanvasRef.current?.releasePointerCapture(e.pointerId)
+    globeDragRef.current.isDragging = false
+  }, [])
+
+  // Globe wheel zoom
+  const handleGlobeWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault()
+    const delta = e.deltaY > 0 ? -1 : 1
+    setZoom((z) => clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
+  }, [])
+
+  // Globe pinch zoom
+  const globePinchRef = useRef({ isPinching: false, startDist: 0, startZoom: DEFAULT_MAP_ZOOM })
+
+  const handleGlobeTouchStart = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX
+      const dy = e.touches[0].clientY - e.touches[1].clientY
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      globePinchRef.current = { isPinching: true, startDist: dist, startZoom: zoom }
+    }
+  }, [zoom])
+
+  const handleGlobeTouchMove = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 2 && globePinchRef.current.isPinching) {
+      e.preventDefault()
+      const dx = e.touches[0].clientX - e.touches[1].clientX
+      const dy = e.touches[0].clientY - e.touches[1].clientY
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      const scale = dist / globePinchRef.current.startDist
+      setZoom(clamp(
+        globePinchRef.current.startZoom + Math.log2(scale),
+        MAP_MIN_ZOOM,
+        MAP_MAX_ZOOM,
+      ))
+    }
+  }, [])
+
+  const handleGlobeTouchEnd = useCallback(() => {
+    globePinchRef.current.isPinching = false
+  }, [])
+
   // ── Pointer Handlers ─────────────────────────────────────────────────────────
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -854,12 +1274,33 @@ const MapScreen: React.FC = () => {
     }
   }, [switchToGPS, gpsLat, gpsPermission, requestGPS, showGpsPromptTimed, dismissGpsPrompt])
 
+  // Compute canvas opacities from zoom
+  const gOpacity = globeOpacity(zoom)
+  const fOpacity = 1 - gOpacity
+
   return (
     <div className={styles.screen}>
-      {/* DEM canvas */}
+      {/* Three.js globe canvas — behind the flat DEM canvas */}
+      <canvas
+        ref={globeCanvasRef}
+        className={styles.globeCanvas}
+        style={{ opacity: gOpacity, pointerEvents: gOpacity > 0 ? 'auto' : 'none' }}
+        onPointerDown={handleGlobePointerDown}
+        onPointerMove={handleGlobePointerMove}
+        onPointerUp={handleGlobePointerUp}
+        onPointerCancel={handleGlobePointerUp}
+        onWheel={handleGlobeWheel}
+        onTouchStart={handleGlobeTouchStart}
+        onTouchMove={handleGlobeTouchMove}
+        onTouchEnd={handleGlobeTouchEnd}
+        aria-hidden={gOpacity === 0}
+      />
+
+      {/* DEM canvas — flat map, on top of globe */}
       <canvas
         ref={canvasRef}
         className={styles.mapCanvas}
+        style={{ opacity: fOpacity, pointerEvents: fOpacity > 0 ? 'auto' : 'none' }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -1062,6 +1503,38 @@ const MapScreen: React.FC = () => {
       >
         Tap to explore · Pinch to zoom · Drag to pan
       </div>
+
+      {/* Globe debug toggle */}
+      <button
+        className={styles.globeDebugToggle}
+        onClick={() => setShowGlobeDebug((v) => !v)}
+        aria-label="Toggle globe debug panel"
+        style={{ opacity: gOpacity > 0 || showGlobeDebug ? 1 : 0.3 }}
+      >
+        {showGlobeDebug ? '✕' : '⊙'}
+      </button>
+
+      {/* Globe debug panel */}
+      {showGlobeDebug && (
+        <div className={styles.globeDebug} style={{ top: 78 }}>
+          <strong>Globe Debug</strong><br />
+          Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'}<br />
+          Zoom: {zoom.toFixed(2)} · Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
+          Camera Z: {zoomToCameraZ(zoom).toFixed(2)}<br />
+          Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
+          Globe tex: {globeTextureZoom !== null ? `z${globeTextureZoom}` : 'loading...'}<br />
+          {globeTilesTotal > 0 && globeTilesLoaded < globeTilesTotal && (
+            <>Tiles: {globeTilesLoaded}/{globeTilesTotal}<br /></>
+          )}
+          Globe ready: {globeReady ? 'yes' : 'no'}<br />
+          {threeRef.current && (
+            <>
+              Earth rot: x={threeRef.current.earth.rotation.x.toFixed(3)} y={threeRef.current.earth.rotation.y.toFixed(3)}<br />
+              Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}
+            </>
+          )}
+        </div>
+      )}
 
       {/* Coordinate bar */}
       <div className={styles.coordBar} aria-label="Map coordinates">
