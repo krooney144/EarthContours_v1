@@ -7,6 +7,7 @@ Quick reference for any Claude Code session in this repo.
 ## What This Project Is
 
 A **terrain visualization web app** (React + TypeScript + Vite) for exploring US elevation data.
+- **v2.2** — Near-field enhancement: 6-band depth system (ultra-near/near/mid-near/mid/mid-far/far) with progressive contour intervals (50ft→2000ft), z15/z14 tile zoom for ultra-near detail, hybrid ray march (360-az 20–200m @ 1.005× + 2880-az 200m–31km @ 1.01×), scaled overlaps (0.5–2 km). Ultra-near band enables valley views and cliff-face rendering within 4.5 km.
 - **v2.0.1** — GPS-coordinate ridge attachment: `SkylineBand` now stores `ridgeLats`/`ridgeLngs` per azimuth so every ridge point has a real-world GPS position. Peak dot snapping rewritten to use per-band angles (matching exactly what's drawn) instead of the coarser 720-azimuth overall array; snap is upward-only so peaks above all bands keep their true position.
 - **v2.0** — SCAN architectural overhaul: single `project()` camera function (all bearing/angle→screen conversions go through one function — alignment bugs structurally impossible), depth-banded skyline (near/mid/far bands with raw elevation+distance per azimuth), main-thread AGL re-projection (no worker round-trip for height changes), layered renderer (painter's order far→near with depth cues: line weight 0.5→3px, opacity 0.15→0.8, progressive fill darkness), comprehensive debug diagnostics panel.
 - **v1.4.1** — SCAN bugfixes: DPR coordinate mismatch, stale-while-revalidate skyline, skip recompute for moves < 1.5 km, peak label improvements.
@@ -18,7 +19,7 @@ A **terrain visualization web app** (React + TypeScript + Vite) for exploring US
 
 ## Branch
 
-Active development branch: `claude/remove-scan-shading-RmS6l`
+Active development branch: `claude/enhance-scan-near-field-e4qkR`
 
 ---
 
@@ -89,16 +90,19 @@ Transitions use zoom animation stored in `uiStore`.
 
 ## Rendering Per Screen
 
-- **SCAN** (v2.0 — depth-layered architecture):
+- **SCAN** (v2.2 — 6-band near-field enhancement):
   - **Single camera function** — `project(bearingDeg, elevAngleRad, cam) → {x, y}` is the ONE source of truth for all bearing/angle→screen conversions. Ridgeline renderer, peak dots, peak labels all call it. Alignment bugs structurally impossible.
-  - **Depth-banded skyline** — Worker produces `SkylineData` with 5 depth bands (near/med-near/mid/med-far/far). Each band stores per-azimuth raw elevation + distance + slope vectors + **GPS lat/lng of each ridge point**. Band overlap at boundaries prevents seams. Array-driven — adding bands = pushing to `DEPTH_BANDS`.
-  - **AGL re-projection** — `reprojectBands()` re-derives elevation angles from raw band data when viewer height changes. O(2160) atan2 calls, sub-millisecond. No worker round-trip for AGL slider changes.
-  - **Layered renderer** — `renderTerrain()` draws bands in painter's order (far→near) with depth cues: line weight (0.5→3px), opacity (0.15→0.8), fill darkness. Band count is array-driven — visual parameters auto-interpolate.
+  - **6-band depth-banded skyline** — Worker produces `SkylineData` with 6 depth bands (ultra-near/near/mid-near/mid/mid-far/far). Each band stores per-azimuth raw elevation + distance + **GPS lat/lng of each ridge point**. Scaled overlaps at boundaries (0.5 km close, 1 km mid, 2 km far) prevent seams. Array-driven — adding bands = pushing to `DEPTH_BANDS`.
+  - **Ultra-near band (0–4.5 km)** — Dedicated band for close terrain with 50ft contour intervals, z15/z14 tile resolution, and hybrid ray march (360 azimuths 20–200m @ 1.005× step, 2880 azimuths 200m–4.5km @ 1.01× step). Enables valley views and cliff-face rendering.
+  - **Progressive contour intervals** — 50ft (ultra-near) → 100ft (near) → 200ft (mid-near) → 500ft (mid) → 1000ft (mid-far) → 2000ft (far).
+  - **Tile zoom levels** — z15 (0–1km), z14 (1–4.5km), z13 (4.5–10.5km), z11 (10.5–31km), z10 (31–81km), z9 (81–152km), z8 (152–400km).
+  - **AGL re-projection** — `reprojectBands()` re-derives elevation angles from raw band data when viewer height changes. ~15,840 atan2 calls, sub-millisecond. No worker round-trip for AGL slider changes.
+  - **Layered renderer** — `renderTerrain()` draws bands in painter's order (far→near) with depth cues: line weight (1→5px), opacity (0.15→0.9), fill darkness. Band count is array-driven — visual parameters auto-interpolate.
   - **Canvas RAF gating** — `resizeCanvas()` only runs on ResizeObserver; `redrawCanvas()` is gated through `requestAnimationFrame`.
   - **Physical-pixel coordinate system** — `ctx.setTransform(1,0,0,1,0,0)` (identity); all drawing in physical pixels. Peak positions divided by `dpr` only for HTML overlay CSS coords.
   - **Stale-while-revalidate** — old skyline stays visible while worker recomputes; skip recompute for moves < 1.5 km.
   - **Peak visibility + snap** — `isPeakVisible()` checks peak angle vs ridgeline. Dots snap to max per-band ridgeline angle at the peak's bearing (matches exactly what's drawn); snap is upward-only so peaks above all bands keep their true position. Max 8, horizontal dedup at 10% canvas width.
-  - **Debug diagnostics** — Comprehensive debug panel: camera state, re-projection validation (max angle diff), per-band health (active azimuths, elevation/distance ranges), peak funnel.
+  - **Debug diagnostics** — Comprehensive debug panel: camera state, re-projection validation (max angle diff), per-band health (active azimuths, elevation/distance ranges, contour interval), peak funnel.
   - `fetchPeaksNear(lat, lng, 130)` fetches worldwide OSM peaks on location change; falls back to hardcoded peaks
   - `applyFovScale(scale)` changes FOV via pinch gesture (15°–100°)
   - `PitchIndicator` component on left edge; loading progress bar; FOV badge
@@ -231,7 +235,8 @@ Regions are hand-tuned geographic chunks sized for visual quality, **not politic
 | v2.0 (done) | SCAN architectural overhaul: single `project()` camera function, depth-banded skyline (near/mid/far with raw elev+dist per azimuth), main-thread AGL re-projection (no worker round-trip), layered renderer (painter's order far→near with depth cues), comprehensive debug diagnostics |
 | v2.0.1 (done) | GPS-coordinate ridge attachment: `SkylineBand.ridgeLats/ridgeLngs` per azimuth; peak dot snap rewritten to use per-band angles (matches drawn ridgeline exactly); upward-only snap preserves peaks above all bands |
 | v2.1 | Phase 5: Interior contour fragments — slope-driven line fragments inside terrain bands, density decreasing with distance. Slope vectors already stored in `SkylineBand.slopeX/slopeZ`. |
-| v2.2 | Near-band smoothing: address jumpy/steppy near+med-near ridgelines — either increase azimuth resolution (8×) with Gaussian smoothing, or store multi-point depth profiles per azimuth |
+| v2.2 (done) | Near-field enhancement: 6-band system (ultra-near/near/mid-near/mid/mid-far/far), progressive contour intervals (50ft→2000ft), z15/z14 tile zoom for ultra-near, hybrid ray march (360-az 20–200m + 2880-az 200m–31km), scaled overlaps (0.5–2 km) |
+| v2.3 | Near-band smoothing: address jumpy/steppy near+med-near ridgelines — either Gaussian smoothing or multi-point depth profiles per azimuth |
 | 3 | Real GPS (`navigator.geolocation`), `DeviceOrientationEvent` heading for true AR, worldwide viewpoint selection, HTTPS deployment for camera overlay |
 | Future | Three.js WebGL renderer; museum exhibit mode (7680×1080 triple ultra-wide) |
 
