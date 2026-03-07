@@ -287,6 +287,93 @@
   letter-spacing: 0.1em;
 }
 
+/* ── GPS Permission Prompt ──────────────────────────────────────────────────── */
+/* Toast-style prompt that appears when user taps "My Location" without permission. */
+
+.gpsPrompt {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height) + 60px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(13, 30, 46, 0.96);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--ec-border-active);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 260px;
+  max-width: 340px;
+  animation: gps-prompt-in 250ms ease-out;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes gps-prompt-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.gpsPromptContent {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1;
+}
+
+.gpsPromptIcon {
+  flex-shrink: 0;
+  color: #4682E6;
+}
+
+.gpsPromptIcon.gpsPromptIconDenied {
+  color: rgba(230, 100, 80, 0.9);
+}
+
+.gpsPromptText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gpsPromptText strong {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  color: var(--ec-white);
+  letter-spacing: 0.06em;
+}
+
+.gpsPromptText span {
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: var(--ec-text-muted);
+  line-height: 1.3;
+}
+
+.gpsPromptDismiss {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  background: none;
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-sm);
+  color: var(--ec-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.gpsPromptDismiss:hover {
+  color: var(--ec-white);
+  border-color: var(--ec-border-active);
+}
+
 /* ── Tap to explore hint ──────────────────────────────────────────────────────── */
 
 .tapHint {
