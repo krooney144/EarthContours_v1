@@ -4,8 +4,7 @@
  * Provides elevation data at multiple zoom levels for the SCAN screen's
  * ray-height-field renderer. Zoom selection is based on ray distance:
  *
- *   dist < 500 m   → z16  (~2.4 m/px — immediate band 20ft contour detail)
- *   0.5–1 km       → z15  (~4.8 m/px — immediate outer / ultra-near)
+ *   dist < 1 km    → z15  (~4.8 m/px — ultra-near 50ft contour detail)
  *   1–4.5 km       → z14  (~9.5 m/px — ultra-near outer)
  *   4.5–10.5 km    → z13  (~19 m/px — near foreground detail)
  *   10.5–31 km     → z11  (~76 m/px — mid-near)
@@ -36,13 +35,11 @@ const TILE_PX = 256
  * We match zoom to distance so nearby terrain gets high-res data
  * and distant terrain uses coarser (but wider-coverage) tiles.
  *
- * z16 (~2.4 m/px) for immediate 0–500 m: 20ft contour precision
- * z15 (~4.8 m/px) for immediate outer / ultra-near 0.5–1 km
+ * z15 (~4.8 m/px) for ultra-near 0–1 km: 50ft contour precision
  * z14 (~9.5 m/px) for ultra-near 1–4.5 km
  * z13 (~19 m/px) for near 4.5–10.5 km
  */
 export function distanceToZoom(distM: number): number {
-  if (distM < 500)     return 16
   if (distM < 1_000)   return 15
   if (distM < 4_500)   return 14
   if (distM < 10_500)  return 13
@@ -168,8 +165,7 @@ export class ScanTileCache {
    * Runs all zoom levels in parallel. Call this when the viewer's location changes.
    *
    * Tile count estimate:
-   *   z16 (0–500 m):   ~1–4 tiles   — immediate band 20ft contour detail
-   *   z15 (0.5–1 km):  ~4–9 tiles   — immediate outer / ultra-near detail
+   *   z15 (0–1 km):    ~4–9 tiles   — ultra-near detail for 50ft contours
    *   z14 (1–4.5 km):  ~12–20 tiles — ultra-near outer
    *   z13 (4.5–10 km): ~4–9 tiles   — near foreground ridgelines
    *   z11 (10–31 km):  ~4–9 tiles   — mid-near terrain
@@ -178,7 +174,6 @@ export class ScanTileCache {
   async prefetchForViewer(viewerLat: number, viewerLng: number): Promise<void> {
     log.info('Panorama tile prefetch starting', { viewerLat, viewerLng })
     await Promise.all([
-      this.prefetchArea(viewerLat, viewerLng,     500, 16),
       this.prefetchArea(viewerLat, viewerLng,   1_000, 15),
       this.prefetchArea(viewerLat, viewerLng,   4_500, 14),
       this.prefetchArea(viewerLat, viewerLng,  10_500, 13),
