@@ -1746,16 +1746,27 @@ const MapScreen: React.FC = () => {
           Render: on-demand · Frames: {globeRenderCountRef.current}<br />
           Sphere: 96×96 segments<br />
           {threeRef.current && (() => {
-            const facing = sphereRotationToLatLng(threeRef.current.earth.rotation.x, threeRef.current.earth.rotation.y)
-            const dLat = facing.lat - centerLat
-            const dLng = facing.lng - centerLng
+            const rx = threeRef.current.earth.rotation.x
+            const ry = threeRef.current.earth.rotation.y
+            const facing = sphereRotationToLatLng(rx, ry)
+            // Predicted "true" visible center using corrected formula:
+            // At rotY=0, camera sees u=0.25 on SphereGeometry = lng -90°
+            // Positive rotY shifts visible lng negative → lng = -90 - rotY*(180/π)
+            const predictedLng = (((-90 - ry * (180 / Math.PI)) + 180) % 360 + 360) % 360 - 180
+            const predictedLat = rx * (180 / Math.PI)  // lat mapping may also need work
             return (<>
-              <strong>── Globe Source ──</strong><br />
+              <strong>── Globe Source (current formula) ──</strong><br />
               Globe center: {facing.lat.toFixed(4)}°, {facing.lng.toFixed(4)}°<br />
-              Raw rotation: x={threeRef.current.earth.rotation.x.toFixed(4)} y={threeRef.current.earth.rotation.y.toFixed(4)}<br />
-              <strong style={{ color: (Math.abs(dLat) > 0.5 || Math.abs(dLng) > 0.5) ? '#ff4444' : '#44ff44' }}>
-                ── Mismatch ──</strong><br />
-              Δlat: {dLat.toFixed(4)}° · Δlng: {dLng.toFixed(4)}°<br />
+              Raw rotation: x={rx.toFixed(4)} y={ry.toFixed(4)}<br />
+              <strong style={{ color: '#ffaa00' }}>── Predicted True Center (test) ──</strong><br />
+              Predicted: {predictedLat.toFixed(4)}°, {predictedLng.toFixed(4)}°<br />
+              Formula: lng = -90 - rotY×(180/π)<br />
+              <strong>── Selected / Active Location ──</strong><br />
+              Active dot: {activeLat.toFixed(4)}°, {activeLng.toFixed(4)}° ({mode})<br />
+              {gpsLat !== null && <>GPS: {gpsLat.toFixed(4)}°, {gpsLng!.toFixed(4)}°<br /></>}
+              <strong style={{ color: '#ff4444' }}>── Mismatches ──</strong><br />
+              Flat vs Globe: Δlat={(() => (facing.lat - centerLat).toFixed(2))()}° Δlng={(() => (facing.lng - centerLng).toFixed(2))()}°<br />
+              Flat vs Predicted: Δlng={(() => (centerLng - predictedLng).toFixed(2))()}°<br />
               Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}<br />
             </>)
           })()}
