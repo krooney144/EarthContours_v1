@@ -257,21 +257,31 @@ function zoomToCameraZ(zoom: number): number {
   return clamp(z, 1.15, 5.0)
 }
 
-/** Convert sphere rotation (euler Y=lng, euler X=lat) to lat/lng facing camera */
+/**
+ * Convert sphere rotation (euler X, Y) to the lat/lng facing the camera.
+ *
+ * SphereGeometry places u=0.25 (lng −90°) at +Z (facing camera) when rotation.y=0.
+ * Positive rotation.y shifts the visible center westward:
+ *   visible_lng = −90 − rotY × (180/π)
+ * Latitude is a direct tilt: visible_lat = rotX × (180/π)
+ */
 function sphereRotationToLatLng(rotX: number, rotY: number): { lat: number; lng: number } {
   let lat = rotX * (180 / Math.PI)
-  let lng = rotY * (180 / Math.PI)
+  let lng = -90 - rotY * (180 / Math.PI)
   lat = clamp(lat, -85, 85)
   lng = ((lng + 180) % 360 + 360) % 360 - 180
   return { lat, lng }
 }
 
-/** Convert lat/lng to sphere rotation euler angles */
+/**
+ * Convert lat/lng to sphere rotation euler angles (inverse of above).
+ *   rotY = −(lng + 90) × (π/180)
+ *   rotX = lat × (π/180)
+ */
 function latLngToSphereRotation(lat: number, lng: number): { rotX: number; rotY: number } {
-  // Positive rotX tilts north toward camera (matches 1-mercV UV convention)
   return {
     rotX: lat * (Math.PI / 180),
-    rotY: lng * (Math.PI / 180),
+    rotY: -(lng + 90) * (Math.PI / 180),
   }
 }
 
@@ -483,6 +493,7 @@ const MapScreen: React.FC = () => {
     atmosphere: THREE.Mesh
     stars: THREE.Points
     earthMaterial: THREE.MeshBasicMaterial
+    locationMarker: THREE.Mesh
     animFrameId: number
     needsRender: boolean
   } | null>(null)
@@ -498,6 +509,9 @@ const MapScreen: React.FC = () => {
   // Globe drag state
   const globeDragRef = useRef({
     isDragging: false,
+    hasMoved: false,
+    startX: 0,
+    startY: 0,
     lastX: 0,
     lastY: 0,
     velocityX: 0,
@@ -961,6 +975,14 @@ const MapScreen: React.FC = () => {
     earth.rotation.y = initRot.rotY
     scene.add(earth)
 
+    // Location marker — small teal sphere on the globe surface, child of earth so it rotates with it
+    const markerGeo = new THREE.SphereGeometry(0.02, 12, 12)
+    const markerMat = new THREE.MeshBasicMaterial({ color: 0x84D1DB, transparent: true, depthTest: false })
+    const locationMarker = new THREE.Mesh(markerGeo, markerMat)
+    locationMarker.renderOrder = 999  // always on top
+    locationMarker.visible = false
+    earth.add(locationMarker)
+
     // Atmosphere glow — thin sphere (r=1.06) with BackSide rendering
     // creates a subtle rim glow behind the Earth edge
     const atmosGeo = new THREE.SphereGeometry(1.06, 64, 64)
@@ -983,6 +1005,7 @@ const MapScreen: React.FC = () => {
     threeRef.current = {
       renderer, scene, camera, earth, atmosphere, stars,
       earthMaterial: earthMat as THREE.MeshBasicMaterial,
+      locationMarker,
       animFrameId: 0,
       needsRender: false,
     }
@@ -1121,6 +1144,24 @@ const MapScreen: React.FC = () => {
     requestGlobeRender()
   }, [centerLat, centerLng, zoom, requestGlobeRender])
 
+  // Sync location marker on globe when active location changes
+  useEffect(() => {
+    const t = threeRef.current
+    if (!t) return
+    // Position marker on the unrotated unit sphere (it's a child of earth, so rotation is handled)
+    // SphereGeometry: x = cos(lat)*cos(lng), y = sin(lat), z = -cos(lat)*sin(lng)
+    const latRad = activeLat * (Math.PI / 180)
+    const lngRad = activeLng * (Math.PI / 180)
+    const r = 1.015  // slightly above surface so it's always visible
+    t.locationMarker.position.set(
+      r * Math.cos(latRad) * Math.cos(lngRad),
+      r * Math.sin(latRad),
+      r * -Math.cos(latRad) * Math.sin(lngRad),
+    )
+    t.locationMarker.visible = true
+    requestGlobeRender()
+  }, [activeLat, activeLng, requestGlobeRender])
+
   // ── Globe Pointer Handlers ────────────────────────────────────────────────
 
   const isGlobeActive = zoom < GLOBE_GONE_ZOOM
@@ -1130,6 +1171,9 @@ const MapScreen: React.FC = () => {
     globeCanvasRef.current?.setPointerCapture(e.pointerId)
     globeDragRef.current = {
       isDragging: true,
+      hasMoved: false,
+      startX: e.clientX,
+      startY: e.clientY,
       lastX: e.clientX,
       lastY: e.clientY,
       velocityX: 0,
@@ -1140,6 +1184,15 @@ const MapScreen: React.FC = () => {
   const handleGlobePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     const gd = globeDragRef.current
     if (!gd.isDragging || !threeRef.current) return
+
+    // Detect if pointer has moved enough to count as a drag (not a tap)
+    if (!gd.hasMoved) {
+      const totalDx = e.clientX - gd.startX
+      const totalDy = e.clientY - gd.startY
+      if (totalDx * totalDx + totalDy * totalDy > 9) {
+        gd.hasMoved = true
+      }
+    }
 
     const deltaX = e.clientX - gd.lastX
     const deltaY = e.clientY - gd.lastY
@@ -1173,13 +1226,40 @@ const MapScreen: React.FC = () => {
 
   const handleGlobePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     globeCanvasRef.current?.releasePointerCapture(e.pointerId)
-    globeDragRef.current.isDragging = false
-    // Kick off momentum animation if there's velocity
     const gd = globeDragRef.current
+    const wasTap = gd.isDragging && !gd.hasMoved
+    gd.isDragging = false
+
+    // ── Globe tap → set explore location via raycast ──
+    if (wasTap && threeRef.current) {
+      const canvas = globeCanvasRef.current
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect()
+        const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1
+        const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1
+
+        const raycaster = new THREE.Raycaster()
+        raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), threeRef.current.camera)
+        const hits = raycaster.intersectObject(threeRef.current.earth)
+        if (hits.length > 0) {
+          // Get intersection point in object (unrotated sphere) space
+          const localPt = threeRef.current.earth.worldToLocal(hits[0].point.clone())
+          // Derive lat/lng from unit sphere position
+          // SphereGeometry: x = cos(lat)*cos(lng), y = sin(lat), z = -cos(lat)*sin(lng)
+          const lat = Math.asin(clamp(localPt.y, -1, 1)) * (180 / Math.PI)
+          const lng = Math.atan2(-localPt.z, localPt.x) * (180 / Math.PI)
+          log.info('Globe tap → setting explore location', { lat: lat.toFixed(4), lng: lng.toFixed(4) })
+          setExploreLocation(lat, lng)
+          setShowTapHint(false)
+        }
+      }
+    }
+
+    // Kick off momentum animation if there's velocity
     if (Math.abs(gd.velocityX) > 0.0001 || Math.abs(gd.velocityY) > 0.0001) {
       requestGlobeRender()
     }
-  }, [requestGlobeRender])
+  }, [requestGlobeRender, setExploreLocation])
 
   // Globe wheel zoom — smooth fractional steps
   const handleGlobeWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -1749,25 +1829,19 @@ const MapScreen: React.FC = () => {
             const rx = threeRef.current.earth.rotation.x
             const ry = threeRef.current.earth.rotation.y
             const facing = sphereRotationToLatLng(rx, ry)
-            // Predicted "true" visible center using corrected formula:
-            // At rotY=0, camera sees u=0.25 on SphereGeometry = lng -90°
-            // Positive rotY shifts visible lng negative → lng = -90 - rotY*(180/π)
-            const predictedLng = (((-90 - ry * (180 / Math.PI)) + 180) % 360 + 360) % 360 - 180
-            const predictedLat = rx * (180 / Math.PI)  // lat mapping may also need work
+            const dLat = facing.lat - centerLat
+            const dLng = facing.lng - centerLng
             return (<>
-              <strong>── Globe Source (current formula) ──</strong><br />
+              <strong>── Globe Source ──</strong><br />
               Globe center: {facing.lat.toFixed(4)}°, {facing.lng.toFixed(4)}°<br />
               Raw rotation: x={rx.toFixed(4)} y={ry.toFixed(4)}<br />
-              <strong style={{ color: '#ffaa00' }}>── Predicted True Center (test) ──</strong><br />
-              Predicted: {predictedLat.toFixed(4)}°, {predictedLng.toFixed(4)}°<br />
-              Formula: lng = -90 - rotY×(180/π)<br />
-              <strong>── Selected / Active Location ──</strong><br />
-              Active dot: {activeLat.toFixed(4)}°, {activeLng.toFixed(4)}° ({mode})<br />
+              Formula: lng = −90 − rotY×(180/π)<br />
+              <strong>── Active Location ──</strong><br />
+              Dot: {activeLat.toFixed(4)}°, {activeLng.toFixed(4)}° ({mode})<br />
               {gpsLat !== null && <>GPS: {gpsLat.toFixed(4)}°, {gpsLng!.toFixed(4)}°<br /></>}
-              <strong style={{ color: '#ff4444' }}>── Mismatches ──</strong><br />
-              Flat vs Globe: Δlat={(() => (facing.lat - centerLat).toFixed(2))()}° Δlng={(() => (facing.lng - centerLng).toFixed(2))()}°<br />
-              Flat vs Predicted: Δlng={(() => (centerLng - predictedLng).toFixed(2))()}°<br />
-              Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}<br />
+              <strong style={{ color: (Math.abs(dLat) > 0.5 || Math.abs(dLng) > 0.5) ? '#ff4444' : '#44ff44' }}>
+                ── Sync ──</strong><br />
+              Flat↔Globe: Δlat={dLat.toFixed(2)}° Δlng={dLng.toFixed(2)}°<br />
             </>)
           })()}
           <strong>Flat Map</strong><br />
