@@ -1319,7 +1319,7 @@ function drawScanCanvas(
 const ScanScreen: React.FC = () => {
   const {
     heading_deg, pitch_deg, height_m, fov,
-    applyARDrag, setHeightFromSlider, applyFovScale,
+    applyARDrag, setHeightFromSlider, applyFovScale, setFov,
   } = useCameraStore()
   const { activeLat, activeLng }               = useLocationStore()
   const { peaks, meshData } = useTerrainStore()
@@ -1332,6 +1332,10 @@ const ScanScreen: React.FC = () => {
   const sliderRef        = useRef<HTMLDivElement>(null)
   const sliderDragRef    = useRef<{ isDragging: boolean; startY: number; startHeight: number }>({
     isDragging: false, startY: 0, startHeight: height_m,
+  })
+  const zoomSliderRef    = useRef<HTMLDivElement>(null)
+  const zoomDragRef      = useRef<{ isDragging: boolean; startY: number; startFov: number }>({
+    isDragging: false, startY: 0, startFov: fov,
   })
 
   // Phase 2 infrastructure
@@ -1643,6 +1647,35 @@ const ScanScreen: React.FC = () => {
     sliderDragRef.current.isDragging = false
   }, [])
 
+  // ── Zoom slider (FOV) ──────────────────────────────────────────────────────
+  // Drag up = zoom in (smaller FOV), drag down = zoom out (larger FOV)
+
+  const MIN_FOV = 15
+  const MAX_FOV = 100
+
+  const handleZoomPointerDown = useCallback((e: React.PointerEvent) => {
+    e.stopPropagation()
+    zoomSliderRef.current?.setPointerCapture(e.pointerId)
+    zoomDragRef.current = { isDragging: true, startY: e.clientY, startFov: fov }
+  }, [fov])
+
+  const handleZoomPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!zoomDragRef.current.isDragging) return
+    const el = zoomSliderRef.current
+    if (!el) return
+    const trackHeight = el.getBoundingClientRect().height
+    const deltaY = e.clientY - zoomDragRef.current.startY
+    // Drag up (negative deltaY) → smaller FOV (zoom in)
+    const fovDelta = (deltaY / trackHeight) * (MAX_FOV - MIN_FOV)
+    const newFov = clamp(zoomDragRef.current.startFov + fovDelta, MIN_FOV, MAX_FOV)
+    setFov(newFov)
+  }, [setFov])
+
+  const handleZoomPointerUp = useCallback((e: React.PointerEvent) => {
+    zoomSliderRef.current?.releasePointerCapture(e.pointerId)
+    zoomDragRef.current.isDragging = false
+  }, [])
+
   // ── FOV-aware compass sizing ──────────────────────────────────────────────
   // Each compass item = 22.5°. Scale item width so that FOV degrees = viewport width.
   const compassItemWidth = typeof window !== 'undefined'
@@ -1884,13 +1917,14 @@ const ScanScreen: React.FC = () => {
           </div>
         )}
 
-        {/* Pitch indicator */}
-        <PitchIndicator pitch_deg={pitch_deg} />
-
-        {/* FOV indicator (appears when pinching) */}
-        <div className={styles.fovBadge} aria-hidden="true">
-          {Math.round(fov)}° FOV
-        </div>
+        {/* Zoom slider (FOV control) */}
+        <ZoomSlider
+          fov={fov}
+          sliderRef={zoomSliderRef}
+          onPointerDown={handleZoomPointerDown}
+          onPointerMove={handleZoomPointerMove}
+          onPointerUp={handleZoomPointerUp}
+        />
 
         {/* Drag hint */}
         <div
@@ -2002,19 +2036,39 @@ const PeakLabel: React.FC<{
   )
 }
 
-/** Vertical level gauge on the left edge showing current pitch. */
-const PitchIndicator: React.FC<{ pitch_deg: number }> = ({ pitch_deg }) => {
-  // Map pitch −80°…+80° → 0…100% (centre = 50%)
-  const pct = 50 - (pitch_deg / 80) * 50
+/** Vertical zoom slider on the left edge — controls FOV (drag up = zoom in). */
+const ZoomSlider: React.FC<{
+  fov: number
+  sliderRef: React.RefObject<HTMLDivElement>
+  onPointerDown: (e: React.PointerEvent) => void
+  onPointerMove: (e: React.PointerEvent) => void
+  onPointerUp:   (e: React.PointerEvent) => void
+}> = ({ fov, sliderRef, onPointerDown, onPointerMove, onPointerUp }) => {
+  // Map FOV 15°–100° → marker position: 15° (zoomed in) = top, 100° (zoomed out) = bottom
+  const pct = ((fov - 15) / (100 - 15)) * 100
+  // Zoom multiplier relative to default 60° FOV
+  const zoomX = (60 / fov).toFixed(1)
+
   return (
-    <div className={styles.pitchIndicator} aria-hidden="true">
-      <div className={styles.pitchTrack}>
-        <div className={styles.pitchMarker} style={{ top: `${pct}%` }} />
-        <div className={styles.pitchZero} />
+    <div className={styles.zoomSlider} aria-hidden="true">
+      <span className={styles.zoomLabel}>+</span>
+      <div
+        ref={sliderRef as React.RefObject<HTMLDivElement>}
+        className={styles.zoomTrack}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        role="slider"
+        aria-label="Zoom level"
+        aria-valuemin={15}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(fov)}
+      >
+        <div className={styles.zoomMarker} style={{ top: `${pct}%` }} />
       </div>
-      <span className={styles.pitchLabel}>
-        {pitch_deg > 0 ? '+' : ''}{Math.round(pitch_deg)}°
-      </span>
+      <span className={styles.zoomLabel}>−</span>
+      <span className={styles.zoomValue}>{zoomX}×</span>
     </div>
   )
 }
