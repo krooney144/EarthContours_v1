@@ -297,6 +297,8 @@ interface PeakScreenPos {
   elevation_m: number
   dist_km:     number
   bearing:     number
+  lat:         number
+  lng:         number
   screenX:     number
   screenY:     number
 }
@@ -613,6 +615,44 @@ function bandDistAt(
   return d0 * (1 - t) + d1 * t
 }
 
+/** Interpolated GPS coords of the ridgeline point at a fractional bearing for a given band.
+ *  Returns null if no ridge at this azimuth. */
+function bandGpsAt(
+  skyline: SkylineData,
+  bandIndex: number,
+  bearingDeg: number,
+): { lat: number; lng: number } | null {
+  const band = skyline.bands[bandIndex]
+  const bandRes = band.resolution
+  const bandAz  = band.numAzimuths
+
+  const normBearing = ((bearingDeg % 360) + 360) % 360
+  const fracIdx = normBearing * bandRes
+  const idx0 = Math.floor(fracIdx) % bandAz
+  const idx1 = (idx0 + 1) % bandAz
+  const t = fracIdx - Math.floor(fracIdx)
+
+  if (band.elevations[idx0] === -Infinity && band.elevations[idx1] === -Infinity) return null
+  if (band.elevations[idx0] === -Infinity) return { lat: band.ridgeLats[idx1], lng: band.ridgeLngs[idx1] }
+  if (band.elevations[idx1] === -Infinity) return { lat: band.ridgeLats[idx0], lng: band.ridgeLngs[idx0] }
+
+  return {
+    lat: band.ridgeLats[idx0] * (1 - t) + band.ridgeLats[idx1] * t,
+    lng: band.ridgeLngs[idx0] * (1 - t) + band.ridgeLngs[idx1] * t,
+  }
+}
+
+/** GPS proximity radius (metres) per depth band — peaks must own the ridgeline within this radius.
+ *  Near terrain has tight radius (ridge points are close together),
+ *  far terrain needs wider radius (ridge points are spread far apart). */
+const BAND_GPS_RADIUS: number[] = [
+  1_000,   // near:     1 km
+  5_000,   // med-near: 5 km
+  10_000,  // mid:      10 km
+  10_000,  // med-far:  10 km
+  15_000,  // far:      15 km
+]
+
 // ─── Elevation → Palette Color ────────────────────────────────────────────────
 //
 // Maps a normalized elevation (0–1) through the ocean-depth palette stops.
@@ -928,11 +968,12 @@ function renderContours(
 
 // ─── Peak Ridgeline Profiles ──────────────────────────────────────────────────
 //
-// For each visible peak, draw the actual terrain ridgeline profile in a wedge-
-// shaped arc centered on the peak's bearing.  The arc spans ±5° for far peaks,
-// expanding to ±8–10° for peaks closer than 10 km.  Each point is colored by
-// its elevation through the standard RIDGE_PALETTE.  Alpha fades smoothly to
-// transparent at the arc edges for a natural appearance.
+// For each visible peak, draw the ridgeline from the single depth band that
+// contains the peak's distance.  A GPS proximity check per azimuth ensures the
+// highlight only covers azimuths where the peak actually owns the ridgeline
+// (i.e. the ridge point is close to the peak, not some unrelated terrain).
+// Proximity radius varies by band: near ~1km, mid ~10km, far ~15km.
+// Alpha fades smoothly to transparent at the arc edges for a natural appearance.
 
 /** Angular half-width of the peak ridgeline arc (degrees). */
 const PEAK_ARC_HALF_FAR  = 5    // ±5° for peaks ≥ 10 km
@@ -941,6 +982,14 @@ const PEAK_ARC_NEAR_DIST = 10_000  // Distance (m) below which arc widens
 
 /** Bearing step size for sampling the ridgeline within the arc (degrees). */
 const PEAK_ARC_STEP = 0.25
+
+/** Flat-earth distance² between two GPS points (metres²). Fast approximation valid within ~300km. */
+function gpsDistSq(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const dy = (lat2 - lat1) * 111_132
+  const cosLat = Math.cos(lat1 * Math.PI / 180)
+  const dx = (lng2 - lng1) * 111_320 * cosLat
+  return dx * dx + dy * dy
+}
 
 function renderPeakRidgelines(
   ctx: CanvasRenderingContext2D,
@@ -974,114 +1023,118 @@ function renderPeakRidgelines(
     const peakBearing = pos.bearing
     const peakDist_m  = pos.dist_km * 1000
 
+    // Find the single band whose distance range contains this peak.
+    // If the peak falls in an overlap zone, pick the higher-resolution (lower index) band.
+    let bestBand = -1
+    for (let bi = 0; bi < numBands; bi++) {
+      const cfg = DEPTH_BANDS[bi]
+      if (cfg && peakDist_m >= cfg.minDist && peakDist_m <= cfg.maxDist) {
+        bestBand = bi
+        break
+      }
+    }
+    if (bestBand < 0) continue  // Peak outside all band ranges
+
+    const gpsRadius_m = BAND_GPS_RADIUS[bestBand] ?? 10_000
+    const gpsRadiusSq = gpsRadius_m * gpsRadius_m
+
     // Determine arc half-width: wider for nearby peaks, narrower for far
     const distT = Math.max(0, Math.min(1, peakDist_m / PEAK_ARC_NEAR_DIST))
     const arcHalf = PEAK_ARC_HALF_NEAR + distT * (PEAK_ARC_HALF_FAR - PEAK_ARC_HALF_NEAR)
 
-    // Determine which band(s) are relevant for this peak's distance.
-    // Find the band whose distance range contains the peak, and also draw
-    // adjacent bands for context (the peak ridgeline shows all bands in the arc).
-    // We draw all bands in painter's order (far→near) within the arc.
+    const lineWidth = 2.5
+    const baseAlpha = 0.75
+    ctx.lineWidth = lineWidth
 
-    // Two passes: first a wider glow, then a crisp inner line
-    for (let pass = 0; pass < 2; pass++) {
-      const baseLineWidth = pass === 0 ? 5 : 2
-      const baseAlpha     = pass === 0 ? 0.3 : 0.7
+    // Walk through the arc in small bearing steps
+    const totalSteps = Math.ceil(arcHalf * 2 / PEAK_ARC_STEP)
+    const BATCH_SIZE = 6
+    let segCount = 0
+    let pathStarted = false
 
-      // Draw each band's ridgeline within the arc (far→near painter's order)
-      for (let bi = numBands - 1; bi >= 0; bi--) {
-        // Band depth cue: near bands are brighter/thicker
-        const bandT = numBands <= 1 ? 1 : 1 - bi / (numBands - 1)
-        const bandAlpha = baseAlpha * (0.3 + bandT * 0.7)
-        const lineWidth = baseLineWidth * (0.5 + bandT * 0.5)
+    for (let s = 0; s <= totalSteps; s++) {
+      const bearingOffset = -arcHalf + (s / (totalSteps || 1)) * arcHalf * 2
+      const bearing = peakBearing + bearingOffset
 
-        ctx.lineWidth = lineWidth
-
-        // Walk through the arc in small bearing steps, batching ~6 steps
-        // per draw call for performance.  Color/alpha update at batch boundaries.
-        const totalSteps = Math.ceil(arcHalf * 2 / PEAK_ARC_STEP)
-        const BATCH_SIZE = 6
-        let segCount = 0
-        let pathStarted = false
-
-        for (let s = 0; s <= totalSteps; s++) {
-          const bearingOffset = -arcHalf + (s / (totalSteps || 1)) * arcHalf * 2
-          const bearing = peakBearing + bearingOffset
-
-          const angle = bandAngleAt(skyline, bi, bearing, projected)
-          if (angle <= -Math.PI / 2 + 0.001) {
-            if (pathStarted) ctx.stroke()
-            pathStarted = false
-            segCount = 0
-            continue
-          }
-
-          const { x, y } = project(bearing, angle, cam)
-          if (x < -50 || x > W + 50 || y < 0 || y > H) {
-            if (pathStarted) ctx.stroke()
-            pathStarted = false
-            segCount = 0
-            continue
-          }
-
-          // Edge fade: alpha falls off smoothly toward arc edges (cosine curve)
-          const edgeT = Math.abs(bearingOffset) / arcHalf  // 0 at center, 1 at edge
-          const edgeFade = Math.cos(edgeT * Math.PI * 0.5) // 1 at center, 0 at edge
-          const alpha = bandAlpha * edgeFade
-          if (alpha < 0.01) {
-            if (pathStarted) ctx.stroke()
-            pathStarted = false
-            segCount = 0
-            continue
-          }
-
-          if (!pathStarted) {
-            // Start new path — compute color at this bearing
-            const elev = bandElevAt(skyline, bi, bearing)
-            const tElev = hasElevRange && elev > -Infinity
-              ? (elev - globalElevMin) / elevRange : 0.5
-            const color = elevToRidgeColor(tElev)
-            const rgbMatch = color.match(/\d+/g)
-            if (!rgbMatch) continue
-            const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-            const cr = pass === 0 ? r : Math.round(r + (255 - r) * 0.35)
-            const cg = pass === 0 ? g : Math.round(g + (255 - g) * 0.35)
-            const cb = pass === 0 ? b : Math.round(b + (255 - b) * 0.35)
-
-            ctx.beginPath()
-            ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
-            ctx.moveTo(x, y)
-            pathStarted = true
-            segCount = 0
-          } else if (segCount >= BATCH_SIZE) {
-            // Flush batch — overlap by 1px (lineTo then new moveTo at same point)
-            ctx.lineTo(x, y)
-            ctx.stroke()
-
-            const elev = bandElevAt(skyline, bi, bearing)
-            const tElev = hasElevRange && elev > -Infinity
-              ? (elev - globalElevMin) / elevRange : 0.5
-            const color = elevToRidgeColor(tElev)
-            const rgbMatch = color.match(/\d+/g)
-            if (!rgbMatch) { pathStarted = false; segCount = 0; continue }
-            const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-            const cr = pass === 0 ? r : Math.round(r + (255 - r) * 0.35)
-            const cg = pass === 0 ? g : Math.round(g + (255 - g) * 0.35)
-            const cb = pass === 0 ? b : Math.round(b + (255 - b) * 0.35)
-
-            ctx.beginPath()
-            ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
-            ctx.moveTo(x, y)
-            segCount = 0
-          } else {
-            ctx.lineTo(x, y)
-            segCount++
-          }
-        }
-
+      // GPS proximity check: does the peak own the ridgeline at this azimuth?
+      const ridgeGps = bandGpsAt(skyline, bestBand, bearing)
+      if (!ridgeGps || gpsDistSq(pos.lat, pos.lng, ridgeGps.lat, ridgeGps.lng) > gpsRadiusSq) {
         if (pathStarted) ctx.stroke()
+        pathStarted = false
+        segCount = 0
+        continue
+      }
+
+      const angle = bandAngleAt(skyline, bestBand, bearing, projected)
+      if (angle <= -Math.PI / 2 + 0.001) {
+        if (pathStarted) ctx.stroke()
+        pathStarted = false
+        segCount = 0
+        continue
+      }
+
+      const { x, y } = project(bearing, angle, cam)
+      if (x < -50 || x > W + 50 || y < 0 || y > H) {
+        if (pathStarted) ctx.stroke()
+        pathStarted = false
+        segCount = 0
+        continue
+      }
+
+      // Edge fade: alpha falls off smoothly toward arc edges (cosine curve)
+      const edgeT = Math.abs(bearingOffset) / arcHalf  // 0 at center, 1 at edge
+      const edgeFade = Math.cos(edgeT * Math.PI * 0.5) // 1 at center, 0 at edge
+      const alpha = baseAlpha * edgeFade
+      if (alpha < 0.01) {
+        if (pathStarted) ctx.stroke()
+        pathStarted = false
+        segCount = 0
+        continue
+      }
+
+      if (!pathStarted) {
+        const elev = bandElevAt(skyline, bestBand, bearing)
+        const tElev = hasElevRange && elev > -Infinity
+          ? (elev - globalElevMin) / elevRange : 0.5
+        const color = elevToRidgeColor(tElev)
+        const rgbMatch = color.match(/\d+/g)
+        if (!rgbMatch) continue
+        const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+        const cr = Math.round(r + (255 - r) * 0.35)
+        const cg = Math.round(g + (255 - g) * 0.35)
+        const cb = Math.round(b + (255 - b) * 0.35)
+
+        ctx.beginPath()
+        ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
+        ctx.moveTo(x, y)
+        pathStarted = true
+        segCount = 0
+      } else if (segCount >= BATCH_SIZE) {
+        ctx.lineTo(x, y)
+        ctx.stroke()
+
+        const elev = bandElevAt(skyline, bestBand, bearing)
+        const tElev = hasElevRange && elev > -Infinity
+          ? (elev - globalElevMin) / elevRange : 0.5
+        const color = elevToRidgeColor(tElev)
+        const rgbMatch = color.match(/\d+/g)
+        if (!rgbMatch) { pathStarted = false; segCount = 0; continue }
+        const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+        const cr = Math.round(r + (255 - r) * 0.35)
+        const cg = Math.round(g + (255 - g) * 0.35)
+        const cb = Math.round(b + (255 - b) * 0.35)
+
+        ctx.beginPath()
+        ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
+        ctx.moveTo(x, y)
+        segCount = 0
+      } else {
+        ctx.lineTo(x, y)
+        segCount++
       }
     }
+
+    if (pathStarted) ctx.stroke()
   }
 
   ctx.restore()
@@ -1238,6 +1291,8 @@ function drawScanCanvas(
       elevation_m: peak.elevation_m,
       dist_km:     horizDist / 1000,
       bearing:     calculateBearing({ lat: activeLat, lng: activeLng }, { lat: peak.lat, lng: peak.lng }),
+      lat:         peak.lat,
+      lng:         peak.lng,
       screenX,
       screenY,
     })
