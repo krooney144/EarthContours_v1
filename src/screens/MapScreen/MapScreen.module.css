@@ -65,7 +65,7 @@
   font-size: 9px;
   color: var(--ec-text-muted);
   line-height: 1.5;
-  max-width: 220px;
+  max-width: 360px;
   pointer-events: none;
   font-variant-numeric: tabular-nums;
 }
