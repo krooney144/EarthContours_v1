@@ -61,7 +61,6 @@ const log = createLogger('SCREEN:SCAN')
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const VFOV              = 60          // Vertical field of view (°) — fixed
 const MAX_DIST          = 400_000     // Maximum render distance (m) — extended for high-AGL viewing
 const MAX_PEAK_DIST     = 400_000     // Max distance for peak label display (m)
 const EARTH_R           = 6_371_000  // Earth radius (m)
@@ -330,8 +329,12 @@ function project(
   cam: CameraParams,
 ): { x: number; y: number } {
   const hfovRad  = cam.hfov * DEG_TO_RAD
-  const vfovRad  = VFOV * DEG_TO_RAD
   const pitchRad = cam.pitch_deg * DEG_TO_RAD
+
+  // Uniform pixels-per-radian: horizontal FOV drives both axes.
+  // This gives real camera zoom behaviour — zooming in magnifies equally
+  // in both directions, like binoculars.
+  const pxPerRad = cam.W / hfovRad
 
   // Bearing offset from camera center, wrapped to [-180, 180]
   let dBearing = bearingDeg - cam.heading_deg
@@ -339,11 +342,11 @@ function project(
   if (dBearing < -180) dBearing += 360
   const dBearingRad = dBearing * DEG_TO_RAD
 
-  const horizonY = cam.H * 0.5 - pitchRad * (cam.H / vfovRad)
+  const horizonY = cam.H * 0.5 - pitchRad * pxPerRad
 
   return {
-    x: cam.W * 0.5 + dBearingRad * (cam.W / hfovRad),
-    y: horizonY - elevAngleRad * (cam.H / vfovRad),
+    x: cam.W * 0.5 + dBearingRad * pxPerRad,
+    y: horizonY - elevAngleRad * pxPerRad,
   }
 }
 
@@ -351,9 +354,9 @@ function project(
  * Compute the horizonY for the current camera (convenience for sky/glow drawing).
  */
 function getHorizonY(cam: CameraParams): number {
-  const vfovRad  = VFOV * DEG_TO_RAD
+  const pxPerRad = cam.W / (cam.hfov * DEG_TO_RAD)
   const pitchRad = cam.pitch_deg * DEG_TO_RAD
-  return cam.H * 0.5 - pitchRad * (cam.H / vfovRad)
+  return cam.H * 0.5 - pitchRad * pxPerRad
 }
 
 // ─── Grid Sampler ─────────────────────────────────────────────────────────────
@@ -1794,7 +1797,7 @@ const ScanScreen: React.FC = () => {
               const canvasH = terrainCanvasRef.current?.height || 0
               const horizY = getHorizonY({ heading_deg, pitch_deg, hfov: fov, W: canvasW, H: canvasH })
               const pxPerDegH = canvasW ? (canvasW / (fov * DEG_TO_RAD)).toFixed(1) : '?'
-              const pxPerDegV = canvasH ? (canvasH / (VFOV * DEG_TO_RAD)).toFixed(1) : '?'
+              const pxPerDegV = canvasW ? (canvasW / (fov * DEG_TO_RAD)).toFixed(1) : '?'
               const gElev = meshData ? sampleMeshBilinear(activeLat, activeLng, meshData) : 0
               const eyeElev = gElev + height_m
 
