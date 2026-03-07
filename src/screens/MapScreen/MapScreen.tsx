@@ -259,7 +259,7 @@ function zoomToCameraZ(zoom: number): number {
 
 /** Convert sphere rotation (euler Y=lng, euler X=lat) to lat/lng facing camera */
 function sphereRotationToLatLng(rotX: number, rotY: number): { lat: number; lng: number } {
-  let lat = -rotX * (180 / Math.PI)
+  let lat = rotX * (180 / Math.PI)
   let lng = rotY * (180 / Math.PI)
   lat = clamp(lat, -85, 85)
   lng = ((lng + 180) % 360 + 360) % 360 - 180
@@ -268,8 +268,9 @@ function sphereRotationToLatLng(rotX: number, rotY: number): { lat: number; lng:
 
 /** Convert lat/lng to sphere rotation euler angles */
 function latLngToSphereRotation(lat: number, lng: number): { rotX: number; rotY: number } {
+  // Positive rotX tilts north toward camera (matches 1-mercV UV convention)
   return {
-    rotX: -lat * (Math.PI / 180),
+    rotX: lat * (Math.PI / 180),
     rotY: lng * (Math.PI / 180),
   }
 }
@@ -1743,12 +1744,14 @@ const MapScreen: React.FC = () => {
           Atmos: r=1.06 BackSide · Fresnel p=3.0<br />
           Render: on-demand · Frames: {globeRenderCountRef.current}<br />
           Sphere: 96×96 segments<br />
-          {threeRef.current && (
-            <>
+          {threeRef.current && (() => {
+            const facing = sphereRotationToLatLng(threeRef.current.earth.rotation.x, threeRef.current.earth.rotation.y)
+            return (<>
+              Globe facing: {facing.lat.toFixed(4)}°, {facing.lng.toFixed(4)}°<br />
               Earth rot: x={threeRef.current.earth.rotation.x.toFixed(3)} y={threeRef.current.earth.rotation.y.toFixed(3)}<br />
               Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}<br />
-            </>
-          )}
+            </>)
+          })()}
           <strong>Flat Map</strong><br />
           Draw: {lastFlatMapDrawRef.current} (#{flatMapDrawCountRef.current})<br />
           Skip: {globeOpacity(zoom) >= 1 ? 'YES (globe α=1)' : 'no'}<br />
