@@ -344,8 +344,10 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
   self.postMessage({ type: 'progress', phase: 'tiles', progress: 1, tilesLoaded: tileCacheW.size })
 
   // ── Fix elevation source mismatch ─────────────────────────────────────────
+  // Use z15 (highest-res tile at viewer location, ~10m resolution) for ground
+  // truth. z13 (~40m) was averaging steep valleys and placing the viewer underground.
   const meshGround = sampleMeshGrid(viewerLat, viewerLng, meshElevations, meshWidth, meshHeight, meshBounds)
-  const tileGround = sampleBest(viewerLat, viewerLng, 13, meshElevations, meshWidth, meshHeight, meshBounds)
+  const tileGround = sampleBest(viewerLat, viewerLng, 15, meshElevations, meshWidth, meshHeight, meshBounds)
   const elevCorrection = tileGround - meshGround
   const correctedViewerElev = viewerElev + elevCorrection
 

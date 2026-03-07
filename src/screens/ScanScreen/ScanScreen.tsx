@@ -197,14 +197,21 @@ function buildContourStrands(
         }
         azCrossings.sort((a, b) => a.dist - b.dist)
 
-        // Occlusion sweep: skip crossings hidden behind nearer terrain
+        // Occlusion sweep: skip crossings hidden behind nearer terrain.
+        // For near bands (0–2), disable within-band occlusion — these bands span
+        // wide depth ranges (e.g. 0–4.5km) where a hillside at 200m would wrongly
+        // occlude all contours out to 4.5km. Painter's order rendering handles
+        // visual overlap correctly without data-level occlusion.
+        // For far bands (3+), within-band occlusion remains useful since crossings
+        // are at similar depths where true occlusion is meaningful.
         let runningMaxAngle = -Math.PI / 2
+        const useOcclusion = bi >= 3  // Only occlude within mid/mid-far/far bands
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
 
-          if (angle <= runningMaxAngle) continue
-          runningMaxAngle = angle
+          if (useOcclusion && angle <= runningMaxAngle) continue
+          if (useOcclusion) runningMaxAngle = angle
 
           // Snap level to nearest interval — eliminates floating point drift
           const snappedLevel = Math.round(c.elev / interval) * interval
