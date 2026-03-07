@@ -7,6 +7,7 @@ Quick reference for any Claude Code session in this repo.
 ## What This Project Is
 
 A **terrain visualization web app** (React + TypeScript + Vite) for exploring US elevation data.
+- **v2.3-globe** — Globe mode for MAP screen: Three.js Earth sphere at zoom 1–5 with smooth crossfade to flat DEM map at zoom 7+. Mercator-corrected UV mapping on SphereGeometry(1, 96, 96). MeshBasicMaterial (unlit) to avoid Lambert darkening of already-dark DEM colors. Brightness-lifted globe texture (1.5×R + 1.4×G + 1.3×B + floor). Two-phase texture loading: z2 (16 tiles) instant, z3 (64 tiles) background upgrade. Atmosphere Fresnel shader on BackSide r=1.04 sphere with ec-mid/ec-glow palette colors. 300-point star field. Single source of truth: centerLat/centerLng drives both globe rotation and flat map position. Smooth zoom slider (range input, step 0.1) replaces integer +/- buttons. Flat map drawMap() skipped entirely when globe opacity = 1 (performance). Debug panel shows UV mode, material type, atmos params, flat-map-skip status.
 - **v2.2.2** — Two-pass peak refinement: replaced auto-detect Phase 6 with peak-driven refinement. Main thread identifies visible peaks and sends `'refine-peaks'` to worker. Worker fetches HIGHER-ZOOM tiles (`distToRefinedZoom()`: +1–2 zoom levels above standard) around each peak, does dense 0.05° ray-march with 1.005× distance steps. Genuinely more terrain data, not resampled. Stale-while-revalidate: old arcs persist until new ones arrive. `PeakRefineItem` type for request protocol. Debug panel shows "REFINED ARCS (2nd pass)" with per-peak stats.
 - **v2.2.1** — Refined arc system (superseded by v2.2.2): worker Phase 6 auto-detected ridgeline features — failed because near-field angular prominence dominated, visible far peaks got zero arcs.
 - **v2.2** — Near-field enhancement: 6-band depth system (ultra-near/near/mid-near/mid/mid-far/far) with progressive contour intervals (50ft→2000ft), z15/z14 tile zoom for ultra-near detail, hybrid ray march (360-az 20–200m @ 1.005× + 2880-az 200m–31km @ 1.01×), scaled overlaps (0.5–2 km). Ultra-near band enables valley views and cliff-face rendering within 4.5 km.
@@ -117,7 +118,7 @@ Transitions use zoom animation stored in `uiStore`.
   - Teal dot renders at MAP-selected location using `locationStore.mode === 'exploring'`
   - `cameraStore.orbitPanX/orbitPanZ` = pan as fraction of terrain width/depth [-0.5, 0.5]
   - `cameraStore.orbitRadius` = camera distance from pivot in **metres**; auto-set by `initOrbitCamera(terrainWidth_m)`
-- **MAP**: Carto Dark Matter tile fetching on Canvas with overlay graphics (peaks, rivers). Tap to `setExploreLocation(lat, lng)` — syncs EXPLORE and SCAN.
+- **MAP**: Dual-canvas map with Three.js globe (zoom 1–6) and Canvas 2D flat DEM (zoom 7–16). Globe uses Mercator-corrected sphere with brightness-lifted DEM texture. Smooth CSS opacity crossfade at zoom 5–7. Carto dark_only_labels overlay at flat zoom. All overlays (GPS dot, explore marker, peaks, area selection) on flat map. Tap to `setExploreLocation(lat, lng)` — syncs EXPLORE and SCAN. Smooth zoom slider with 0.1 step granularity.
 
 ---
 
@@ -242,6 +243,7 @@ Regions are hand-tuned geographic chunks sized for visual quality, **not politic
 | v2.2.2 (done) | Two-pass peak refinement: replaced auto-detect with peak-driven `'refine-peaks'` protocol. Worker fetches higher-zoom tiles (`distToRefinedZoom()`, +1–2 levels) around each visible peak, dense 0.05° ray-march with 1.005× steps. Genuinely more terrain detail. Stale-while-revalidate arcs. `PeakRefineItem` type. |
 | v2.2.1 | Refined arc auto-detect (superseded by v2.2.2 — near-field bias caused zero arcs at visible far peaks). |
 | v2.3 | Near-band smoothing: address jumpy/steppy near+med-near ridgelines — either Gaussian smoothing or multi-point depth profiles per azimuth |
+| v2.3-globe (done) | Globe mode for MAP: Three.js Earth sphere (zoom 1–6) with Mercator-corrected UVs, MeshBasicMaterial (unlit), brightness-lifted DEM texture, atmosphere Fresnel glow (BackSide r=1.04), 300 stars, smooth zoom slider, drawMap() skip at globe zoom, dual-canvas opacity crossfade |
 | 3 | Real GPS (`navigator.geolocation`), `DeviceOrientationEvent` heading for true AR, worldwide viewpoint selection, HTTPS deployment for camera overlay |
 | Future | Three.js WebGL renderer; museum exhibit mode (7680×1080 triple ultra-wide) |
 
