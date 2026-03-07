@@ -217,7 +217,13 @@ function buildContourStrands(
           }
 
           // Match to closest strand by distance proximity
-          const maxDistDiff = Math.max(200, c.dist * 0.05)
+          // Per-band tolerance: tight for close bands (prevents jumpy connections),
+          // looser for far bands where large gaps are natural
+          const maxDistDiff = bi <= 1
+            ? Math.max(10, c.dist * 0.02)   // ultra-near + near: 2%, floor 10m
+            : bi === 2
+            ? Math.max(50, c.dist * 0.03)   // mid-near: 3%, floor 50m
+            : Math.max(200, c.dist * 0.05)  // mid/mid-far/far: 5%, floor 200m (original)
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
