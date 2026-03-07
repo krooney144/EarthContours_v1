@@ -17,6 +17,7 @@
 import React, { useCallback, useState } from 'react'
 import { useSettingsStore, useLocationStore } from '../../store'
 import { createLogger } from '../../core/logger'
+import { submitFeedback } from '../../data/feedbackService'
 import type { VerticalExaggeration, UnitSystem, CoordFormat, TargetFPS, BatteryMode, GPSAccuracy } from '../../core/types'
 import styles from './SettingsScreen.module.css'
 
@@ -109,7 +110,9 @@ const SettingsScreen: React.FC = () => {
   const { gpsPermission, requestGPS } = useLocationStore()
 
   const [feedbackText, setFeedbackText] = useState('')
-  const [feedbackSent, setFeedbackSent] = useState(false)
+  const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
+  const [feedbackError, setFeedbackError] = useState<string | null>(null)
+  const [feedbackIssueUrl, setFeedbackIssueUrl] = useState<string | null>(null)
   const [resetConfirm, setResetConfirm] = useState(false)
 
   log.debug('SettingsScreen render', {
@@ -118,14 +121,38 @@ const SettingsScreen: React.FC = () => {
     verticalExaggeration: settings.verticalExaggeration,
   })
 
-  const handleFeedbackSubmit = useCallback(() => {
+  /**
+   * Submit feedback as a GitHub Issue in krooney144/EarthContours_v1.
+   * Requires VITE_GITHUB_TOKEN in .env.local (see feedbackService.ts for setup).
+   * Shows success with a link to the created issue, or an error message.
+   * TODO: Add category selector (bug / feature / general feedback).
+   * TODO: Allow attaching screenshots.
+   */
+  const handleFeedbackSubmit = useCallback(async () => {
     if (!feedbackText.trim()) return
-    log.info('Feedback submitted', { length: feedbackText.length })
-    // In production: send to feedback API
-    console.info('[FEEDBACK]', feedbackText)
-    setFeedbackSent(true)
-    setFeedbackText('')
-    setTimeout(() => setFeedbackSent(false), 3000)
+
+    setFeedbackStatus('sending')
+    setFeedbackError(null)
+    setFeedbackIssueUrl(null)
+
+    log.info('Submitting feedback to GitHub', { length: feedbackText.length })
+
+    const result = await submitFeedback(feedbackText)
+
+    if (result.success) {
+      setFeedbackStatus('sent')
+      setFeedbackIssueUrl(result.issueUrl ?? null)
+      setFeedbackText('')
+      // Reset status after 5s so user can submit more feedback
+      setTimeout(() => {
+        setFeedbackStatus('idle')
+        setFeedbackIssueUrl(null)
+      }, 5000)
+    } else {
+      setFeedbackStatus('error')
+      setFeedbackError(result.error ?? 'Unknown error')
+      log.error('Feedback submission failed', { error: result.error })
+    }
   }, [feedbackText])
 
   const handleExportLogs = useCallback(() => {
@@ -457,6 +484,10 @@ const SettingsScreen: React.FC = () => {
         </Section>
 
         {/* ── Section 7: Feedback & Support ── */}
+        {/* Feedback is submitted as a GitHub Issue in the project repo.
+            Requires VITE_GITHUB_TOKEN in .env.local — see feedbackService.ts.
+            TODO: Add category picker (bug, feature request, general).
+            TODO: Support screenshot attachment via paste or file picker. */}
         <Section icon="✉" title="Feedback & Support">
           <div className={styles.feedbackArea}>
             <textarea
@@ -466,15 +497,19 @@ const SettingsScreen: React.FC = () => {
               onChange={(e) => setFeedbackText(e.target.value)}
               aria-label="Feedback text"
               rows={4}
+              disabled={feedbackStatus === 'sending'}
             />
             <div className={styles.feedbackActions}>
               <button
                 className={styles.actionBtn}
                 onClick={handleFeedbackSubmit}
-                disabled={!feedbackText.trim()}
-                aria-label="Submit feedback"
+                disabled={!feedbackText.trim() || feedbackStatus === 'sending'}
+                aria-label="Submit feedback as GitHub issue"
               >
-                {feedbackSent ? '✓ SENT' : 'SUBMIT'}
+                {feedbackStatus === 'sending' ? 'SENDING...' :
+                 feedbackStatus === 'sent'    ? '✓ SENT' :
+                 feedbackStatus === 'error'   ? 'RETRY' :
+                                                'SUBMIT'}
               </button>
               <button
                 className={styles.actionBtn}
@@ -484,6 +519,28 @@ const SettingsScreen: React.FC = () => {
                 EXPORT LOGS
               </button>
             </div>
+
+            {/* Success message with link to the created GitHub issue */}
+            {feedbackStatus === 'sent' && feedbackIssueUrl && (
+              <div className={styles.feedbackSuccess} role="status">
+                Feedback submitted!{' '}
+                <a
+                  href={feedbackIssueUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={styles.feedbackLink}
+                >
+                  View issue on GitHub
+                </a>
+              </div>
+            )}
+
+            {/* Error message */}
+            {feedbackStatus === 'error' && feedbackError && (
+              <div className={styles.feedbackErrorMsg} role="alert">
+                {feedbackError}
+              </div>
+            )}
           </div>
           <Row label="Reset All Settings" description="Restore all settings to their default values">
             <button

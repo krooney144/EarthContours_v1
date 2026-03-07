@@ -32,26 +32,54 @@
   cursor: grabbing;
 }
 
-/* ── Explore Mode Banner ────────────────────────────────────────────────────── */
+/* ── Location Banner ────────────────────────────────────────────────────────── */
+/* Shows the active viewpoint — either a tapped location (teal) or GPS (blue). */
 
-.exploreBanner {
+.locationBanner {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  background: rgba(47, 109, 135, 0.95);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--ec-border-active);
   padding: var(--space-2) var(--space-4);
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-3);
   z-index: var(--z-hud);
   animation: fade-in 300ms ease-out;
 }
 
-.exploreBannerText {
+/* Teal variant — user tapped a location on the map */
+.locationBanner.bannerExplore {
+  background: rgba(47, 109, 135, 0.95);
+  border-bottom: 1px solid var(--ec-border-active);
+}
+
+/* Blue variant — GPS / "my location" is the active viewpoint */
+.locationBanner.bannerGps {
+  background: rgba(30, 60, 110, 0.95);
+  border-bottom: 1px solid rgba(70, 130, 230, 0.4);
+}
+
+.bannerDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.bannerExplore .bannerDot {
+  background: #84D1DB;
+  box-shadow: 0 0 6px rgba(132, 209, 219, 0.6);
+}
+
+.bannerGps .bannerDot {
+  background: #4682E6;
+  box-shadow: 0 0 6px rgba(70, 130, 230, 0.6);
+}
+
+.bannerLabel {
   font-family: var(--font-display);
   font-size: var(--text-xs);
   color: var(--ec-white);
@@ -59,30 +87,10 @@
   text-transform: uppercase;
 }
 
-.exploreSubText {
+.bannerCoords {
   font-family: var(--font-body);
   font-size: 10px;
   color: rgba(240, 248, 255, 0.7);
-}
-
-.myLocationBtn {
-  background: none;
-  border: 1px solid rgba(240, 248, 255, 0.4);
-  color: var(--ec-white);
-  font-family: var(--font-display);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  padding: var(--space-1) var(--space-3);
-  border-radius: var(--radius-full);
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
-  white-space: nowrap;
-  text-transform: uppercase;
-}
-
-.myLocationBtn:hover {
-  background: rgba(240, 248, 255, 0.15);
-  border-color: rgba(240, 248, 255, 0.7);
 }
 
 /* ── Map Controls ────────────────────────────────────────────────────────────── */

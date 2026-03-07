@@ -400,53 +400,62 @@ const MapScreen: React.FC = () => {
       }
     }
 
-    // ── GPS current location dot (blue) ─────────────────────────────────────
-    // Shows the device's real GPS position as a blue dot with accuracy ring.
-    // Visually distinct from the explore marker (teal) so users can see both.
+    // ── GPS "ghost" dot (dimmed blue) ────────────────────────────────────────
+    // When in explore mode, show a faint blue dot at the GPS position so the
+    // user can still see where they physically are vs. where they tapped.
+    // In GPS mode, skip this — the active dot below handles it.
     // TODO: Animate the accuracy ring pulse when GPS is actively updating.
     // TODO: Show accuracy radius scaled to map zoom level.
-    if (gpsLat !== null && gpsLng !== null) {
+    if (mode === 'exploring' && gpsLat !== null && gpsLng !== null) {
       const gpsPx = latLngToPixel(gpsLat, gpsLng, centerLat, centerLng, zoom, W, H)
       if (gpsPx.x >= 0 && gpsPx.x <= W && gpsPx.y >= 0 && gpsPx.y <= H) {
-        // Accuracy halo — blue tint to differentiate from explore marker
+        // Dimmed accuracy halo
         ctx.beginPath()
-        ctx.arc(gpsPx.x, gpsPx.y, 14, 0, Math.PI * 2)
-        ctx.fillStyle = 'rgba(70, 130, 230, 0.15)'
+        ctx.arc(gpsPx.x, gpsPx.y, 12, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(70, 130, 230, 0.1)'
         ctx.fill()
-        // Outer ring
+        // Dimmed outer ring
         ctx.beginPath()
-        ctx.arc(gpsPx.x, gpsPx.y, 10, 0, Math.PI * 2)
-        ctx.strokeStyle = 'rgba(70, 130, 230, 0.5)'
-        ctx.lineWidth = 1.5
+        ctx.arc(gpsPx.x, gpsPx.y, 8, 0, Math.PI * 2)
+        ctx.strokeStyle = 'rgba(70, 130, 230, 0.3)'
+        ctx.lineWidth = 1
         ctx.stroke()
-        // Inner dot — solid blue
+        // Small dimmed dot
         ctx.beginPath()
-        ctx.arc(gpsPx.x, gpsPx.y, 5, 0, Math.PI * 2)
-        ctx.fillStyle   = '#4682E6'
-        ctx.shadowColor = '#4682E6'
-        ctx.shadowBlur  = 8
+        ctx.arc(gpsPx.x, gpsPx.y, 3.5, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(70, 130, 230, 0.5)'
         ctx.fill()
-        ctx.shadowBlur  = 0
       }
     }
 
-    // ── Explore location marker (teal) ───────────────────────────────────────
-    // Shows the user-selected "explore this terrain" location.
-    // Teal color matches the EXPLORE screen pin. Only visible in explore mode.
-    // TODO: Add a crosshair or pin icon for better visual distinction.
-    if (mode === 'exploring') {
-      const explorePx = latLngToPixel(activeLat, activeLng, centerLat, centerLng, zoom, W, H)
-      if (explorePx.x >= 0 && explorePx.x <= W && explorePx.y >= 0 && explorePx.y <= H) {
-        // Outer halo — teal
+    // ── Active viewpoint dot ─────────────────────────────────────────────────
+    // Single prominent dot for the active location (what SCAN/EXPLORE are using).
+    // Blue when GPS is active, teal when user tapped a location.
+    {
+      const dotLat = activeLat
+      const dotLng = activeLng
+      const isGps = mode === 'gps'
+      const color = isGps ? '#4682E6' : '#84D1DB'
+      const colorRgba = isGps ? 'rgba(70, 130, 230,' : 'rgba(132, 209, 219,'
+
+      const dotPx = latLngToPixel(dotLat, dotLng, centerLat, centerLng, zoom, W, H)
+      if (dotPx.x >= 0 && dotPx.x <= W && dotPx.y >= 0 && dotPx.y <= H) {
+        // Outer halo
         ctx.beginPath()
-        ctx.arc(explorePx.x, explorePx.y, 12, 0, Math.PI * 2)
-        ctx.fillStyle = 'rgba(132, 209, 219, 0.2)'
+        ctx.arc(dotPx.x, dotPx.y, 14, 0, Math.PI * 2)
+        ctx.fillStyle = `${colorRgba} 0.15)`
         ctx.fill()
-        // Inner dot — teal, matches EXPLORE screen pin color
+        // Ring
         ctx.beginPath()
-        ctx.arc(explorePx.x, explorePx.y, 6, 0, Math.PI * 2)
-        ctx.fillStyle   = '#84D1DB'
-        ctx.shadowColor = '#84D1DB'
+        ctx.arc(dotPx.x, dotPx.y, 10, 0, Math.PI * 2)
+        ctx.strokeStyle = `${colorRgba} 0.5)`
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+        // Inner dot
+        ctx.beginPath()
+        ctx.arc(dotPx.x, dotPx.y, 5, 0, Math.PI * 2)
+        ctx.fillStyle   = color
+        ctx.shadowColor = color
         ctx.shadowBlur  = 8
         ctx.fill()
         ctx.shadowBlur  = 0
@@ -712,9 +721,9 @@ const MapScreen: React.FC = () => {
   const handleZoomOut = () => setZoom((z) => clamp(Math.ceil(z)  - 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
 
   /**
-   * "My Location" button handler.
+   * GPS crosshair button handler.
+   * Centers the map on GPS AND switches SCAN/EXPLORE to use GPS as viewpoint.
    * If GPS hasn't been requested yet, prompts the browser for permission.
-   * If GPS is already active, centers the map on the current position.
    * TODO: Show a brief toast/snackbar if GPS permission is denied.
    * TODO: Animate map pan to GPS position instead of instant jump.
    */
@@ -726,9 +735,10 @@ const MapScreen: React.FC = () => {
       await requestGPS()
     }
 
+    // Switch to GPS mode — sets GPS as active viewpoint for SCAN/EXPLORE
     switchToGPS()
 
-    // Center map on GPS position if available
+    // Center map on GPS position
     const state = useLocationStore.getState()
     if (state.gpsLat !== null && state.gpsLng !== null) {
       setCenterLat(state.gpsLat)
@@ -760,24 +770,24 @@ const MapScreen: React.FC = () => {
         aria-hidden="true"
       />
 
-      {/* Explore mode banner */}
-      {mode === 'exploring' && (
-        <div className={styles.exploreBanner} role="status">
-          <div>
-            <div className={styles.exploreBannerText}>● EXPLORING</div>
-            <div className={styles.exploreSubText}>
-              {activeLat.toFixed(4)}°, {activeLng.toFixed(4)}°
-            </div>
+      {/* Location banner — shows active viewpoint with color-coded state.
+          Teal = user tapped a point on the map ("Selected Location").
+          Blue = GPS is the active viewpoint ("My Location").
+          Always visible so users know what SCAN/EXPLORE are pointed at. */}
+      <div
+        className={`${styles.locationBanner} ${mode === 'exploring' ? styles.bannerExplore : styles.bannerGps}`}
+        role="status"
+      >
+        <div className={styles.bannerDot} aria-hidden="true" />
+        <div>
+          <div className={styles.bannerLabel}>
+            {mode === 'exploring' ? 'SELECTED LOCATION' : 'MY LOCATION'}
           </div>
-          <button
-            className={styles.myLocationBtn}
-            onClick={handleMyLocation}
-            aria-label="Return to my GPS location"
-          >
-            ← MY LOCATION
-          </button>
+          <div className={styles.bannerCoords}>
+            {activeLat.toFixed(4)}°, {activeLng.toFixed(4)}°
+          </div>
         </div>
-      )}
+      </div>
 
       {/* Map controls — always show location button for GPS access.
           TODO: Add visual feedback (spinner) while waiting for GPS fix.
