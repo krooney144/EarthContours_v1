@@ -48,7 +48,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   verticalExaggeration: 4,     // 4× default — real mountains visible without being overwhelming
 
   // Appearance
-  appName: 'Earth Contours',   // Two-word brand name
   colorTheme: 'ocean',
   labelSize: 'medium',
   reduceMotion: false,
@@ -84,7 +83,6 @@ interface SettingsStore extends AppSettings {
   toggleBandLines: () => void
   toggleContourAnimation: () => void
   setVerticalExaggeration: (v: VerticalExaggeration) => void
-  setAppName: (name: 'Earth Contours' | 'EarthContours' | 'Earthscape') => void
   setColorTheme: (theme: ColorTheme) => void
   setLabelSize: (size: LabelSize) => void
   toggleReduceMotion: () => void
@@ -167,13 +165,6 @@ export const useSettingsStore = create<SettingsStore>()(
       setVerticalExaggeration: (verticalExaggeration) => {
         log.info('Vertical exaggeration changed', { to: `${verticalExaggeration}×` })
         set({ verticalExaggeration })
-      },
-
-      setAppName: (appName) => {
-        log.info('App name changed', { to: appName })
-        set({ appName })
-        // Also update the document title
-        document.title = appName
       },
 
       setColorTheme: (colorTheme) => {
@@ -288,7 +279,6 @@ export const useSettingsStore = create<SettingsStore>()(
         showBandLines: state.showBandLines,
         contourAnimation: state.contourAnimation,
         verticalExaggeration: state.verticalExaggeration,
-        appName: state.appName,
         colorTheme: state.colorTheme,
         labelSize: state.labelSize,
         reduceMotion: state.reduceMotion,
@@ -306,7 +296,6 @@ export const useSettingsStore = create<SettingsStore>()(
           log.error('Failed to rehydrate settings from localStorage', error)
         } else {
           log.info('Settings loaded from localStorage', {
-            appName: state?.appName,
             units: state?.units,
           })
         }

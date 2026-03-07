@@ -20,7 +20,6 @@ const log = createLogger('COMPONENT:SPLASH')
 const SplashScreen: React.FC = () => {
   const setSplashComplete = useUIStore((state) => state.setSplashComplete)
   const initializeLayout = useUIStore((state) => state.initializeLayout)
-  const appName = useSettingsStore((state) => state.appName)
   const defaultRegionId = useSettingsStore((state) => state.defaultRegionId)
   const loadRegion = useTerrainStore((state) => state.loadRegion)
   const loadingMessage = useTerrainStore((state) => state.loadingMessage)
@@ -29,7 +28,7 @@ const SplashScreen: React.FC = () => {
   const [isFadingOut, setIsFadingOut] = useState(false)
 
   useEffect(() => {
-    log.info('Splash screen mounted', { appName, splashDuration: SPLASH_DURATION_MS })
+    log.info('Splash screen mounted', { splashDuration: SPLASH_DURATION_MS })
 
     // Start loading terrain data immediately while splash shows
     const regionToLoad = defaultRegionId || DEFAULT_REGION_ID
@@ -89,7 +88,7 @@ const SplashScreen: React.FC = () => {
           width="96"
           height="96"
         />
-        <div className={styles.appName}>{appName}</div>
+        <div className={styles.appName}>Earth Contours</div>
         <div className={styles.tagline}>Terrain Visualization</div>
       </div>
 

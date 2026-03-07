@@ -91,24 +91,6 @@ export const REGIONS: Region[] = [
     },
   },
 
-  /**
-   * Washington Cascades — Rainier, Baker, Glacier Peak.
-   * Mount Rainier (4392 m), highest peak in the Cascades.
-   * ~230 km wide × ~220 km tall.  Sea level (Puget Sound) to glacier summits.
-   */
-  {
-    id: 'wa-cascades',
-    name: 'Washington Cascades',
-    description: 'Mount Rainier (4 392 m), Mount Baker, and Glacier Peak. ' +
-      'Full elevation range from Puget Sound (0 m) to glaciated summits.',
-    center: { lat: 48.0, lng: -121.5 },
-    bounds: {
-      north: 49.0,
-      south: 47.0,
-      east:  -120.0,
-      west:  -123.0,
-    },
-  },
 ]
 
 // ─── Lookup Helpers ───────────────────────────────────────────────────────────
