@@ -228,10 +228,10 @@ function loadLabelTile(z: number, x: number, y: number): Promise<HTMLImageElemen
 // ─── Globe Constants ──────────────────────────────────────────────────────────
 
 /** Zoom thresholds for globe / flat map crossfade */
-const GLOBE_FULL_ZOOM = 5    // Globe fully visible at zoom <= 5
+const GLOBE_FULL_ZOOM = 4    // Globe fully visible at zoom <= 4
 const GLOBE_GONE_ZOOM = 7    // Globe fully hidden at zoom >= 7
 
-/** Compute globe opacity from current zoom: 1 at <=5, 0 at >=7, linear between */
+/** Compute globe opacity from current zoom: 1 at <=4, 0 at >=7, linear between */
 function globeOpacity(zoom: number): number {
   if (zoom <= GLOBE_FULL_ZOOM) return 1
   if (zoom >= GLOBE_GONE_ZOOM) return 0
@@ -295,12 +295,11 @@ function remapSphereUVsToMercator(geometry: THREE.SphereGeometry): void {
     const MERC_LIMIT = 85.051 * (Math.PI / 180)
     lat = clamp(lat, -MERC_LIMIT, MERC_LIMIT)
 
-    // Mercator V: 0 at north pole, 1 at south pole
+    // Mercator V: 0 at north pole, 1 at south pole — matches SphereGeometry default
+    // (v=0 at top/north, v=1 at bottom/south) and tile texture layout (y=0 at north)
     const mercV = (1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2
 
-    // Flip V so north pole (y=+1) maps to v=0 (top of texture)
-    // Without this, the globe renders upside down.
-    uvAttr.setY(i, 1 - mercV)
+    uvAttr.setY(i, mercV)
   }
   uvAttr.needsUpdate = true
 }
@@ -459,6 +458,11 @@ const MapScreen: React.FC = () => {
   const [globeTilesTotal, setGlobeTilesTotal] = useState(0)
   const [showGlobeDebug, setShowGlobeDebug] = useState(false)
 
+  // Debug counters
+  const globeRenderCountRef = useRef(0)
+  const flatMapDrawCountRef = useRef(0)
+  const lastFlatMapDrawRef = useRef<string>('never')
+
   // Three.js refs (persist across renders, cleaned up on unmount)
   const threeRef = useRef<{
     renderer: THREE.WebGLRenderer
@@ -471,6 +475,10 @@ const MapScreen: React.FC = () => {
     animFrameId: number
     needsRender: boolean
   } | null>(null)
+
+  // Track current zoom for on-demand render decisions (avoids stale closure)
+  const zoomRef = useRef(zoom)
+  zoomRef.current = zoom
 
   // On-demand globe render — call this whenever the scene changes
   const requestGlobeRenderRef = useRef<() => void>(() => {})
@@ -574,11 +582,15 @@ const MapScreen: React.FC = () => {
     if (!canvas) return
 
     // Skip flat map rendering entirely when globe is fully visible — saves
-    // massive tile loading work at zoom 1-5 where the flat map is invisible
+    // massive tile loading work at zoom 1-4 where the flat map is invisible
     if (globeOpacity(zoom) >= 1) {
       log.debug('Skipping flat map draw — globe fully visible', { zoom })
+      lastFlatMapDrawRef.current = `skipped (globe α=1, z=${zoom.toFixed(1)})`
       return
     }
+
+    flatMapDrawCountRef.current++
+    lastFlatMapDrawRef.current = `draw #${flatMapDrawCountRef.current} z=${zoom.toFixed(1)}`
 
     const ctx = canvas.getContext('2d')
     if (!ctx) { log.error('Canvas 2D context unavailable'); return }
@@ -1007,6 +1019,7 @@ const MapScreen: React.FC = () => {
       }
 
       t.renderer.render(t.scene, t.camera)
+      globeRenderCountRef.current++
       t.needsRender = false
 
       // Only schedule next frame if momentum is still decaying
@@ -1674,12 +1687,17 @@ const MapScreen: React.FC = () => {
       </button>
 
       {/* Globe debug panel */}
-      {showGlobeDebug && (
+      {showGlobeDebug && (() => {
+        const rawTileZ = Math.round(zoom)
+        const gOp = globeOpacity(zoom)
+        const effectiveTileZ = gOp > 0 ? Math.min(rawTileZ, 4) : rawTileZ
+        return (
         <div className={styles.globeDebug} style={{ top: 78 }}>
           <strong>Globe Debug</strong><br />
           Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'}<br />
-          Zoom: {zoom.toFixed(2)} · Tile Z: {Math.round(zoom)}<br />
+          Zoom: {zoom.toFixed(2)} · Tile Z: {rawTileZ} {gOp > 0 && rawTileZ > 4 ? `→ capped z${effectiveTileZ}` : ''}<br />
           Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
+          Transition: ≤{GLOBE_FULL_ZOOM} globe → {GLOBE_FULL_ZOOM}–{GLOBE_GONE_ZOOM} crossfade → ≥{GLOBE_GONE_ZOOM} flat<br />
           Camera Z: {zoomToCameraZ(zoom).toFixed(2)}<br />
           Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
           <strong>Texture</strong><br />
@@ -1691,17 +1709,21 @@ const MapScreen: React.FC = () => {
           Globe ready: {globeReady ? 'yes' : 'no'}<br />
           <strong>Scene</strong><br />
           Atmos: r=1.25 BackSide · Fresnel p=1.5<br />
-          Render: on-demand<br />
+          Render: on-demand · Frames: {globeRenderCountRef.current}<br />
           Sphere: 96×96 segments<br />
           {threeRef.current && (
             <>
               Earth rot: x={threeRef.current.earth.rotation.x.toFixed(3)} y={threeRef.current.earth.rotation.y.toFixed(3)}<br />
               Momentum: vx={globeDragRef.current.velocityX.toFixed(4)} vy={globeDragRef.current.velocityY.toFixed(4)}<br />
-              Flat map skip: {globeOpacity(zoom) >= 1 ? 'YES (saving perf)' : 'no'}
             </>
           )}
+          <strong>Flat Map</strong><br />
+          Draw: {lastFlatMapDrawRef.current} (#{flatMapDrawCountRef.current})<br />
+          Skip: {globeOpacity(zoom) >= 1 ? 'YES (globe α=1)' : 'no'}<br />
+          Debounce: 120ms
         </div>
-      )}
+        )
+      })()}
 
       {/* Coordinate bar */}
       <div className={styles.coordBar} aria-label="Map coordinates">
