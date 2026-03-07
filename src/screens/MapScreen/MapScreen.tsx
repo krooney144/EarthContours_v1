@@ -239,14 +239,22 @@ function globeOpacity(zoom: number): number {
 }
 
 /** Map zoom level to camera Z distance from globe center.
- *  Zoom 1: ~6.0 (globe comfortably visible)
- *  Zoom 2-3: globe filling most of screen
- *  Zoom 4-5: globe covering screen, slight curvature
- *  Zoom 6: ~2.8 (globe flat-looking, fills viewport completely)
+ *
+ * Formula: z = 1.2 + 4.5 * 0.65^zoom
+ *
+ * Designed so the globe fills the viewport by the transition zone (zoom 4+),
+ * eliminating the visible circle-over-map artifact during crossfade.
+ *
+ *   Zoom 1: d≈4.1 → globe subtends ~32° of 45° FOV → full globe with space
+ *   Zoom 2: d≈3.1 → ~38° → globe nearly fills screen
+ *   Zoom 3: d≈2.4 → ~48° → globe just fills screen (edge at viewport border)
+ *   Zoom 4: d≈2.0 → ~60° → globe overflows viewport, no visible edge
+ *   Zoom 5: d≈1.7 → ~68° → globe surface looks nearly flat
+ *   Zoom 6: d≈1.5 → ~77° → globe surface looks flat, max magnification
  */
 function zoomToCameraZ(zoom: number): number {
-  const z = 1.1 + 2.4 * Math.pow(2, (5 - zoom) * 0.5)
-  return clamp(z, 1.1, 6.0)
+  const z = 1.2 + 4.5 * Math.pow(0.65, zoom)
+  return clamp(z, 1.15, 5.0)
 }
 
 /** Convert sphere rotation (euler Y=lng, euler X=lat) to lat/lng facing camera */
@@ -295,11 +303,12 @@ function remapSphereUVsToMercator(geometry: THREE.SphereGeometry): void {
     const MERC_LIMIT = 85.051 * (Math.PI / 180)
     lat = clamp(lat, -MERC_LIMIT, MERC_LIMIT)
 
-    // Mercator V: 0 at north pole, 1 at south pole — matches SphereGeometry default
-    // (v=0 at top/north, v=1 at bottom/south) and tile texture layout (y=0 at north)
+    // Mercator V: 0 at north pole, 1 at south pole (matching tile texture layout)
+    // Three.js SphereGeometry however has v=1 at top (north) and v=0 at bottom (south),
+    // so we invert with (1 - mercV) to align the texture correctly.
     const mercV = (1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2
 
-    uvAttr.setY(i, mercV)
+    uvAttr.setY(i, 1 - mercV)
   }
   uvAttr.needsUpdate = true
 }
@@ -405,8 +414,9 @@ function createStarField(): THREE.Points {
 
 /**
  * Fresnel-based atmosphere glow.
- *   - Large glow sphere (r=1.25) so the halo extends well beyond the Earth edge
- *   - Smooth alpha falloff: bright near the Earth limb, fading to transparent at outer edge
+ *   - Thin glow sphere (r=1.06) — just slightly larger than Earth for a subtle rim
+ *   - Steep Fresnel power (3.0) — glow concentrated at the very edge, fades fast
+ *   - Low alpha cap (0.35) — translucent haze, never solid/opaque
  *   - BackSide rendering so glow is visible as a rim behind the Earth
  *   - Additive blending for bright, airy halo
  */
@@ -426,10 +436,10 @@ const atmosphereFragmentShader = `
   void main() {
     vec3 viewDir = normalize(-vPosition);
     float rim = 1.0 - max(0.0, dot(vNormal, viewDir));
-    // Soft falloff: pow 1.5 gives a wide gradient instead of a hard ring
-    float intensity = pow(rim, 1.5) * 0.9;
-    // Fade alpha to 0 at the outer edge of the atmosphere sphere
-    float alpha = intensity * smoothstep(0.0, 0.4, rim) * 0.6;
+    // Steep falloff: pow 3.0 concentrates glow at the very edge
+    float intensity = pow(rim, 3.0) * 1.0;
+    // Low alpha cap — translucent haze, fades to 0 at outer edge
+    float alpha = intensity * 0.35;
     // Ocean-depth palette glow: mix of ec-mid (#4B8EA3) and ec-glow (#84D1DB)
     vec3 glowColor = mix(vec3(0.29, 0.56, 0.64), vec3(0.52, 0.82, 0.86), rim);
     gl_FragColor = vec4(glowColor * intensity, alpha);
@@ -950,9 +960,9 @@ const MapScreen: React.FC = () => {
     earth.rotation.y = initRot.rotY
     scene.add(earth)
 
-    // Atmosphere glow — large sphere (r=1.25) with BackSide rendering
-    // creates a wide, soft halo behind the Earth edge
-    const atmosGeo = new THREE.SphereGeometry(1.25, 64, 64)
+    // Atmosphere glow — thin sphere (r=1.06) with BackSide rendering
+    // creates a subtle rim glow behind the Earth edge
+    const atmosGeo = new THREE.SphereGeometry(1.06, 64, 64)
     const atmosMat = new THREE.ShaderMaterial({
       vertexShader: atmosphereVertexShader,
       fragmentShader: atmosphereFragmentShader,
@@ -1691,6 +1701,24 @@ const MapScreen: React.FC = () => {
         const rawTileZ = Math.round(zoom)
         const gOp = globeOpacity(zoom)
         const effectiveTileZ = gOp > 0 ? Math.min(rawTileZ, 4) : rawTileZ
+        const camZ = zoomToCameraZ(zoom)
+
+        // Globe scale: degrees per pixel at center of visible face
+        // On a unit sphere at distance d with FOV θ, deg/px = d * 2*tan(θ/2) / H * (180/π)
+        const globeCanvas = globeCanvasRef.current
+        const viewH = globeCanvas ? globeCanvas.clientHeight : 700
+        const globeDegPerPx = camZ * 2 * Math.tan(22.5 * Math.PI / 180) / viewH * (180 / Math.PI)
+
+        // Flat map scale: degrees per pixel at tileZoom
+        const flatDegPerPx = 360 / (TILE_SIZE * Math.pow(2, effectiveTileZ))
+
+        // Globe visible arc: how much of the sphere surface is visible
+        const visibleArcDeg = camZ > 1 ? 2 * Math.asin(1 / camZ) * (180 / Math.PI) : 180
+        // Does the globe fill the screen? (visible arc > FOV)
+        const globeFillsScreen = visibleArcDeg > 45
+
+        const scaleRatio = globeDegPerPx / flatDegPerPx
+
         return (
         <div className={styles.globeDebug} style={{ top: 78 }}>
           <strong>Globe Debug</strong><br />
@@ -1698,17 +1726,21 @@ const MapScreen: React.FC = () => {
           Zoom: {zoom.toFixed(2)} · Tile Z: {rawTileZ} {gOp > 0 && rawTileZ > 4 ? `→ capped z${effectiveTileZ}` : ''}<br />
           Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
           Transition: ≤{GLOBE_FULL_ZOOM} globe → {GLOBE_FULL_ZOOM}–{GLOBE_GONE_ZOOM} crossfade → ≥{GLOBE_GONE_ZOOM} flat<br />
-          Camera Z: {zoomToCameraZ(zoom).toFixed(2)}<br />
+          Camera Z: {camZ.toFixed(2)}<br />
           Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
+          <strong>Scale Matching</strong><br />
+          Globe: {globeDegPerPx.toFixed(4)}°/px · Flat: {flatDegPerPx.toFixed(4)}°/px<br />
+          Ratio: {scaleRatio.toFixed(2)}× (1.0 = perfect match)<br />
+          Globe arc: {visibleArcDeg.toFixed(0)}° of 45° FOV · {globeFillsScreen ? 'FILLS screen' : 'visible edge'}<br />
           <strong>Texture</strong><br />
-          Globe tex: {globeTextureZoom !== null ? `z${globeTextureZoom}` : 'loading...'} · UV: Mercator<br />
+          Globe tex: {globeTextureZoom !== null ? `z${globeTextureZoom}` : 'loading...'} · UV: Mercator (1−V)<br />
           Material: MeshBasic (unlit)<br />
           {globeTilesTotal > 0 && globeTilesLoaded < globeTilesTotal && (
             <>Tiles loading: {globeTilesLoaded}/{globeTilesTotal}<br /></>
           )}
           Globe ready: {globeReady ? 'yes' : 'no'}<br />
           <strong>Scene</strong><br />
-          Atmos: r=1.25 BackSide · Fresnel p=1.5<br />
+          Atmos: r=1.06 BackSide · Fresnel p=3.0<br />
           Render: on-demand · Frames: {globeRenderCountRef.current}<br />
           Sphere: 96×96 segments<br />
           {threeRef.current && (
