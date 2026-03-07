@@ -103,6 +103,22 @@ interface SkylineBand {
   numAzimuths: number      // 360 × resolution
 }
 
+/** Refined arc: dense ray-march data around a detected ridgeline feature. */
+interface RefinedArc {
+  centerBearing: number
+  halfWidth:     number
+  numSamples:    number
+  stepDeg:       number
+  elevations:    Float32Array
+  distances:     Float32Array
+  ridgeLats:     Float32Array
+  ridgeLngs:     Float32Array
+  bandIndex:     number
+  featureDist:   number
+  featureElev:   number
+  featureBearing: number
+}
+
 export interface SkylineData {
   /** Max elevation angle (radians) at each azimuth step */
   angles:      Float32Array
@@ -112,6 +128,8 @@ export interface SkylineData {
   shading:     Float32Array
   /** Per-depth-band raw world data (near/mid/far) */
   bands:       SkylineBand[]
+  /** Refined arcs — dense ray-march data around detected ridgeline features */
+  refinedArcs: RefinedArc[]
   /** Steps per degree used during computation */
   resolution:  number
   /** Total azimuth steps (= 360 × resolution) */
@@ -731,11 +749,202 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     bands[bi].crossingOffsets = offsets
   }
 
+  // ── Phase 6: Refined arcs — dense ray-march around prominent features ─────
+  //
+  // Scan each band's ridgeline for prominent local maxima (peaks that stand
+  // out above their surroundings).  For each detected feature, do a dense
+  // ray march at ~0.05° azimuth steps (5× finer than hi-res bands) covering
+  // ±6° around the feature.  Stores raw elevation/distance/GPS per sample
+  // for AGL re-projection.  Capped at 20 features to bound compute time.
+  //
+  // Feature detection: a local maximum in band elevation angle that is ≥0.3°
+  // above the average of its ±5° neighbors, with at least 2° separation
+  // between detected features.
+
+  const REFINED_STEP_DEG   = 0.05   // ~20 samples/degree
+  const REFINED_HALF_DEG   = 6      // ±6° arc = 12° total = ~240 samples
+  const MAX_ARCS           = 20
+  const FEATURE_MIN_PROMINENCE_RAD = 0.3 * DEG_TO_RAD  // Minimum 0.3° above neighbors
+  const FEATURE_MIN_SEPARATION_DEG = 2    // Minimum 2° between detected features
+
+  const refinedArcs: RefinedArc[] = []
+
+  // Detect prominent features across all bands
+  interface DetectedFeature {
+    bandIndex:      number
+    azimuthIdx:     number
+    bearing:        number
+    angle:          number   // elevation angle at this azimuth
+    neighborAvg:    number   // average angle of ±5° neighbors
+    prominence:     number   // angle - neighborAvg
+    dist:           number   // distance to ridge
+    elev:           number   // raw elevation
+  }
+
+  const detectedFeatures: DetectedFeature[] = []
+
+  for (let bi = 0; bi < bands.length; bi++) {
+    const band = bands[bi]
+    const bandAz = band.numAzimuths
+    const bandRes = band.resolution
+    const neighborSpan = Math.round(5 * bandRes)  // ±5° in azimuth samples
+
+    for (let ai = 0; ai < bandAz; ai++) {
+      if (band.elevations[ai] === -Infinity) continue
+
+      const dist = band.distances[ai]
+      const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const angle = Math.atan2(band.elevations[ai] - curvDrop - correctedViewerElev, dist)
+
+      // Check if this is a local maximum — higher than all immediate neighbors (±1 sample)
+      let isLocalMax = true
+      for (let offset = -1; offset <= 1; offset += 2) {
+        const ni = (ai + offset + bandAz) % bandAz
+        if (band.elevations[ni] === -Infinity) continue
+        const nDist = band.distances[ni]
+        const nCurv = (nDist * nDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const nAngle = Math.atan2(band.elevations[ni] - nCurv - correctedViewerElev, nDist)
+        if (nAngle >= angle) { isLocalMax = false; break }
+      }
+      if (!isLocalMax) continue
+
+      // Compute average angle of ±5° neighbors for prominence check
+      let sumAngle = 0
+      let countAngle = 0
+      for (let offset = -neighborSpan; offset <= neighborSpan; offset++) {
+        if (offset === 0) continue
+        const ni = (ai + offset + bandAz) % bandAz
+        if (band.elevations[ni] === -Infinity) continue
+        const nDist = band.distances[ni]
+        const nCurv = (nDist * nDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        sumAngle += Math.atan2(band.elevations[ni] - nCurv - correctedViewerElev, nDist)
+        countAngle++
+      }
+
+      if (countAngle < 3) continue  // Not enough neighbors for a reliable prominence check
+      const neighborAvg = sumAngle / countAngle
+      const prominence = angle - neighborAvg
+
+      if (prominence < FEATURE_MIN_PROMINENCE_RAD) continue
+
+      detectedFeatures.push({
+        bandIndex: bi,
+        azimuthIdx: ai,
+        bearing: ai / bandRes,
+        angle,
+        neighborAvg,
+        prominence,
+        dist: band.distances[ai],
+        elev: band.elevations[ai],
+      })
+    }
+  }
+
+  // Sort by prominence (most prominent first), enforce minimum separation, cap at MAX_ARCS
+  detectedFeatures.sort((a, b) => b.prominence - a.prominence)
+
+  const selectedFeatures: DetectedFeature[] = []
+  for (const feat of detectedFeatures) {
+    if (selectedFeatures.length >= MAX_ARCS) break
+
+    // Check separation from already-selected features
+    let tooClose = false
+    for (const sel of selectedFeatures) {
+      let dBearing = Math.abs(feat.bearing - sel.bearing)
+      if (dBearing > 180) dBearing = 360 - dBearing
+      if (dBearing < FEATURE_MIN_SEPARATION_DEG) { tooClose = true; break }
+    }
+    if (tooClose) continue
+
+    selectedFeatures.push(feat)
+  }
+
+  // Dense ray-march around each selected feature
+  for (const feat of selectedFeatures) {
+    const numSamples = Math.round((REFINED_HALF_DEG * 2) / REFINED_STEP_DEG) + 1
+    const elevations = new Float32Array(numSamples).fill(-Infinity)
+    const dists      = new Float32Array(numSamples)
+    const lats       = new Float32Array(numSamples)
+    const lngs       = new Float32Array(numSamples)
+
+    // Determine distance step array based on feature distance
+    const bandCfg = DEPTH_BANDS[feat.bandIndex]
+    const marchMin = bandCfg.minDist || 20
+    const marchMax = bandCfg.maxDist
+
+    // Build fine distance steps for this band's range
+    const arcDists: number[] = []
+    let arcD = Math.max(20, marchMin)
+    const stepMul = marchMax < 5000 ? 1.005 : marchMax < 31000 ? 1.01 : 1.015
+    while (arcD <= marchMax) {
+      arcDists.push(arcD)
+      arcD *= stepMul
+    }
+    arcDists.reverse()  // far → near
+
+    for (let si = 0; si < numSamples; si++) {
+      const bearingOffset = -REFINED_HALF_DEG + si * REFINED_STEP_DEG
+      const azDeg = feat.bearing + bearingOffset
+      const azRad = azDeg * DEG_TO_RAD
+      const sinA  = Math.sin(azRad)
+      const cosA  = Math.cos(azRad)
+
+      let bestAngle = -Math.PI / 2
+      let bestDist  = 0
+      let bestLat   = viewerLat
+      let bestLng   = viewerLng
+      let bestElev  = -Infinity as number
+
+      for (const dist of arcDists) {
+        const sLat = viewerLat + (cosA * dist) / 111_132
+        const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
+        const zoom = distToZoom(dist)
+        const rawElev = sampleBest(sLat, sLng, zoom, meshElevations, meshWidth, meshHeight, meshBounds)
+        const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const effElev  = rawElev - curvDrop
+        const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
+
+        if (elevAngle > Math.PI / 3) continue
+
+        if (elevAngle > bestAngle) {
+          bestAngle = elevAngle
+          bestDist  = dist
+          bestLat   = sLat
+          bestLng   = sLng
+          bestElev  = rawElev
+        }
+      }
+
+      elevations[si] = bestElev
+      dists[si]      = bestDist
+      lats[si]       = bestLat
+      lngs[si]       = bestLng
+    }
+
+    refinedArcs.push({
+      centerBearing:  feat.bearing,
+      halfWidth:      REFINED_HALF_DEG,
+      numSamples,
+      stepDeg:        REFINED_STEP_DEG,
+      elevations,
+      distances:      dists,
+      ridgeLats:      lats,
+      ridgeLngs:      lngs,
+      bandIndex:      feat.bandIndex,
+      featureDist:    feat.dist,
+      featureElev:    feat.elev,
+      featureBearing: feat.bearing,
+    })
+  }
+
+  self.postMessage({ type: 'progress', phase: 'skyline', progress: 1.0 })
+
   const skyline: SkylineData = {
     angles,
     distances,
     shading,
     bands,
+    refinedArcs,
     resolution,
     numAzimuths,
     computedAt: {
@@ -761,6 +970,15 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       band.ridgeLngs.buffer as ArrayBuffer,
       band.crossingData.buffer as ArrayBuffer,
       band.crossingOffsets.buffer as ArrayBuffer,
+    )
+  }
+  // Transfer refined arc buffers (zero-copy)
+  for (const arc of refinedArcs) {
+    transferables.push(
+      arc.elevations.buffer as ArrayBuffer,
+      arc.distances.buffer as ArrayBuffer,
+      arc.ridgeLats.buffer as ArrayBuffer,
+      arc.ridgeLngs.buffer as ArrayBuffer,
     )
   }
   self.postMessage({ type: 'complete', skyline }, transferables)

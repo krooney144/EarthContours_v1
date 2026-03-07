@@ -55,7 +55,7 @@ import {
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
-import type { Peak, TerrainMeshData, SkylineData, SkylineBand, SkylineRequest } from '../../core/types'
+import type { Peak, TerrainMeshData, SkylineData, SkylineBand, SkylineRequest, RefinedArc } from '../../core/types'
 import { DEPTH_BANDS } from '../../core/types'
 import styles from './ScanScreen.module.css'
 
@@ -132,6 +132,43 @@ function reprojectBands(
   }
 
   return { bandAngles, overallAngles, viewerElev }
+}
+
+// ─── Refined Arc Re-Projection ──────────────────────────────────────────────
+
+/**
+ * Pre-computed elevation angles for each refined arc sample.
+ * Recomputed on the main thread when AGL changes, same as band re-projection.
+ */
+interface ProjectedRefinedArc {
+  /** Elevation angles (radians) per sample, re-projected for current viewerElev */
+  angles: Float32Array
+  /** Reference to the source arc (for bearing/distance/GPS lookups) */
+  arc: RefinedArc
+}
+
+/**
+ * Re-project refined arc angles from raw world data for a new viewer elevation.
+ * Each arc has ~240 samples — 20 arcs = ~4,800 atan2 calls, sub-millisecond.
+ */
+function reprojectRefinedArcs(
+  arcs: RefinedArc[],
+  viewerElev: number,
+): ProjectedRefinedArc[] {
+  return arcs.map(arc => {
+    const angles = new Float32Array(arc.numSamples)
+    for (let i = 0; i < arc.numSamples; i++) {
+      const elev = arc.elevations[i]
+      const dist = arc.distances[i]
+      if (elev === -Infinity || dist <= 0) {
+        angles[i] = -Math.PI / 2
+        continue
+      }
+      const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      angles[i] = Math.atan2(elev - curvDrop - viewerElev, dist)
+    }
+    return { angles, arc }
+  })
 }
 
 // ─── Contour Strand Precomputation ────────────────────────────────────────────
@@ -1017,6 +1054,7 @@ function renderPeakRidgelines(
   projected: ProjectedBands | null,
   peakPositions: PeakScreenPos[],
   cam: CameraParams,
+  projectedArcs: ProjectedRefinedArc[] | null,
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -1074,95 +1112,219 @@ function renderPeakRidgelines(
     const baseAlpha = 0.75
     ctx.lineWidth = lineWidth
 
-    // Walk through the arc in small bearing steps
-    const totalSteps = Math.ceil(arcHalf * 2 / PEAK_ARC_STEP)
-    const BATCH_SIZE = 6
-    let segCount = 0
-    let pathStarted = false
-
-    for (let s = 0; s <= totalSteps; s++) {
-      const bearingOffset = -arcHalf + (s / (totalSteps || 1)) * arcHalf * 2
-      const bearing = peakBearing + bearingOffset
-
-      // GPS proximity check: does the peak own the ridgeline at this azimuth?
-      const ridgeGps = bandGpsAt(skyline, bestBand, bearing)
-      if (!ridgeGps || gpsDistSq(pos.lat, pos.lng, ridgeGps.lat, ridgeGps.lng) > gpsRadiusSq) {
-        if (pathStarted) ctx.stroke()
-        pathStarted = false
-        segCount = 0
-        continue
-      }
-
-      const angle = bandAngleAt(skyline, bestBand, bearing, projected)
-      if (angle <= -Math.PI / 2 + 0.001) {
-        if (pathStarted) ctx.stroke()
-        pathStarted = false
-        segCount = 0
-        continue
-      }
-
-      const { x, y } = project(bearing, angle, cam)
-      if (x < -50 || x > W + 50 || y < 0 || y > H) {
-        if (pathStarted) ctx.stroke()
-        pathStarted = false
-        segCount = 0
-        continue
-      }
-
-      // Edge fade: alpha falls off smoothly toward arc edges (cosine curve)
-      const edgeT = Math.abs(bearingOffset) / arcHalf  // 0 at center, 1 at edge
-      const edgeFade = Math.cos(edgeT * Math.PI * 0.5) // 1 at center, 0 at edge
-      const alpha = baseAlpha * edgeFade
-      if (alpha < 0.01) {
-        if (pathStarted) ctx.stroke()
-        pathStarted = false
-        segCount = 0
-        continue
-      }
-
-      if (!pathStarted) {
-        const elev = bandElevAt(skyline, bestBand, bearing)
-        const tElev = hasElevRange && elev > -Infinity
-          ? (elev - globalElevMin) / elevRange : 0.5
-        const color = elevToRidgeColor(tElev)
-        const rgbMatch = color.match(/\d+/g)
-        if (!rgbMatch) continue
-        const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-        const cr = Math.round(r + (255 - r) * 0.15)
-        const cg = Math.round(g + (255 - g) * 0.15)
-        const cb = Math.round(b + (255 - b) * 0.15)
-
-        ctx.beginPath()
-        ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
-        ctx.moveTo(x, y)
-        pathStarted = true
-        segCount = 0
-      } else if (segCount >= BATCH_SIZE) {
-        ctx.lineTo(x, y)
-        ctx.stroke()
-
-        const elev = bandElevAt(skyline, bestBand, bearing)
-        const tElev = hasElevRange && elev > -Infinity
-          ? (elev - globalElevMin) / elevRange : 0.5
-        const color = elevToRidgeColor(tElev)
-        const rgbMatch = color.match(/\d+/g)
-        if (!rgbMatch) { pathStarted = false; segCount = 0; continue }
-        const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-        const cr = Math.round(r + (255 - r) * 0.15)
-        const cg = Math.round(g + (255 - g) * 0.15)
-        const cb = Math.round(b + (255 - b) * 0.15)
-
-        ctx.beginPath()
-        ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
-        ctx.moveTo(x, y)
-        segCount = 0
-      } else {
-        ctx.lineTo(x, y)
-        segCount++
+    // ── Try refined arc first (5× denser sampling around detected features) ──
+    // Find a refined arc whose bearing range covers this peak's bearing.
+    // The arc must also be in the same band as the peak for correct depth matching.
+    let matchedArc: ProjectedRefinedArc | null = null
+    if (projectedArcs) {
+      for (const pa of projectedArcs) {
+        if (pa.arc.bandIndex !== bestBand) continue
+        let dBearing = peakBearing - pa.arc.centerBearing
+        if (dBearing > 180) dBearing -= 360
+        if (dBearing < -180) dBearing += 360
+        if (Math.abs(dBearing) <= pa.arc.halfWidth) {
+          matchedArc = pa
+          break
+        }
       }
     }
 
-    if (pathStarted) ctx.stroke()
+    if (matchedArc) {
+      // ── Render using refined arc data (high-res path) ─────────────────────
+      // Walk the arc's dense samples, using pre-projected angles and raw GPS
+      // for the proximity check.  Gives ~5× smoother ridgeline profile than
+      // band data around peaks.
+      const { arc, angles: arcAngles } = matchedArc
+      const BATCH_SIZE = 8
+      let segCount = 0
+      let pathStarted = false
+
+      for (let si = 0; si < arc.numSamples; si++) {
+        const bearingOffset = -arc.halfWidth + si * arc.stepDeg
+        const bearing = arc.centerBearing + bearingOffset
+
+        // Only render within the peak's arc half-width (with edge fade)
+        let dBearing = bearing - peakBearing
+        if (dBearing > 180) dBearing -= 360
+        if (dBearing < -180) dBearing += 360
+        if (Math.abs(dBearing) > arcHalf) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        // GPS proximity check: does the peak own the ridgeline at this sample?
+        if (arc.elevations[si] === -Infinity) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+        const ridgeDistSq = gpsDistSq(pos.lat, pos.lng, arc.ridgeLats[si], arc.ridgeLngs[si])
+        if (ridgeDistSq > gpsRadiusSq) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        const angle = arcAngles[si]
+        if (angle <= -Math.PI / 2 + 0.001) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        const { x, y } = project(bearing, angle, cam)
+        if (x < -50 || x > W + 50 || y < 0 || y > H) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        // Edge fade: alpha falls off smoothly toward arc edges (cosine curve)
+        const edgeT = Math.abs(dBearing) / arcHalf  // 0 at center, 1 at edge
+        const edgeFade = Math.cos(edgeT * Math.PI * 0.5) // 1 at center, 0 at edge
+        const alpha = baseAlpha * edgeFade
+        if (alpha < 0.01) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        if (!pathStarted) {
+          const tElev = hasElevRange && arc.elevations[si] > -Infinity
+            ? (arc.elevations[si] - globalElevMin) / elevRange : 0.5
+          const color = elevToRidgeColor(tElev)
+          const rgbMatch = color.match(/\d+/g)
+          if (!rgbMatch) continue
+          const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+          const cr = Math.round(r + (255 - r) * 0.15)
+          const cg = Math.round(g + (255 - g) * 0.15)
+          const cb = Math.round(b + (255 - b) * 0.15)
+          ctx.beginPath()
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
+          ctx.moveTo(x, y)
+          pathStarted = true
+          segCount = 0
+        } else if (segCount >= BATCH_SIZE) {
+          ctx.lineTo(x, y)
+          ctx.stroke()
+          const tElev = hasElevRange && arc.elevations[si] > -Infinity
+            ? (arc.elevations[si] - globalElevMin) / elevRange : 0.5
+          const color = elevToRidgeColor(tElev)
+          const rgbMatch = color.match(/\d+/g)
+          if (!rgbMatch) { pathStarted = false; segCount = 0; continue }
+          const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+          const cr = Math.round(r + (255 - r) * 0.15)
+          const cg = Math.round(g + (255 - g) * 0.15)
+          const cb = Math.round(b + (255 - b) * 0.15)
+          ctx.beginPath()
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
+          ctx.moveTo(x, y)
+          segCount = 0
+        } else {
+          ctx.lineTo(x, y)
+          segCount++
+        }
+      }
+      if (pathStarted) ctx.stroke()
+
+    } else {
+      // ── Fallback: render using band data (original path) ──────────────────
+      const totalSteps = Math.ceil(arcHalf * 2 / PEAK_ARC_STEP)
+      const BATCH_SIZE = 6
+      let segCount = 0
+      let pathStarted = false
+
+      for (let s = 0; s <= totalSteps; s++) {
+        const bearingOffset = -arcHalf + (s / (totalSteps || 1)) * arcHalf * 2
+        const bearing = peakBearing + bearingOffset
+
+        // GPS proximity check: does the peak own the ridgeline at this azimuth?
+        const ridgeGps = bandGpsAt(skyline, bestBand, bearing)
+        if (!ridgeGps || gpsDistSq(pos.lat, pos.lng, ridgeGps.lat, ridgeGps.lng) > gpsRadiusSq) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        const angle = bandAngleAt(skyline, bestBand, bearing, projected)
+        if (angle <= -Math.PI / 2 + 0.001) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        const { x, y } = project(bearing, angle, cam)
+        if (x < -50 || x > W + 50 || y < 0 || y > H) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        // Edge fade: alpha falls off smoothly toward arc edges (cosine curve)
+        const edgeT = Math.abs(bearingOffset) / arcHalf  // 0 at center, 1 at edge
+        const edgeFade = Math.cos(edgeT * Math.PI * 0.5) // 1 at center, 0 at edge
+        const alpha = baseAlpha * edgeFade
+        if (alpha < 0.01) {
+          if (pathStarted) ctx.stroke()
+          pathStarted = false
+          segCount = 0
+          continue
+        }
+
+        if (!pathStarted) {
+          const elev = bandElevAt(skyline, bestBand, bearing)
+          const tElev = hasElevRange && elev > -Infinity
+            ? (elev - globalElevMin) / elevRange : 0.5
+          const color = elevToRidgeColor(tElev)
+          const rgbMatch = color.match(/\d+/g)
+          if (!rgbMatch) continue
+          const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+          const cr = Math.round(r + (255 - r) * 0.15)
+          const cg = Math.round(g + (255 - g) * 0.15)
+          const cb = Math.round(b + (255 - b) * 0.15)
+
+          ctx.beginPath()
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
+          ctx.moveTo(x, y)
+          pathStarted = true
+          segCount = 0
+        } else if (segCount >= BATCH_SIZE) {
+          ctx.lineTo(x, y)
+          ctx.stroke()
+
+          const elev = bandElevAt(skyline, bestBand, bearing)
+          const tElev = hasElevRange && elev > -Infinity
+            ? (elev - globalElevMin) / elevRange : 0.5
+          const color = elevToRidgeColor(tElev)
+          const rgbMatch = color.match(/\d+/g)
+          if (!rgbMatch) { pathStarted = false; segCount = 0; continue }
+          const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
+          const cr = Math.round(r + (255 - r) * 0.15)
+          const cg = Math.round(g + (255 - g) * 0.15)
+          const cb = Math.round(b + (255 - b) * 0.15)
+
+          ctx.beginPath()
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`
+          ctx.moveTo(x, y)
+          segCount = 0
+        } else {
+          ctx.lineTo(x, y)
+          segCount++
+        }
+      }
+
+      if (pathStarted) ctx.stroke()
+    }
   }
 
   ctx.restore()
@@ -1183,6 +1345,7 @@ function drawScanCanvas(
   skylineData: SkylineData | null,
   projectedBands: ProjectedBands | null,
   contourStrands: PrebuiltContourStrand[],
+  projectedArcs: ProjectedRefinedArc[] | null,
   showBandLines: boolean = true,
   showPeakLabels: boolean = true,
 ): PeakScreenPos[] {
@@ -1333,7 +1496,7 @@ function drawScanCanvas(
 
   // ── 5. Peak ridgeline profiles — wedge-shaped terrain profiles around peaks ──
   if (showPeakLabels && peakPositions.length > 0 && skylineData) {
-    renderPeakRidgelines(ctx, skylineData, projectedBands, peakPositions, cam)
+    renderPeakRidgelines(ctx, skylineData, projectedBands, peakPositions, cam, projectedArcs)
   }
 
   log.debug('Scan canvas drawn', {
@@ -1404,6 +1567,14 @@ const ScanScreen: React.FC = () => {
     if (!skylineData) return []
     const viewerElev = skylineData.computedAt.groundElev + height_m
     return buildContourStrands(skylineData, viewerElev)
+  }, [skylineData, height_m])
+
+  // ── Re-project refined arc angles when AGL changes ─────────────────────────
+  // ~4,800 atan2 calls for 20 arcs — sub-millisecond. Same pattern as band re-projection.
+  const projectedArcs = useMemo<ProjectedRefinedArc[] | null>(() => {
+    if (!skylineData || !skylineData.refinedArcs || skylineData.refinedArcs.length === 0) return null
+    const viewerElev = skylineData.computedAt.groundElev + height_m
+    return reprojectRefinedArcs(skylineData.refinedArcs, viewerElev)
   }, [skylineData, height_m])
 
   // ── Initialise Web Worker ─────────────────────────────────────────────────
@@ -1554,7 +1725,8 @@ const ScanScreen: React.FC = () => {
       heading_deg, pitch_deg, height_m,
       activeLat, activeLng,
       fov, skylineData, projectedBands,
-      contourStrands, showBandLines, showPeakLabels,
+      contourStrands, projectedArcs,
+      showBandLines, showPeakLabels,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -1566,7 +1738,7 @@ const ScanScreen: React.FC = () => {
     heading_deg, pitch_deg, height_m, fov,
     activeLat, activeLng,
     meshData, activePeaks,
-    skylineData, projectedBands, contourStrands,
+    skylineData, projectedBands, contourStrands, projectedArcs,
     showBandLines, showPeakLabels,
   ])
 
@@ -1885,7 +2057,7 @@ const ScanScreen: React.FC = () => {
 
               return (
                 <>
-                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.2 DEBUG — 6-Band Near-Field</div>
+                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.2.1 DEBUG — Refined Arcs</div>
 
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>CAMERA</div>
                   <div>hdg:{heading_deg.toFixed(1)}° pit:{pitch_deg.toFixed(1)}° fov:{fov.toFixed(0)}°</div>
@@ -1938,6 +2110,29 @@ const ScanScreen: React.FC = () => {
                         </div>
                       )
                     })
+                  })()}
+
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>REFINED ARCS</div>
+                  {(() => {
+                    const arcs = skylineData.refinedArcs || []
+                    if (arcs.length === 0) return <div style={{ color: '#666' }}>none detected</div>
+                    // Count how many arcs matched visible peaks this frame
+                    const matchedCount = projectedArcs ? projectedArcs.length : 0
+                    const totalSamples = arcs.reduce((sum, a) => sum + a.numSamples, 0)
+                    return (
+                      <>
+                        <div>features:{arcs.length} samples:{totalSamples} matched:{matchedCount}</div>
+                        {arcs.slice(0, 5).map((arc, i) => {
+                          const bandLabel = DEPTH_BANDS[arc.bandIndex]?.label || `b${arc.bandIndex}`
+                          return (
+                            <div key={i} style={{ color: '#ccc', fontSize: 8 }}>
+                              {bandLabel} {arc.centerBearing.toFixed(1)}°±{arc.halfWidth}° d:{(arc.featureDist/1000).toFixed(1)}km e:{arc.featureElev.toFixed(0)}m step:{arc.stepDeg}°
+                            </div>
+                          )
+                        })}
+                        {arcs.length > 5 && <div style={{ color: '#666', fontSize: 8 }}>...+{arcs.length - 5} more</div>}
+                      </>
+                    )
                   })()}
 
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>PEAKS</div>

@@ -317,6 +317,59 @@ export interface SkylineBand {
   numAzimuths: number
 }
 
+// ─── SCAN — Refined Arc (Dense Peak Ridgeline Data) ─────────────────────────
+
+/**
+ * A refined arc is a dense ray-march around a detected ridgeline feature
+ * (prominent local maximum in the skyline).  Where standard band data uses
+ * 0.125°–0.25° azimuth spacing, refined arcs use ~0.05° steps, giving
+ * ~5× higher angular resolution around peaks.
+ *
+ * Each arc stores raw world data (elevation + distance + GPS) per sample
+ * so angles can be re-projected when AGL changes — same pattern as bands.
+ *
+ * Computed in the worker as Phase 6 (after standard skyline), capped at
+ * MAX_REFINED_ARCS features to bound compute time (~200–400ms total).
+ */
+export interface RefinedArc {
+  /** Center bearing of this arc (degrees, 0=N, 90=E) */
+  centerBearing: number
+  /** Angular half-width of this arc (degrees) */
+  halfWidth: number
+  /** Number of azimuth samples across the full arc width */
+  numSamples: number
+  /** Azimuth step size (degrees per sample) — typically ~0.05° */
+  stepDeg: number
+  /** Per-sample raw ground elevation (metres). -Infinity = no ridge at this sample. */
+  elevations: Float32Array
+  /** Per-sample distance to ridge point (metres) */
+  distances: Float32Array
+  /** Per-sample GPS latitude of the ridge point */
+  ridgeLats: Float32Array
+  /** Per-sample GPS longitude of the ridge point */
+  ridgeLngs: Float32Array
+  /** Depth band index this arc's feature was detected in */
+  bandIndex: number
+  /** Distance from viewer to the feature (metres) */
+  featureDist: number
+  /** Elevation of the feature's ridgeline peak (metres) */
+  featureElev: number
+  /** Bearing of the detected ridgeline peak (degrees) — may differ slightly from centerBearing */
+  featureBearing: number
+}
+
+/** Maximum number of refined arcs computed per skyline pass.
+ *  Each arc adds ~20ms; 20 arcs ≈ 400ms total. */
+export const MAX_REFINED_ARCS = 20
+
+/** Azimuth step size for refined arcs (degrees).
+ *  0.05° = 20 samples/degree, ~5× denser than hi-res bands (0.125°). */
+export const REFINED_ARC_STEP_DEG = 0.05
+
+/** Angular half-width for refined arcs (degrees).
+ *  ±6° centered on the detected feature = 12° total = 240 samples at 0.05°. */
+export const REFINED_ARC_HALF_DEG = 6
+
 // ─── SCAN — Skyline Precomputation ────────────────────────────────────────────
 
 /**
@@ -339,6 +392,9 @@ export interface SkylineData {
   shading:     Float32Array
   /** Per-depth-band raw world data (near/mid/far). Array index matches DEPTH_BANDS. */
   bands:       SkylineBand[]
+  /** Refined arcs — dense ray-march data around detected ridgeline features.
+   *  Used for high-resolution peak ridgeline rendering. Empty if no features detected. */
+  refinedArcs: RefinedArc[]
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */
