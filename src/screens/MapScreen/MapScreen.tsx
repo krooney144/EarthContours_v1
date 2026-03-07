@@ -238,10 +238,15 @@ function globeOpacity(zoom: number): number {
   return 1 - (zoom - GLOBE_FULL_ZOOM) / (GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM)
 }
 
-/** Map zoom level to camera Z distance from globe center */
+/** Map zoom level to camera Z distance from globe center.
+ *  Zoom 1: ~6.0 (globe comfortably visible)
+ *  Zoom 2-3: globe filling most of screen
+ *  Zoom 4-5: globe covering screen, slight curvature
+ *  Zoom 6: ~2.8 (globe flat-looking, fills viewport completely)
+ */
 function zoomToCameraZ(zoom: number): number {
-  const z = 2.5 * Math.pow(2, (6 - zoom) * 0.6)
-  return clamp(z, 1.15, 18.0)
+  const z = 1.1 + 2.4 * Math.pow(2, (5 - zoom) * 0.5)
+  return clamp(z, 1.1, 6.0)
 }
 
 /** Convert sphere rotation (euler Y=lng, euler X=lat) to lat/lng facing camera */
@@ -293,7 +298,9 @@ function remapSphereUVsToMercator(geometry: THREE.SphereGeometry): void {
     // Mercator V: 0 at north pole, 1 at south pole
     const mercV = (1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2
 
-    uvAttr.setY(i, mercV)
+    // Flip V so north pole (y=+1) maps to v=0 (top of texture)
+    // Without this, the globe renders upside down.
+    uvAttr.setY(i, 1 - mercV)
   }
   uvAttr.needsUpdate = true
 }
@@ -398,11 +405,11 @@ function createStarField(): THREE.Points {
 // ─── Atmosphere Shader ───────────────────────────────────────────────────────
 
 /**
- * Fresnel-based atmosphere glow.  The key change from v1:
- *   - Larger glow sphere (r=1.04 vs 1.015) so the halo extends further
- *   - Lower Fresnel power (2.0 vs 3.0) for a wider, softer glow
- *   - Brighter base color with higher alpha
+ * Fresnel-based atmosphere glow.
+ *   - Large glow sphere (r=1.25) so the halo extends well beyond the Earth edge
+ *   - Smooth alpha falloff: bright near the Earth limb, fading to transparent at outer edge
  *   - BackSide rendering so glow is visible as a rim behind the Earth
+ *   - Additive blending for bright, airy halo
  */
 const atmosphereVertexShader = `
   varying vec3 vNormal;
@@ -420,10 +427,13 @@ const atmosphereFragmentShader = `
   void main() {
     vec3 viewDir = normalize(-vPosition);
     float rim = 1.0 - max(0.0, dot(vNormal, viewDir));
-    float intensity = pow(rim, 2.0) * 1.2;
+    // Soft falloff: pow 1.5 gives a wide gradient instead of a hard ring
+    float intensity = pow(rim, 1.5) * 0.9;
+    // Fade alpha to 0 at the outer edge of the atmosphere sphere
+    float alpha = intensity * smoothstep(0.0, 0.4, rim) * 0.6;
     // Ocean-depth palette glow: mix of ec-mid (#4B8EA3) and ec-glow (#84D1DB)
     vec3 glowColor = mix(vec3(0.29, 0.56, 0.64), vec3(0.52, 0.82, 0.86), rim);
-    gl_FragColor = vec4(glowColor * intensity, intensity * 0.8);
+    gl_FragColor = vec4(glowColor * intensity, alpha);
   }
 `
 
@@ -459,7 +469,12 @@ const MapScreen: React.FC = () => {
     stars: THREE.Points
     earthMaterial: THREE.MeshBasicMaterial
     animFrameId: number
+    needsRender: boolean
   } | null>(null)
+
+  // On-demand globe render — call this whenever the scene changes
+  const requestGlobeRenderRef = useRef<() => void>(() => {})
+  const requestGlobeRender = useCallback(() => requestGlobeRenderRef.current(), [])
 
   // Globe drag state
   const globeDragRef = useRef({
@@ -543,6 +558,7 @@ const MapScreen: React.FC = () => {
 
   const pinchRef    = useRef({ isPinching: false, startDist: 0, startZoom: DEFAULT_MAP_ZOOM })
   const loadingRef  = useRef(0)
+  const drawMapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   log.debug('MapScreen render', {
     center: `${centerLat.toFixed(4)}, ${centerLng.toFixed(4)}`,
@@ -579,7 +595,12 @@ const MapScreen: React.FC = () => {
 
     // Use integer zoom for tile operations — tiles are only available at integer levels.
     // Fractional zoom is used for smooth slider/pinch feel; tiles snap to the nearest int.
-    const tileZoom = Math.round(zoom)
+    // During globe→flat transition (zoom 5-7), cap tile zoom to avoid loading dozens of
+    // high-detail tiles while the flat map is still mostly transparent. z4 tiles are already
+    // cached from the globe texture build and cover the whole screen cheaply.
+    const rawTileZoom = Math.round(zoom)
+    const gOp = globeOpacity(zoom)
+    const tileZoom = gOp > 0 ? Math.min(rawTileZoom, 4) : rawTileZoom
 
     log.debug('Drawing DEM map', { W, H, zoom, tileZoom, center: `${centerLat.toFixed(4)},${centerLng.toFixed(4)}` })
 
@@ -867,8 +888,17 @@ const MapScreen: React.FC = () => {
     return () => observer.disconnect()
   }, [drawMap])
 
+  // Debounce drawMap — prevents tile loading storms during smooth zoom slider drags.
+  // 120ms delay is short enough to feel responsive, long enough to skip intermediate steps.
   useEffect(() => {
-    drawMap()
+    if (drawMapTimerRef.current) clearTimeout(drawMapTimerRef.current)
+    drawMapTimerRef.current = setTimeout(() => {
+      drawMap()
+      drawMapTimerRef.current = null
+    }, 120)
+    return () => {
+      if (drawMapTimerRef.current) clearTimeout(drawMapTimerRef.current)
+    }
   }, [drawMap])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
@@ -908,9 +938,9 @@ const MapScreen: React.FC = () => {
     earth.rotation.y = initRot.rotY
     scene.add(earth)
 
-    // Atmosphere glow — larger sphere (r=1.04) with BackSide rendering
-    // creates a visible rim/halo behind the Earth edge
-    const atmosGeo = new THREE.SphereGeometry(1.04, 64, 64)
+    // Atmosphere glow — large sphere (r=1.25) with BackSide rendering
+    // creates a wide, soft halo behind the Earth edge
+    const atmosGeo = new THREE.SphereGeometry(1.25, 64, 64)
     const atmosMat = new THREE.ShaderMaterial({
       vertexShader: atmosphereVertexShader,
       fragmentShader: atmosphereFragmentShader,
@@ -931,6 +961,7 @@ const MapScreen: React.FC = () => {
       renderer, scene, camera, earth, atmosphere, stars,
       earthMaterial: earthMat as THREE.MeshBasicMaterial,
       animFrameId: 0,
+      needsRender: true,
     }
 
     // Resize handler for globe canvas
@@ -941,17 +972,20 @@ const MapScreen: React.FC = () => {
       renderer.setSize(w, h, false)
       camera.aspect = w / h
       camera.updateProjectionMatrix()
+      requestGlobeRender()
     }
     resizeGlobe()
 
     const resizeObs = new ResizeObserver(resizeGlobe)
     resizeObs.observe(canvas)
 
-    // Animation loop
+    // On-demand render loop — only runs when needsRender is set or momentum is active.
+    // Stops scheduling new frames once the scene is static (no momentum, no pending changes).
     const animate = () => {
       const t = threeRef.current
       if (!t) return
-      t.animFrameId = requestAnimationFrame(animate)
+
+      let keepAnimating = false
 
       // Apply momentum if not dragging
       const gd = globeDragRef.current
@@ -967,11 +1001,30 @@ const MapScreen: React.FC = () => {
         const { lat, lng } = sphereRotationToLatLng(t.earth.rotation.x, t.earth.rotation.y)
         setCenterLat(lat)
         setCenterLng(lng)
+
+        // Keep animating while momentum is active
+        keepAnimating = true
       }
 
       t.renderer.render(t.scene, t.camera)
+      t.needsRender = false
+
+      // Only schedule next frame if momentum is still decaying
+      if (keepAnimating) {
+        t.animFrameId = requestAnimationFrame(animate)
+      }
     }
-    animate()
+
+    // Helper to request a single render frame (called from interaction handlers, zoom changes, etc.)
+    requestGlobeRenderRef.current = () => {
+      const t = threeRef.current
+      if (!t || t.needsRender) return  // already scheduled
+      t.needsRender = true
+      t.animFrameId = requestAnimationFrame(animate)
+    }
+
+    // Initial render
+    requestGlobeRenderRef.current()
 
     // Load globe texture: z=2 first (fast), then z=3 (detail)
     setGlobeReady(false)
@@ -987,6 +1040,7 @@ const MapScreen: React.FC = () => {
       threeRef.current.earthMaterial.needsUpdate = true
       setGlobeReady(true)
       setGlobeTextureZoom(2)
+      requestGlobeRenderRef.current()
       log.info('Globe z2 texture applied')
 
       // Upgrade to z=3 in background
@@ -1000,6 +1054,7 @@ const MapScreen: React.FC = () => {
         threeRef.current.earthMaterial.map = t3
         threeRef.current.earthMaterial.needsUpdate = true
         setGlobeTextureZoom(3)
+        requestGlobeRenderRef.current()
         log.info('Globe z3 texture applied (upgrade)')
       })
     })
@@ -1025,7 +1080,8 @@ const MapScreen: React.FC = () => {
     const t = threeRef.current
     if (!t) return
     t.camera.position.z = zoomToCameraZ(zoom)
-  }, [zoom])
+    requestGlobeRender()
+  }, [zoom, requestGlobeRender])
 
   // Sync globe rotation when centerLat/centerLng change from flat map interaction
   useEffect(() => {
@@ -1038,7 +1094,8 @@ const MapScreen: React.FC = () => {
     const { rotX, rotY } = latLngToSphereRotation(centerLat, centerLng)
     t.earth.rotation.x = rotX
     t.earth.rotation.y = rotY
-  }, [centerLat, centerLng, zoom])
+    requestGlobeRender()
+  }, [centerLat, centerLng, zoom, requestGlobeRender])
 
   // ── Globe Pointer Handlers ────────────────────────────────────────────────
 
@@ -1087,12 +1144,18 @@ const MapScreen: React.FC = () => {
     )
     setCenterLat(lat)
     setCenterLng(lng)
-  }, [])
+    requestGlobeRender()
+  }, [requestGlobeRender])
 
   const handleGlobePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     globeCanvasRef.current?.releasePointerCapture(e.pointerId)
     globeDragRef.current.isDragging = false
-  }, [])
+    // Kick off momentum animation if there's velocity
+    const gd = globeDragRef.current
+    if (Math.abs(gd.velocityX) > 0.0001 || Math.abs(gd.velocityY) > 0.0001) {
+      requestGlobeRender()
+    }
+  }, [requestGlobeRender])
 
   // Globe wheel zoom — smooth fractional steps
   const handleGlobeWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -1627,7 +1690,8 @@ const MapScreen: React.FC = () => {
           )}
           Globe ready: {globeReady ? 'yes' : 'no'}<br />
           <strong>Scene</strong><br />
-          Atmos: r=1.04 BackSide · Fresnel p=2.0<br />
+          Atmos: r=1.25 BackSide · Fresnel p=1.5<br />
+          Render: on-demand<br />
           Sphere: 96×96 segments<br />
           {threeRef.current && (
             <>
