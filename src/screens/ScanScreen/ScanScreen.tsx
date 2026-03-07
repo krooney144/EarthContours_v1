@@ -1192,7 +1192,12 @@ function drawScanCanvas(
   const W = canvas.width
   const H = canvas.height
 
-  const groundElev = sampleMeshBilinear(activeLat, activeLng, mesh)
+  // Use the worker's z15-corrected ground elevation when available, so peak
+  // positions, visibility checks, and snap all use the same elevation as the
+  // ridgeline and contour data. Fall back to mesh grid when skyline isn't ready.
+  const groundElev = skylineData
+    ? skylineData.computedAt.groundElev
+    : sampleMeshBilinear(activeLat, activeLng, mesh)
   const eyeElev    = groundElev + eyeHeight_m
 
   // Single camera params — shared by every projection call this frame
@@ -1386,20 +1391,20 @@ const ScanScreen: React.FC = () => {
 
   // ── Re-project band angles when AGL changes (no worker round-trip) ────────
   // Recomputes ~2160 atan2 calls — sub-millisecond.
+  // Uses the worker's z15-corrected ground elevation so angles match exactly.
   const projectedBands = useMemo<ProjectedBands | null>(() => {
-    if (!skylineData || !meshData) return null
-    const groundElev = sampleMeshBilinear(activeLat, activeLng, meshData)
-    const viewerElev = groundElev + height_m
+    if (!skylineData) return null
+    const viewerElev = skylineData.computedAt.groundElev + height_m
     return reprojectBands(skylineData, viewerElev)
-  }, [skylineData, meshData, activeLat, activeLng, height_m])
+  }, [skylineData, height_m])
 
   // ── Pre-build contour strands (full 360°, one-time on data/AGL change) ────
+  // Uses the worker's z15-corrected ground elevation so contour angles match ridgelines.
   const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
-    if (!skylineData || !meshData) return []
-    const groundElev = sampleMeshBilinear(activeLat, activeLng, meshData)
-    const viewerElev = groundElev + height_m
+    if (!skylineData) return []
+    const viewerElev = skylineData.computedAt.groundElev + height_m
     return buildContourStrands(skylineData, viewerElev)
-  }, [skylineData, meshData, activeLat, activeLng, height_m])
+  }, [skylineData, height_m])
 
   // ── Initialise Web Worker ─────────────────────────────────────────────────
 
@@ -1717,8 +1722,11 @@ const ScanScreen: React.FC = () => {
   })()
 
   // ── Ground elevation for HUD ─────────────────────────────────────────────
-
-  const groundElev = meshData ? sampleMeshBilinear(activeLat, activeLng, meshData) : 0
+  // Prefer the worker's z15-corrected ground elevation (matches what the
+  // skyline/contours/peaks use). Fall back to mesh grid before skyline is ready.
+  const groundElev = skylineData
+    ? skylineData.computedAt.groundElev
+    : (meshData ? sampleMeshBilinear(activeLat, activeLng, meshData) : 0)
 
   // ── Loading state ─────────────────────────────────────────────────────────
 
@@ -1823,7 +1831,7 @@ const ScanScreen: React.FC = () => {
               const horizY = getHorizonY({ heading_deg, pitch_deg, hfov: fov, W: canvasW, H: canvasH })
               const pxPerDegH = canvasW ? (canvasW / (fov * DEG_TO_RAD)).toFixed(1) : '?'
               const pxPerDegV = canvasW ? (canvasW / (fov * DEG_TO_RAD)).toFixed(1) : '?'
-              const gElev = meshData ? sampleMeshBilinear(activeLat, activeLng, meshData) : 0
+              const gElev = skylineData.computedAt.groundElev
               const eyeElev = gElev + height_m
 
               // Azimuth spacing: how many screen pixels per azimuth sample
