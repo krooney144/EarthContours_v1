@@ -227,7 +227,7 @@ function loadLabelTile(z: number, x: number, y: number): Promise<HTMLImageElemen
 // ─── Main Component ────────────────────────────────────────────────────────────
 
 const MapScreen: React.FC = () => {
-  const { activeLat, activeLng, gpsLat, gpsLng, mode, setExploreLocation, switchToGPS } = useLocationStore()
+  const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
   const { peaks, meshData, activeRegion } = useTerrainStore()
   const { coordFormat, showPeakLabels } = useSettingsStore()
 
@@ -241,6 +241,18 @@ const MapScreen: React.FC = () => {
 
   const [cursorLat, setCursorLat] = useState(DEFAULT_MAP_CENTER.lat)
   const [cursorLng, setCursorLng] = useState(DEFAULT_MAP_CENTER.lng)
+
+  // ── Area Selection State ──────────────────────────────────────────────────
+  // Selection mode lets users draw a rectangle on the map to define a region.
+  // Currently UI-only — the drawn rectangle is visual feedback.
+  // TODO: Wire up "Download" action to pre-cache tiles for offline use.
+  // TODO: Wire up "Explore" action to load selected bounds in EXPLORE screen.
+  // TODO: Add size validation — warn if selected area > 300km/side (flat-earth limit).
+  // TODO: Show estimated download size in the selection overlay.
+  const [isSelectingArea, setIsSelectingArea] = useState(false)
+  const [selectionStart, setSelectionStart] = useState<{ lat: number; lng: number } | null>(null)
+  const [selectionEnd, setSelectionEnd] = useState<{ lat: number; lng: number } | null>(null)
+  const selectionDragRef = useRef(false)
 
   const dragRef = useRef({
     isDragging: false,
@@ -388,34 +400,49 @@ const MapScreen: React.FC = () => {
       }
     }
 
-    // ── GPS dot ─────────────────────────────────────────────────────────────
+    // ── GPS current location dot (blue) ─────────────────────────────────────
+    // Shows the device's real GPS position as a blue dot with accuracy ring.
+    // Visually distinct from the explore marker (teal) so users can see both.
+    // TODO: Animate the accuracy ring pulse when GPS is actively updating.
+    // TODO: Show accuracy radius scaled to map zoom level.
     if (gpsLat !== null && gpsLng !== null) {
       const gpsPx = latLngToPixel(gpsLat, gpsLng, centerLat, centerLng, zoom, W, H)
       if (gpsPx.x >= 0 && gpsPx.x <= W && gpsPx.y >= 0 && gpsPx.y <= H) {
+        // Accuracy halo — blue tint to differentiate from explore marker
         ctx.beginPath()
-        ctx.arc(gpsPx.x, gpsPx.y, 12, 0, Math.PI * 2)
-        ctx.fillStyle = 'rgba(132, 209, 219, 0.2)'
+        ctx.arc(gpsPx.x, gpsPx.y, 14, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(70, 130, 230, 0.15)'
         ctx.fill()
+        // Outer ring
         ctx.beginPath()
-        ctx.arc(gpsPx.x, gpsPx.y, 6, 0, Math.PI * 2)
-        ctx.fillStyle  = '#84D1DB'
-        ctx.shadowColor = '#84D1DB'
+        ctx.arc(gpsPx.x, gpsPx.y, 10, 0, Math.PI * 2)
+        ctx.strokeStyle = 'rgba(70, 130, 230, 0.5)'
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+        // Inner dot — solid blue
+        ctx.beginPath()
+        ctx.arc(gpsPx.x, gpsPx.y, 5, 0, Math.PI * 2)
+        ctx.fillStyle   = '#4682E6'
+        ctx.shadowColor = '#4682E6'
         ctx.shadowBlur  = 8
         ctx.fill()
         ctx.shadowBlur  = 0
       }
     }
 
-    // ── Explore location marker ──────────────────────────────────────────────
+    // ── Explore location marker (teal) ───────────────────────────────────────
+    // Shows the user-selected "explore this terrain" location.
+    // Teal color matches the EXPLORE screen pin. Only visible in explore mode.
+    // TODO: Add a crosshair or pin icon for better visual distinction.
     if (mode === 'exploring') {
       const explorePx = latLngToPixel(activeLat, activeLng, centerLat, centerLng, zoom, W, H)
       if (explorePx.x >= 0 && explorePx.x <= W && explorePx.y >= 0 && explorePx.y <= H) {
-        // Outer halo
+        // Outer halo — teal
         ctx.beginPath()
         ctx.arc(explorePx.x, explorePx.y, 12, 0, Math.PI * 2)
         ctx.fillStyle = 'rgba(132, 209, 219, 0.2)'
         ctx.fill()
-        // Inner dot — matches EXPLORE screen pin color
+        // Inner dot — teal, matches EXPLORE screen pin color
         ctx.beginPath()
         ctx.arc(explorePx.x, explorePx.y, 6, 0, Math.PI * 2)
         ctx.fillStyle   = '#84D1DB'
@@ -449,6 +476,38 @@ const MapScreen: React.FC = () => {
       }
     }
 
+    // ── Area selection rectangle ──────────────────────────────────────────────
+    // Drawn when user is in selection mode and has started dragging.
+    // TODO: Show area dimensions (km × km) inside the rectangle.
+    // TODO: Color-code the rectangle if area is too large (red) or OK (green).
+    if (isSelectingArea && selectionStart && selectionEnd) {
+      const startPx = latLngToPixel(selectionStart.lat, selectionStart.lng, centerLat, centerLng, zoom, W, H)
+      const endPx   = latLngToPixel(selectionEnd.lat, selectionEnd.lng, centerLat, centerLng, zoom, W, H)
+
+      const rx = Math.min(startPx.x, endPx.x)
+      const ry = Math.min(startPx.y, endPx.y)
+      const rw = Math.abs(endPx.x - startPx.x)
+      const rh = Math.abs(endPx.y - startPx.y)
+
+      // Semi-transparent fill
+      ctx.save()
+      ctx.fillStyle = 'rgba(132, 209, 219, 0.1)'
+      ctx.fillRect(rx, ry, rw, rh)
+      // Dashed border
+      ctx.setLineDash([6, 4])
+      ctx.strokeStyle = 'rgba(132, 209, 219, 0.7)'
+      ctx.lineWidth = 2
+      ctx.strokeRect(rx, ry, rw, rh)
+      // Corner handles — visual affordance for dragging
+      const handleSize = 8
+      ctx.fillStyle = '#84D1DB'
+      ctx.setLineDash([])
+      for (const [hx, hy] of [[rx, ry], [rx + rw, ry], [rx, ry + rh], [rx + rw, ry + rh]]) {
+        ctx.fillRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize)
+      }
+      ctx.restore()
+    }
+
     // ── Elevation legend ──────────────────────────────────────────────────────
     //
     // Draws a vertical gradient bar on the left showing the color → elevation mapping.
@@ -463,7 +522,7 @@ const MapScreen: React.FC = () => {
 
     setIsLoading(false)
     log.debug('DEM map draw complete')
-  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, activeRegion, meshData])
+  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea])
 
   // ── Resize observer ──────────────────────────────────────────────────────────
 
@@ -495,6 +554,21 @@ const MapScreen: React.FC = () => {
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     canvasRef.current?.setPointerCapture(e.pointerId)
+
+    // ── Area selection mode: start drawing rectangle ──
+    if (isSelectingArea) {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const rect = canvas.getBoundingClientRect()
+      const px = e.clientX - rect.left
+      const py = e.clientY - rect.top
+      const coords = pixelToLatLng(px, py, centerLat, centerLng, zoom, rect.width, rect.height)
+      setSelectionStart(coords)
+      setSelectionEnd(coords)
+      selectionDragRef.current = true
+      return
+    }
+
     dragRef.current = {
       isDragging: true,
       startX: e.clientX,
@@ -503,9 +577,21 @@ const MapScreen: React.FC = () => {
       startCenterLng: centerLng,
       hasMoved: false,
     }
-  }, [centerLat, centerLng])
+  }, [centerLat, centerLng, zoom, isSelectingArea])
 
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    // ── Area selection drag: update rectangle endpoint ──
+    if (isSelectingArea && selectionDragRef.current) {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const rect = canvas.getBoundingClientRect()
+      const px = e.clientX - rect.left
+      const py = e.clientY - rect.top
+      const coords = pixelToLatLng(px, py, centerLat, centerLng, zoom, rect.width, rect.height)
+      setSelectionEnd(coords)
+      return
+    }
+
     if (!dragRef.current.isDragging) {
       const canvas = canvasRef.current
       if (!canvas) return
@@ -534,10 +620,22 @@ const MapScreen: React.FC = () => {
 
     setCenterLat(clamp(newCenterLat, -85, 85))
     setCenterLng(((newCenterLng + 180) % 360 + 360) % 360 - 180)
-  }, [centerLat, centerLng, zoom])
+  }, [centerLat, centerLng, zoom, isSelectingArea])
 
   const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     canvasRef.current?.releasePointerCapture(e.pointerId)
+
+    // ── Area selection: finish drawing rectangle ──
+    if (isSelectingArea && selectionDragRef.current) {
+      selectionDragRef.current = false
+      // Selection rectangle is now defined by selectionStart → selectionEnd.
+      // TODO: Validate selected area size and show download/explore actions.
+      log.info('Area selection complete', {
+        start: selectionStart ? `${selectionStart.lat.toFixed(4)},${selectionStart.lng.toFixed(4)}` : 'null',
+        end: selectionEnd ? `${selectionEnd.lat.toFixed(4)},${selectionEnd.lng.toFixed(4)}` : 'null',
+      })
+      return
+    }
 
     if (dragRef.current.isDragging && !dragRef.current.hasMoved) {
       const canvas = canvasRef.current
@@ -556,7 +654,7 @@ const MapScreen: React.FC = () => {
     }
 
     dragRef.current.isDragging = false
-  }, [centerLat, centerLng, zoom, setExploreLocation])
+  }, [centerLat, centerLng, zoom, setExploreLocation, isSelectingArea, selectionStart, selectionEnd])
 
   // ── Scroll Zoom ───────────────────────────────────────────────────────────────
 
@@ -570,7 +668,15 @@ const MapScreen: React.FC = () => {
     })
   }, [])
 
-  // ── Pinch Zoom ────────────────────────────────────────────────────────────────
+  // ── Pinch Zoom (2-finger) ──────────────────────────────────────────────────
+  // Two-finger pinch zooms the map tiles (not the whole page).
+  // touch-action: none on the canvas CSS prevents the browser from
+  // intercepting the gesture. The handlers below detect 2-finger pinch
+  // start/move/end and apply logarithmic zoom to the tile level.
+  //
+  // NOTE: React touch events are used here (not pointer events) because
+  // pointer events don't easily expose multi-touch finger distances.
+  // The canvas CSS `touch-action: none` ensures these events fire reliably.
 
   const handleTouchStart = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
     if (e.touches.length === 2) {
@@ -605,14 +711,30 @@ const MapScreen: React.FC = () => {
   const handleZoomIn  = () => setZoom((z) => clamp(Math.floor(z) + 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
   const handleZoomOut = () => setZoom((z) => clamp(Math.ceil(z)  - 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
 
-  const handleMyLocation = useCallback(() => {
-    log.info('My Location tapped')
-    switchToGPS()
-    if (gpsLat !== null && gpsLng !== null) {
-      setCenterLat(gpsLat)
-      setCenterLng(gpsLng)
+  /**
+   * "My Location" button handler.
+   * If GPS hasn't been requested yet, prompts the browser for permission.
+   * If GPS is already active, centers the map on the current position.
+   * TODO: Show a brief toast/snackbar if GPS permission is denied.
+   * TODO: Animate map pan to GPS position instead of instant jump.
+   */
+  const handleMyLocation = useCallback(async () => {
+    log.info('My Location tapped', { gpsPermission, hasGPS: gpsLat !== null })
+
+    // Request GPS if we haven't yet — this triggers the browser permission prompt
+    if (gpsPermission === 'unknown' || gpsPermission === 'unavailable') {
+      await requestGPS()
     }
-  }, [switchToGPS, gpsLat, gpsLng])
+
+    switchToGPS()
+
+    // Center map on GPS position if available
+    const state = useLocationStore.getState()
+    if (state.gpsLat !== null && state.gpsLng !== null) {
+      setCenterLat(state.gpsLat)
+      setCenterLng(state.gpsLng)
+    }
+  }, [switchToGPS, gpsLat, gpsPermission, requestGPS])
 
   return (
     <div className={styles.screen}>
@@ -657,28 +779,107 @@ const MapScreen: React.FC = () => {
         </div>
       )}
 
-      {/* Map controls */}
+      {/* Map controls — always show location button for GPS access.
+          TODO: Add visual feedback (spinner) while waiting for GPS fix.
+          TODO: Show different icon states: no GPS / searching / locked. */}
       <div className={styles.controls}>
         <button className={styles.controlBtn} onClick={handleZoomIn}  aria-label="Zoom in">+</button>
         <button className={styles.controlBtn} onClick={handleZoomOut} aria-label="Zoom out">−</button>
-        {gpsLat !== null && (
-          <button
-            className={styles.controlBtn}
-            onClick={handleMyLocation}
-            aria-label="Center on my location"
-            title="My Location"
-          >
-            ◎
-          </button>
-        )}
+        <button
+          className={`${styles.controlBtn} ${styles.locationBtn} ${gpsLat !== null ? styles.locationActive : ''}`}
+          onClick={handleMyLocation}
+          aria-label="Center on my GPS location"
+          title="My Location"
+        >
+          {/* Crosshair icon — standard "locate me" symbol */}
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <circle cx="9" cy="9" r="4" />
+            <line x1="9" y1="1" x2="9" y2="4" />
+            <line x1="9" y1="14" x2="9" y2="17" />
+            <line x1="1" y1="9" x2="4" y2="9" />
+            <line x1="14" y1="9" x2="17" y2="9" />
+          </svg>
+        </button>
+        {/* Area selection toggle — enters rectangle drawing mode.
+            TODO: Eventually two separate squares: one for download, one for explore.
+            TODO: Add size validation feedback (red border if area > 300km/side). */}
+        <button
+          className={`${styles.controlBtn} ${styles.selectAreaBtn} ${isSelectingArea ? styles.selectAreaActive : ''}`}
+          onClick={() => {
+            if (isSelectingArea) {
+              // Exit selection mode — clear the drawn rectangle
+              setIsSelectingArea(false)
+              setSelectionStart(null)
+              setSelectionEnd(null)
+            } else {
+              setIsSelectingArea(true)
+            }
+          }}
+          aria-label={isSelectingArea ? 'Cancel area selection' : 'Select area on map'}
+          title={isSelectingArea ? 'Cancel Selection' : 'Select Area'}
+        >
+          {/* Rectangle icon — represents area selection */}
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <rect x="3" y="3" width="12" height="12" strokeDasharray="3 2" />
+            <rect x="1.5" y="1.5" width="3" height="3" fill="currentColor" stroke="none" />
+            <rect x="13.5" y="1.5" width="3" height="3" fill="currentColor" stroke="none" />
+            <rect x="1.5" y="13.5" width="3" height="3" fill="currentColor" stroke="none" />
+            <rect x="13.5" y="13.5" width="3" height="3" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
       </div>
 
-      {/* Tap hint */}
+      {/* Area selection overlay — shows instructions and action buttons.
+          TODO: Wire "Download" to pre-cache tiles in IndexedDB for offline.
+          TODO: Wire "Explore" to load these bounds in ExploreScreen.
+          TODO: Show estimated area size in km². */}
+      {isSelectingArea && (
+        <div className={styles.selectionOverlay} role="status">
+          {selectionStart && selectionEnd ? (
+            <>
+              <div className={styles.selectionHint}>
+                Drag to adjust selection
+              </div>
+              <div className={styles.selectionActions}>
+                {/* TODO: These buttons are UI placeholders — actions not yet wired */}
+                <button
+                  className={`${styles.controlBtn} ${styles.selectionActionBtn}`}
+                  onClick={() => {
+                    log.info('Download area tapped (not yet implemented)', { selectionStart, selectionEnd })
+                    // TODO: Implement offline tile download for selected bounds
+                  }}
+                  aria-label="Download selected area for offline use"
+                >
+                  DOWNLOAD
+                </button>
+                <button
+                  className={`${styles.controlBtn} ${styles.selectionActionBtn}`}
+                  onClick={() => {
+                    log.info('Explore area tapped (not yet implemented)', { selectionStart, selectionEnd })
+                    // TODO: Load selected bounds in EXPLORE screen
+                  }}
+                  aria-label="Open selected area in Explore view"
+                >
+                  EXPLORE
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className={styles.selectionHint}>
+              Drag on the map to select an area
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tap hint — brief instruction for first-time users.
+          Fades after first interaction. Not a full tutorial — just enough
+          to get started. */}
       <div
         className={`${styles.tapHint} ${!showTapHint ? styles.hidden : ''}`}
         aria-hidden="true"
       >
-        Tap anywhere to explore that terrain
+        Tap to explore · Pinch to zoom · Drag to pan
       </div>
 
       {/* Coordinate bar */}

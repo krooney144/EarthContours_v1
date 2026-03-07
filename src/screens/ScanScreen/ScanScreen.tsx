@@ -1553,6 +1553,16 @@ const ScanScreen: React.FC = () => {
   // Refinement progress: null = not refining, string = status message
   const [refineStatus, setRefineStatus] = useState<string | null>(null)
 
+  // ── Gyroscope mode ──────────────────────────────────────────────────────
+  // When active, DeviceOrientationEvent drives heading + pitch.
+  // Drag gesture disables gyro (user must tap button to re-enable).
+  // TODO: Use gyroscope heading as compass truth for AR overlay.
+  // TODO: Smooth gyro input with low-pass filter to reduce jitter.
+  // TODO: Handle iOS 13+ permission prompt (DeviceOrientationEvent.requestPermission).
+  // TODO: Show brief toast when gyro is activated/deactivated.
+  const [isGyroActive, setIsGyroActive] = useState(false)
+  const gyroListenerRef = useRef<((e: DeviceOrientationEvent) => void) | null>(null)
+
   // ── Active peak set: OSM peaks when available, fallback to hardcoded ────────
   const activePeaks: Peak[] = osmPeaks.length > 0 ? osmPeaks : peaks
 
@@ -1705,6 +1715,93 @@ const ScanScreen: React.FC = () => {
       .catch(err => log.warn('OSM peak fetch failed', { err: String(err) }))
     return () => { cancelled = true }
   }, [activeLat, activeLng])
+
+  // ── Gyroscope: DeviceOrientation listener ────────────────────────────────
+  // When gyro mode is active, listens for device orientation events and
+  // updates heading + pitch to match the phone's physical orientation.
+  // Cleanup removes the listener when gyro is toggled off or component unmounts.
+  //
+  // TODO: Add low-pass filter to smooth jittery gyro readings.
+  // TODO: Handle iOS 13+ DeviceOrientationEvent.requestPermission() flow.
+  // TODO: Use absolute orientation (webkitCompassHeading) when available.
+  // TODO: Eventually also drive AGL from GPS altitude.
+  useEffect(() => {
+    if (!isGyroActive) {
+      // Clean up any existing listener
+      if (gyroListenerRef.current) {
+        window.removeEventListener('deviceorientation', gyroListenerRef.current)
+        gyroListenerRef.current = null
+      }
+      return
+    }
+
+    const handleOrientation = (e: DeviceOrientationEvent) => {
+      // alpha = compass heading (0-360), beta = front-back tilt (-180 to 180),
+      // gamma = left-right tilt (-90 to 90)
+      // webkitCompassHeading is the true compass heading on iOS (alpha is relative)
+      const heading = (e as DeviceOrientationEvent & { webkitCompassHeading?: number }).webkitCompassHeading
+        ?? (e.alpha !== null ? (360 - e.alpha) % 360 : null)
+      const pitch = e.beta !== null ? clamp(e.beta - 90, -80, 80) : null
+
+      if (heading !== null) {
+        set_heading_from_gyro(heading)
+      }
+      if (pitch !== null) {
+        set_pitch_from_gyro(pitch)
+      }
+    }
+
+    // Store ref so we can remove it later
+    gyroListenerRef.current = handleOrientation
+    window.addEventListener('deviceorientation', handleOrientation)
+
+    log.info('Gyroscope mode activated')
+
+    return () => {
+      window.removeEventListener('deviceorientation', handleOrientation)
+      gyroListenerRef.current = null
+    }
+  }, [isGyroActive])
+
+  // Direct setters for gyro-driven heading/pitch (bypass sensitivity scaling)
+  const set_heading_from_gyro = useCallback((deg: number) => {
+    useCameraStore.setState({ heading_deg: ((deg % 360) + 360) % 360 })
+  }, [])
+  const set_pitch_from_gyro = useCallback((deg: number) => {
+    useCameraStore.setState({ pitch_deg: clamp(deg, -80, 80) })
+  }, [])
+
+  /**
+   * Toggle gyroscope on/off.
+   * On iOS 13+, DeviceOrientationEvent requires explicit permission request.
+   * TODO: Show user-friendly error if permission is denied.
+   */
+  const toggleGyro = useCallback(async () => {
+    if (isGyroActive) {
+      setIsGyroActive(false)
+      log.info('Gyroscope deactivated by user')
+      return
+    }
+
+    // iOS 13+ requires explicit permission request
+    const DeviceOrientationEventAny = DeviceOrientationEvent as unknown as {
+      requestPermission?: () => Promise<string>
+    }
+    if (typeof DeviceOrientationEventAny.requestPermission === 'function') {
+      try {
+        const permission = await DeviceOrientationEventAny.requestPermission()
+        if (permission !== 'granted') {
+          log.warn('Gyroscope permission denied')
+          return
+        }
+      } catch (err) {
+        log.warn('Gyroscope permission request failed', { err: String(err) })
+        return
+      }
+    }
+
+    setIsGyroActive(true)
+  }, [isGyroActive])
 
   // ── Second pass: trigger peak refinement when skyline + peaks are ready ───
   // Sends visible peak bearings/distances to the worker for dense ray-march
@@ -1863,7 +1960,14 @@ const ScanScreen: React.FC = () => {
     viewportRef.current?.setPointerCapture(e.pointerId)
     dragState.current = { isDragging: true, lastX: e.clientX, lastY: e.clientY }
     setShowDragHint(false)
-  }, [])
+
+    // Manual drag disables gyroscope — user must tap gyro button to re-enable.
+    // This prevents fighting between finger input and sensor input.
+    if (isGyroActive) {
+      setIsGyroActive(false)
+      log.info('Gyroscope deactivated by drag gesture')
+    }
+  }, [isGyroActive])
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     if (!dragState.current.isDragging || pinchState.current.isPinching) return
@@ -2253,13 +2357,37 @@ const ScanScreen: React.FC = () => {
           onPointerUp={handleZoomPointerUp}
         />
 
-        {/* Drag hint */}
+        {/* Drag hint — updates to mention gyro when available */}
         <div
           className={`${styles.dragHint} ${!showDragHint ? styles.hidden : ''}`}
           aria-hidden="true"
         >
           ← Drag to look around — Pinch to zoom →
         </div>
+
+        {/* Gyroscope toggle button — activates device orientation tracking.
+            When active (highlighted), heading + pitch follow the phone's sensors.
+            Dragging automatically disables gyro; tap button to re-enable.
+            TODO: Show compass indicator when gyro is active.
+            TODO: Add smooth transition when switching between drag and gyro input.
+            TODO: Eventually integrate with GPS altitude for automatic AGL. */}
+        <button
+          className={`${styles.gyroBtn} ${isGyroActive ? styles.gyroBtnActive : ''}`}
+          onClick={toggleGyro}
+          aria-label={isGyroActive ? 'Disable gyroscope control' : 'Enable gyroscope control'}
+          title={isGyroActive ? 'Gyro ON — drag to disable' : 'Enable Gyroscope'}
+        >
+          {/* Compass/gyro icon */}
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <circle cx="10" cy="10" r="7" />
+            <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none" />
+            <line x1="10" y1="1" x2="10" y2="5" />
+            <line x1="10" y1="15" x2="10" y2="19" />
+            <line x1="1" y1="10" x2="5" y2="10" />
+            <line x1="15" y1="10" x2="19" y2="10" />
+          </svg>
+          {isGyroActive && <span className={styles.gyroBtnLabel}>GYRO</span>}
+        </button>
       </div>
 
       {/* ── Height Slider ──────────────────────────────────────────────────── */}

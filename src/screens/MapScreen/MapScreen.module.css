@@ -12,6 +12,12 @@
 
 /* ── Canvas ────────────────────────────────────────────────────────────────── */
 
+/**
+ * touch-action: none — CRITICAL for mobile pinch-zoom.
+ * Without this, the browser intercepts 2-finger pinch as native page zoom
+ * instead of routing it to our onTouchMove handler for map tile zoom.
+ * This was causing the "whole app shrinks" bug on mobile.
+ */
 .mapCanvas {
   position: absolute;
   inset: 0;
@@ -19,6 +25,7 @@
   display: block;
   width: 100%;
   height: 100%;
+  touch-action: none;
 }
 
 .mapCanvas:active {
@@ -90,9 +97,16 @@
   z-index: var(--z-overlay);
 }
 
+/**
+ * Map control buttons — minimum 44×44px for mobile touch targets
+ * per Apple HIG and Material Design guidelines.
+ * All map action buttons inherit this base style.
+ */
 .controlBtn {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
   background: rgba(13, 30, 46, 0.9);
   border: 1px solid var(--ec-border);
   border-radius: var(--radius-md);
@@ -104,12 +118,99 @@
   cursor: pointer;
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
   backdrop-filter: blur(4px);
+  -webkit-tap-highlight-color: transparent;
 }
 
 .controlBtn:hover {
   background: var(--ec-bg-elevated);
   border-color: var(--ec-border-active);
   color: var(--ec-glow);
+}
+
+.controlBtn:active {
+  background: rgba(132, 209, 219, 0.15);
+}
+
+/**
+ * "My Location" button — always visible.
+ * Blue highlight when GPS is actively locked (locationActive state).
+ * TODO: Add spinning animation while acquiring GPS fix.
+ */
+.locationBtn {
+  margin-top: var(--space-2);
+}
+
+.locationBtn.locationActive {
+  color: #4682E6;
+  border-color: rgba(70, 130, 230, 0.5);
+}
+
+/**
+ * Area selection button — toggle for rectangle drawing mode.
+ * Highlighted when selection mode is active.
+ * TODO: Eventually split into two buttons: "Download Area" and "Explore Area".
+ */
+.selectAreaBtn {
+  margin-top: var(--space-1);
+}
+
+.selectAreaBtn.selectAreaActive {
+  color: var(--ec-glow);
+  border-color: var(--ec-border-active);
+  background: rgba(132, 209, 219, 0.15);
+}
+
+/**
+ * Selection overlay — floating panel with instructions and action buttons.
+ * Appears above the map when selection mode is active.
+ * TODO: Add area size display (e.g., "~150 × 200 km").
+ * TODO: Color-code based on whether area is downloadable (green) or too large (amber).
+ */
+.selectionOverlay {
+  position: absolute;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(13, 30, 46, 0.95);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--ec-border-active);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  z-index: var(--z-hud);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 200px;
+}
+
+.selectionHint {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  color: var(--ec-glow);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.selectionActions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+/**
+ * Selection action buttons — "Download" and "Explore".
+ * Wider than standard control buttons to fit text labels.
+ * TODO: Add loading/progress state for download action.
+ */
+.selectionActionBtn {
+  width: auto;
+  min-width: 44px;
+  padding: 0 var(--space-4);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.1em;
 }
 
 /* ── Coordinates bar ─────────────────────────────────────────────────────────── */

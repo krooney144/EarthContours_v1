@@ -507,3 +507,60 @@
 .dragHint.hidden {
   opacity: 0;
 }
+
+/* ── Gyroscope Toggle Button ──────────────────────────────────────────────── */
+/* Floats in the bottom-left area of the viewport.
+   When active (gyroBtnActive), glows teal to indicate device orientation tracking.
+   Dragging on the viewport automatically deactivates gyro mode.
+   Min 44×44px tap target for mobile accessibility.
+   TODO: Add spinning animation while acquiring gyro lock.
+   TODO: Show different icon when gyro permission is denied. */
+
+.gyroBtn {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height, 64px) + 70px);
+  left: var(--space-3, 12px);
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  background: rgba(13, 30, 46, 0.9);
+  border: 1px solid var(--ec-border);
+  border-radius: 50%;
+  color: var(--ec-text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: var(--z-overlay);
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast);
+  backdrop-filter: blur(4px);
+  -webkit-tap-highlight-color: transparent;
+  gap: 1px;
+}
+
+.gyroBtn:active {
+  background: rgba(132, 209, 219, 0.15);
+}
+
+/* Active state — highlighted to show gyro is tracking */
+.gyroBtnActive {
+  color: var(--ec-glow);
+  border-color: var(--ec-border-active);
+  background: rgba(132, 209, 219, 0.15);
+  box-shadow: 0 0 12px rgba(132, 209, 219, 0.3);
+  animation: gyro-pulse 2s ease-in-out infinite;
+}
+
+.gyroBtnLabel {
+  font-family: var(--font-display);
+  font-size: 6px;
+  letter-spacing: 0.1em;
+  line-height: 1;
+}
+
+@keyframes gyro-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(132, 209, 219, 0.3); }
+  50%       { box-shadow: 0 0 16px rgba(132, 209, 219, 0.6); }
+}

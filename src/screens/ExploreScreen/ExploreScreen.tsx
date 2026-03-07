@@ -11,10 +11,16 @@
  *   Scroll wheel     → zoom in / out
  *   Double-click     → fly to that terrain location
  *
- * Navigation (mobile / touch):
- *   1 finger drag    → pan across terrain
+ * Navigation (mobile / touch — Google Earth style):
+ *   1 finger drag    → orbit (rotate + tilt camera angle)
+ *   2 finger drag    → pan across terrain
  *   2 finger pinch   → zoom in / out
  *   2 finger twist   → rotate view (theta)
+ *   Double-tap       → fly to that terrain location
+ *
+ * NOTE: The 1-finger=orbit convention matches Google Earth, iOS Maps 3D, and
+ * most globe/terrain apps. Users expect single-finger to explore the view angle
+ * in 3D views. Two-finger pan is the natural complement.
  *
  * ── Coordinate system ────────────────────────────────────────────────────────
  *
@@ -332,6 +338,20 @@ const ExploreScreen: React.FC = () => {
     dismissHint()
   }, [dismissHint])
 
+  /**
+   * Pointer move handler — gesture model:
+   *
+   * TOUCH (pointerType === 'touch'):
+   *   1 finger  → orbit (rotate + tilt) — matches Google Earth convention
+   *   2 fingers → pan + pinch-zoom + twist-rotate
+   *
+   * MOUSE (pointerType === 'mouse'):
+   *   Left drag  → pan (unchanged from desktop convention)
+   *   Right drag → orbit (rotate + tilt)
+   *
+   * TODO: When gyroscope is active on SCAN, touch drag could be disabled
+   * or used for fine-tuning offsets.
+   */
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     const prev = pointerMapRef.current.get(e.pointerId)
     if (!prev) return
@@ -339,29 +359,38 @@ const ExploreScreen: React.FC = () => {
     pointerMapRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
 
     if (pointerCount >= 2) {
+      // ── Two-finger gesture: pan + pinch zoom + twist rotate ──
       const pts   = Array.from(pointerMapRef.current.values()) as { x: number; y: number }[]
       const dx    = pts[1].x - pts[0].x
       const dy    = pts[1].y - pts[0].y
       const dist  = Math.sqrt(dx * dx + dy * dy)
       const angle = Math.atan2(dy, dx)
 
+      // Pinch zoom
       const distDelta = dist - lastPinchDistRef.current
       if (Math.abs(distDelta) > 0.5) {
         applyOrbitZoom(distDelta > 0 ? -0.4 : 0.4)
         lastPinchDistRef.current = dist
       }
 
+      // Twist rotate
       const angleDelta = angle - lastPinchAngleRef.current
       if (Math.abs(angleDelta) > 0.005) {
         applyOrbitDrag(angleDelta * 60, 0)
         lastPinchAngleRef.current = angle
       }
 
+      // Two-finger pan (touch devices pan with 2 fingers)
       applyOrbitPan(e.clientX - prev.x, e.clientY - prev.y)
     } else {
+      // ── Single pointer ──
       const deltaX = e.clientX - prev.x
       const deltaY = e.clientY - prev.y
-      if (isRightClickRef.current || e.buttons === 2) {
+
+      // Touch: 1-finger = orbit (Google Earth style)
+      // Mouse: left-click = pan, right-click = orbit
+      const isTouch = e.pointerType === 'touch'
+      if (isTouch || isRightClickRef.current || e.buttons === 2) {
         applyOrbitDrag(deltaX, deltaY)
       } else {
         applyOrbitPan(deltaX, deltaY)
@@ -551,6 +580,7 @@ const ExploreScreen: React.FC = () => {
             aria-label="Dismiss navigation hint"
           >
             <div className={styles.controlsHintTitle}>EXPLORE CONTROLS</div>
+            {/* Desktop controls */}
             <div className={styles.controlsHintRow}>
               <span className={styles.controlsHintKey}>Drag</span>
               <span className={styles.controlsHintDesc}>Pan terrain</span>
@@ -563,8 +593,17 @@ const ExploreScreen: React.FC = () => {
               <span className={styles.controlsHintKey}>Scroll</span>
               <span className={styles.controlsHintDesc}>Zoom</span>
             </div>
+            {/* Mobile touch controls — Google Earth convention */}
             <div className={styles.controlsHintRow}>
-              <span className={styles.controlsHintKey}>Double-click</span>
+              <span className={styles.controlsHintKey}>1 finger</span>
+              <span className={styles.controlsHintDesc}>Rotate &amp; tilt</span>
+            </div>
+            <div className={styles.controlsHintRow}>
+              <span className={styles.controlsHintKey}>2 fingers</span>
+              <span className={styles.controlsHintDesc}>Pan &amp; zoom</span>
+            </div>
+            <div className={styles.controlsHintRow}>
+              <span className={styles.controlsHintKey}>Double-tap</span>
               <span className={styles.controlsHintDesc}>Fly to point</span>
             </div>
             <div className={styles.controlsHintDismiss}>tap to dismiss</div>
