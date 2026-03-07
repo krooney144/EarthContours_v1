@@ -26,11 +26,25 @@
  *
  *  Output: SkylineData with transferable ArrayBuffers (zero-copy to main thread).
  *
+ * ── Peak Refinement (second pass) ───────────────────────────────────────────
+ *
+ *  After the main skyline is delivered, the main thread identifies visible peaks
+ *  and sends a 'refine-peaks' message with peak bearings + distances.
+ *  The worker then:
+ *    1. Fetches HIGHER-ZOOM tiles around each peak (e.g. z13 at 40km, not z11)
+ *    2. Dense ray-march at 0.05° azimuth steps (5× finer than hi-res bands)
+ *    3. Fine distance steps (1.005×) for the band containing each peak
+ *    4. Sends back refined arcs with raw elevation/distance/GPS per sample
+ *
+ *  This gives genuinely more terrain detail around peaks, not just resampled data.
+ *
  * ── Message Protocol ───────────────────────────────────────────────────────
  *
- *  Main → Worker:  SkylineRequest
+ *  Main → Worker:  SkylineRequest  (no type field — skyline computation)
+ *  Main → Worker:  { type:'refine-peaks', peaks: PeakRefineItem[] }
  *  Worker → Main:  { type:'progress', phase, progress }
  *                  { type:'complete',  skyline: SkylineData }
+ *                  { type:'refined-arcs', refinedArcs: RefinedArc[], timestamp }
  */
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -142,6 +156,19 @@ export interface SkylineData {
 const tileCacheW  = new Map<string, Float32Array>()
 const pendingW    = new Map<string, Promise<Float32Array | null>>()
 
+// ─── Module-level state for peak refinement ──────────────────────────────────
+// Stored at end of each skyline computation so 'refine-peaks' can reuse them
+// without the main thread resending the mesh data.
+
+let lastViewerLat          = 0
+let lastViewerLng          = 0
+let lastCorrectedViewerElev = 0
+let lastCosViewerLat       = 1
+let lastMeshElevations: Float32Array | null = null
+let lastMeshWidth          = 0
+let lastMeshHeight         = 0
+let lastMeshBounds: { north: number; south: number; east: number; west: number } | null = null
+
 async function fetchWorkerTile(z: number, x: number, y: number): Promise<Float32Array | null> {
   const key = `${z}/${x}/${y}`
   if (tileCacheW.has(key)) return tileCacheW.get(key)!
@@ -198,6 +225,18 @@ function distToZoom(distM: number): number {
   if (distM < 81_000)  return 10   // mid — ~152 m/px
   if (distM < 152_000) return 9    // mid-far — ~305 m/px
   return 8                         // far — ~610 m/px
+}
+
+/** Higher-zoom tile selection for peak refinement (1–2 zoom levels above standard).
+ *  Provides genuinely more terrain detail around peaks, not just resampled data. */
+function distToRefinedZoom(distM: number): number {
+  if (distM < 1_000)   return 15   // already max zoom
+  if (distM < 4_500)   return 15   // standard=14 → refined=15
+  if (distM < 10_500)  return 14   // standard=13 → refined=14
+  if (distM < 31_000)  return 13   // standard=11 → refined=13 (+2 levels)
+  if (distM < 81_000)  return 11   // standard=10 → refined=11
+  if (distM < 152_000) return 10   // standard=9  → refined=10
+  return 9                         // standard=8  → refined=9
 }
 
 function sampleTileGrid(
@@ -320,12 +359,192 @@ function detectCrossings(
 
 // ─── Worker Message Handler ───────────────────────────────────────────────────
 
-self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
+// ─── Peak Refinement Item (from main thread) ────────────────────────────────
+
+interface PeakRefineItem {
+  /** Peak bearing from viewer (degrees, 0=N, 90=E) */
+  bearing: number
+  /** Distance from viewer to peak (metres) */
+  distance: number
+  /** Which depth band this peak was matched to */
+  bandIndex: number
+  /** Peak name (for debug logging) */
+  name: string
+}
+
+// ─── Peak Refinement Handler ─────────────────────────────────────────────────
+//
+// Called when main thread sends { type: 'refine-peaks', peaks: PeakRefineItem[] }.
+// For each peak:
+//   1. Determine higher-zoom tile level via distToRefinedZoom()
+//   2. Prefetch tiles around the peak's GPS position at that zoom
+//   3. Dense ray-march at 0.05° azimuth steps, ±6° around the peak bearing
+//   4. Fine distance steps (1.005×) through the peak's band distance range
+//   5. Build RefinedArc with raw elevation/distance/GPS per sample
+//
+// Sends back { type: 'refined-arcs', refinedArcs, timestamp }.
+
+const REFINED_STEP_DEG = 0.05   // ~20 samples/degree (5× finer than hi-res 0.125°)
+const REFINED_HALF_DEG = 6      // ±6° centered on peak = 12° total = ~240 samples
+
+async function handleRefinePeaks(peaks: PeakRefineItem[]): Promise<void> {
+  if (!lastMeshElevations || !lastMeshBounds) {
+    // No skyline computed yet — nothing to refine against
+    self.postMessage({ type: 'refined-arcs', refinedArcs: [], timestamp: Date.now() })
+    return
+  }
+
+  const viewerLat  = lastViewerLat
+  const viewerLng  = lastViewerLng
+  const correctedViewerElev = lastCorrectedViewerElev
+  const cosViewerLat = lastCosViewerLat
+  const meshElev   = lastMeshElevations
+  const meshW      = lastMeshWidth
+  const meshH      = lastMeshHeight
+  const meshB      = lastMeshBounds
+
+  // ── Step 1: Prefetch higher-zoom tiles around each peak ─────────────────
+  const tileFetches: Promise<Float32Array | null>[] = []
+  for (const peak of peaks) {
+    const refinedZoom = distToRefinedZoom(peak.distance)
+    // Compute peak's approximate GPS position
+    const azRad = peak.bearing * DEG_TO_RAD
+    const peakLat = viewerLat + (Math.cos(azRad) * peak.distance) / 111_132
+    const peakLng = viewerLng + (Math.sin(azRad) * peak.distance) / (111_320 * cosViewerLat)
+
+    // Fetch a small cluster of tiles around the peak (±1 tile for coverage of ±6° arc)
+    const arcSpanM = peak.distance * Math.tan(REFINED_HALF_DEG * DEG_TO_RAD)
+    const dLat = (arcSpanM / 111_132) * 1.3
+    const dLng = (arcSpanM / (111_320 * cosViewerLat)) * 1.3
+    const sw = latLngToTileXY(peakLat - dLat, peakLng - dLng, refinedZoom)
+    const ne = latLngToTileXY(peakLat + dLat, peakLng + dLng, refinedZoom)
+    const minX = Math.min(sw.x, ne.x), maxX = Math.max(sw.x, ne.x)
+    const minY = Math.min(sw.y, ne.y), maxY = Math.max(sw.y, ne.y)
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        tileFetches.push(fetchWorkerTile(refinedZoom, x, y))
+      }
+    }
+  }
+  await Promise.all(tileFetches)
+
+  // ── Step 2: Dense ray-march around each peak ───────────────────────────
+  const refinedArcs: RefinedArc[] = []
+
+  for (const peak of peaks) {
+    const numSamples = Math.round((REFINED_HALF_DEG * 2) / REFINED_STEP_DEG) + 1
+    const elevations = new Float32Array(numSamples).fill(-Infinity)
+    const dists      = new Float32Array(numSamples)
+    const lats       = new Float32Array(numSamples)
+    const lngs       = new Float32Array(numSamples)
+
+    // Distance range: march through the peak's band range with fine steps
+    const bandCfg = DEPTH_BANDS[peak.bandIndex]
+    const marchMin = bandCfg.minDist || 20
+    const marchMax = bandCfg.maxDist
+
+    // Build fine distance steps — always use 1.005× for maximum resolution
+    const arcDists: number[] = []
+    let arcD = Math.max(20, marchMin)
+    while (arcD <= marchMax) {
+      arcDists.push(arcD)
+      arcD *= 1.005  // Fine steps everywhere — this is the refinement pass
+    }
+    arcDists.reverse()  // far → near (nearer terrain wins)
+
+    const refinedZoom = distToRefinedZoom(peak.distance)
+
+    for (let si = 0; si < numSamples; si++) {
+      const bearingOffset = -REFINED_HALF_DEG + si * REFINED_STEP_DEG
+      const azDeg = peak.bearing + bearingOffset
+      const azRad = azDeg * DEG_TO_RAD
+      const sinA  = Math.sin(azRad)
+      const cosA  = Math.cos(azRad)
+
+      let bestAngle = -Math.PI / 2
+      let bestDist  = 0
+      let bestLat   = viewerLat
+      let bestLng   = viewerLng
+      let bestElev  = -Infinity as number
+
+      for (const dist of arcDists) {
+        const sLat = viewerLat + (cosA * dist) / 111_132
+        const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
+        // Use REFINED zoom (higher than standard) for better terrain detail
+        const zoom = distToRefinedZoom(dist)
+        const rawElev = sampleBest(sLat, sLng, zoom, meshElev, meshW, meshH, meshB)
+        const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const effElev  = rawElev - curvDrop
+        const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
+
+        if (elevAngle > Math.PI / 3) continue  // Sanity cap
+
+        if (elevAngle > bestAngle) {
+          bestAngle = elevAngle
+          bestDist  = dist
+          bestLat   = sLat
+          bestLng   = sLng
+          bestElev  = rawElev
+        }
+      }
+
+      elevations[si] = bestElev
+      dists[si]      = bestDist
+      lats[si]       = bestLat
+      lngs[si]       = bestLng
+    }
+
+    refinedArcs.push({
+      centerBearing:  peak.bearing,
+      halfWidth:      REFINED_HALF_DEG,
+      numSamples,
+      stepDeg:        REFINED_STEP_DEG,
+      elevations,
+      distances:      dists,
+      ridgeLats:      lats,
+      ridgeLngs:      lngs,
+      bandIndex:      peak.bandIndex,
+      featureDist:    peak.distance,
+      featureElev:    elevations[Math.floor(numSamples / 2)],  // Center sample elevation
+      featureBearing: peak.bearing,
+    })
+  }
+
+  // Transfer refined arc buffers (zero-copy)
+  const transferables: Transferable[] = []
+  for (const arc of refinedArcs) {
+    transferables.push(
+      arc.elevations.buffer as ArrayBuffer,
+      arc.distances.buffer as ArrayBuffer,
+      arc.ridgeLats.buffer as ArrayBuffer,
+      arc.ridgeLngs.buffer as ArrayBuffer,
+    )
+  }
+  self.postMessage({ type: 'refined-arcs', refinedArcs, timestamp: Date.now() }, transferables)
+}
+
+// ─── Message Dispatch ────────────────────────────────────────────────────────
+
+self.onmessage = async (e: MessageEvent) => {
+  const data = e.data
+
+  // Dispatch by message type
+  if (data && data.type === 'refine-peaks') {
+    // Second pass: peak-driven refinement using higher-zoom tiles
+    await handleRefinePeaks(data.peaks as PeakRefineItem[])
+    return
+  }
+
+  // Default: standard skyline computation (no type field)
+  await computeSkyline(data as SkylineRequest)
+}
+
+async function computeSkyline(req: SkylineRequest): Promise<void> {
   const {
     viewerLat, viewerLng, viewerElev,
     meshElevations, meshWidth, meshHeight, meshBounds,
     resolution, maxRange,
-  } = e.data
+  } = req
 
   const cosViewerLat = Math.cos(viewerLat * DEG_TO_RAD)
   const numAzimuths  = Math.round(360 * resolution)
@@ -749,202 +968,28 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
     bands[bi].crossingOffsets = offsets
   }
 
-  // ── Phase 6: Refined arcs — dense ray-march around prominent features ─────
-  //
-  // Scan each band's ridgeline for prominent local maxima (peaks that stand
-  // out above their surroundings).  For each detected feature, do a dense
-  // ray march at ~0.05° azimuth steps (5× finer than hi-res bands) covering
-  // ±6° around the feature.  Stores raw elevation/distance/GPS per sample
-  // for AGL re-projection.  Capped at 20 features to bound compute time.
-  //
-  // Feature detection: a local maximum in band elevation angle that is ≥0.3°
-  // above the average of its ±5° neighbors, with at least 2° separation
-  // between detected features.
-
-  const REFINED_STEP_DEG   = 0.05   // ~20 samples/degree
-  const REFINED_HALF_DEG   = 6      // ±6° arc = 12° total = ~240 samples
-  const MAX_ARCS           = 20
-  const FEATURE_MIN_PROMINENCE_RAD = 0.3 * DEG_TO_RAD  // Minimum 0.3° above neighbors
-  const FEATURE_MIN_SEPARATION_DEG = 2    // Minimum 2° between detected features
-
-  const refinedArcs: RefinedArc[] = []
-
-  // Detect prominent features across all bands
-  interface DetectedFeature {
-    bandIndex:      number
-    azimuthIdx:     number
-    bearing:        number
-    angle:          number   // elevation angle at this azimuth
-    neighborAvg:    number   // average angle of ±5° neighbors
-    prominence:     number   // angle - neighborAvg
-    dist:           number   // distance to ridge
-    elev:           number   // raw elevation
-  }
-
-  const detectedFeatures: DetectedFeature[] = []
-
-  for (let bi = 0; bi < bands.length; bi++) {
-    const band = bands[bi]
-    const bandAz = band.numAzimuths
-    const bandRes = band.resolution
-    const neighborSpan = Math.round(5 * bandRes)  // ±5° in azimuth samples
-
-    for (let ai = 0; ai < bandAz; ai++) {
-      if (band.elevations[ai] === -Infinity) continue
-
-      const dist = band.distances[ai]
-      const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-      const angle = Math.atan2(band.elevations[ai] - curvDrop - correctedViewerElev, dist)
-
-      // Check if this is a local maximum — higher than all immediate neighbors (±1 sample)
-      let isLocalMax = true
-      for (let offset = -1; offset <= 1; offset += 2) {
-        const ni = (ai + offset + bandAz) % bandAz
-        if (band.elevations[ni] === -Infinity) continue
-        const nDist = band.distances[ni]
-        const nCurv = (nDist * nDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-        const nAngle = Math.atan2(band.elevations[ni] - nCurv - correctedViewerElev, nDist)
-        if (nAngle >= angle) { isLocalMax = false; break }
-      }
-      if (!isLocalMax) continue
-
-      // Compute average angle of ±5° neighbors for prominence check
-      let sumAngle = 0
-      let countAngle = 0
-      for (let offset = -neighborSpan; offset <= neighborSpan; offset++) {
-        if (offset === 0) continue
-        const ni = (ai + offset + bandAz) % bandAz
-        if (band.elevations[ni] === -Infinity) continue
-        const nDist = band.distances[ni]
-        const nCurv = (nDist * nDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-        sumAngle += Math.atan2(band.elevations[ni] - nCurv - correctedViewerElev, nDist)
-        countAngle++
-      }
-
-      if (countAngle < 3) continue  // Not enough neighbors for a reliable prominence check
-      const neighborAvg = sumAngle / countAngle
-      const prominence = angle - neighborAvg
-
-      if (prominence < FEATURE_MIN_PROMINENCE_RAD) continue
-
-      detectedFeatures.push({
-        bandIndex: bi,
-        azimuthIdx: ai,
-        bearing: ai / bandRes,
-        angle,
-        neighborAvg,
-        prominence,
-        dist: band.distances[ai],
-        elev: band.elevations[ai],
-      })
-    }
-  }
-
-  // Sort by prominence (most prominent first), enforce minimum separation, cap at MAX_ARCS
-  detectedFeatures.sort((a, b) => b.prominence - a.prominence)
-
-  const selectedFeatures: DetectedFeature[] = []
-  for (const feat of detectedFeatures) {
-    if (selectedFeatures.length >= MAX_ARCS) break
-
-    // Check separation from already-selected features
-    let tooClose = false
-    for (const sel of selectedFeatures) {
-      let dBearing = Math.abs(feat.bearing - sel.bearing)
-      if (dBearing > 180) dBearing = 360 - dBearing
-      if (dBearing < FEATURE_MIN_SEPARATION_DEG) { tooClose = true; break }
-    }
-    if (tooClose) continue
-
-    selectedFeatures.push(feat)
-  }
-
-  // Dense ray-march around each selected feature
-  for (const feat of selectedFeatures) {
-    const numSamples = Math.round((REFINED_HALF_DEG * 2) / REFINED_STEP_DEG) + 1
-    const elevations = new Float32Array(numSamples).fill(-Infinity)
-    const dists      = new Float32Array(numSamples)
-    const lats       = new Float32Array(numSamples)
-    const lngs       = new Float32Array(numSamples)
-
-    // Determine distance step array based on feature distance
-    const bandCfg = DEPTH_BANDS[feat.bandIndex]
-    const marchMin = bandCfg.minDist || 20
-    const marchMax = bandCfg.maxDist
-
-    // Build fine distance steps for this band's range
-    const arcDists: number[] = []
-    let arcD = Math.max(20, marchMin)
-    const stepMul = marchMax < 5000 ? 1.005 : marchMax < 31000 ? 1.01 : 1.015
-    while (arcD <= marchMax) {
-      arcDists.push(arcD)
-      arcD *= stepMul
-    }
-    arcDists.reverse()  // far → near
-
-    for (let si = 0; si < numSamples; si++) {
-      const bearingOffset = -REFINED_HALF_DEG + si * REFINED_STEP_DEG
-      const azDeg = feat.bearing + bearingOffset
-      const azRad = azDeg * DEG_TO_RAD
-      const sinA  = Math.sin(azRad)
-      const cosA  = Math.cos(azRad)
-
-      let bestAngle = -Math.PI / 2
-      let bestDist  = 0
-      let bestLat   = viewerLat
-      let bestLng   = viewerLng
-      let bestElev  = -Infinity as number
-
-      for (const dist of arcDists) {
-        const sLat = viewerLat + (cosA * dist) / 111_132
-        const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
-        const zoom = distToZoom(dist)
-        const rawElev = sampleBest(sLat, sLng, zoom, meshElevations, meshWidth, meshHeight, meshBounds)
-        const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-        const effElev  = rawElev - curvDrop
-        const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
-
-        if (elevAngle > Math.PI / 3) continue
-
-        if (elevAngle > bestAngle) {
-          bestAngle = elevAngle
-          bestDist  = dist
-          bestLat   = sLat
-          bestLng   = sLng
-          bestElev  = rawElev
-        }
-      }
-
-      elevations[si] = bestElev
-      dists[si]      = bestDist
-      lats[si]       = bestLat
-      lngs[si]       = bestLng
-    }
-
-    refinedArcs.push({
-      centerBearing:  feat.bearing,
-      halfWidth:      REFINED_HALF_DEG,
-      numSamples,
-      stepDeg:        REFINED_STEP_DEG,
-      elevations,
-      distances:      dists,
-      ridgeLats:      lats,
-      ridgeLngs:      lngs,
-      bandIndex:      feat.bandIndex,
-      featureDist:    feat.dist,
-      featureElev:    feat.elev,
-      featureBearing: feat.bearing,
-    })
-  }
+  // Phase 6 removed — refined arcs now computed on-demand via 'refine-peaks' message.
+  // See handleRefinePeaks() below.
 
   self.postMessage({ type: 'progress', phase: 'skyline', progress: 1.0 })
+
+  // Store viewer state for refinement reuse — the 'refine-peaks' handler
+  // reuses these so it doesn't need the mesh/bounds resent.
+  lastViewerLat          = viewerLat
+  lastViewerLng          = viewerLng
+  lastCorrectedViewerElev = correctedViewerElev
+  lastCosViewerLat       = cosViewerLat
+  lastMeshElevations     = meshElevations
+  lastMeshWidth          = meshWidth
+  lastMeshHeight         = meshHeight
+  lastMeshBounds         = meshBounds
 
   const skyline: SkylineData = {
     angles,
     distances,
     shading,
     bands,
-    refinedArcs,
+    refinedArcs: [],  // Arcs now come via separate 'refine-peaks' → 'refined-arcs' flow
     resolution,
     numAzimuths,
     computedAt: {
@@ -970,15 +1015,6 @@ self.onmessage = async (e: MessageEvent<SkylineRequest>) => {
       band.ridgeLngs.buffer as ArrayBuffer,
       band.crossingData.buffer as ArrayBuffer,
       band.crossingOffsets.buffer as ArrayBuffer,
-    )
-  }
-  // Transfer refined arc buffers (zero-copy)
-  for (const arc of refinedArcs) {
-    transferables.push(
-      arc.elevations.buffer as ArrayBuffer,
-      arc.distances.buffer as ArrayBuffer,
-      arc.ridgeLats.buffer as ArrayBuffer,
-      arc.ridgeLngs.buffer as ArrayBuffer,
     )
   }
   self.postMessage({ type: 'complete', skyline }, transferables)

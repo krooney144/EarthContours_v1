@@ -320,16 +320,17 @@ export interface SkylineBand {
 // ─── SCAN — Refined Arc (Dense Peak Ridgeline Data) ─────────────────────────
 
 /**
- * A refined arc is a dense ray-march around a detected ridgeline feature
- * (prominent local maximum in the skyline).  Where standard band data uses
+ * A refined arc is a dense ray-march around a visible peak, using higher-zoom
+ * tiles than the standard skyline pass.  Where standard band data uses
  * 0.125°–0.25° azimuth spacing, refined arcs use ~0.05° steps, giving
  * ~5× higher angular resolution around peaks.
  *
  * Each arc stores raw world data (elevation + distance + GPS) per sample
  * so angles can be re-projected when AGL changes — same pattern as bands.
  *
- * Computed in the worker as Phase 6 (after standard skyline), capped at
- * MAX_REFINED_ARCS features to bound compute time (~200–400ms total).
+ * Computed via two-pass protocol: main thread sends visible peak positions
+ * to the worker ('refine-peaks'), worker fetches higher-zoom tiles and does
+ * dense ray-march, sends back 'refined-arcs' response.
  */
 export interface RefinedArc {
   /** Center bearing of this arc (degrees, 0=N, 90=E) */
@@ -358,17 +359,21 @@ export interface RefinedArc {
   featureBearing: number
 }
 
-/** Maximum number of refined arcs computed per skyline pass.
- *  Each arc adds ~20ms; 20 arcs ≈ 400ms total. */
-export const MAX_REFINED_ARCS = 20
-
-/** Azimuth step size for refined arcs (degrees).
- *  0.05° = 20 samples/degree, ~5× denser than hi-res bands (0.125°). */
-export const REFINED_ARC_STEP_DEG = 0.05
-
-/** Angular half-width for refined arcs (degrees).
- *  ±6° centered on the detected feature = 12° total = 240 samples at 0.05°. */
-export const REFINED_ARC_HALF_DEG = 6
+/**
+ * A peak to refine — sent from main thread to worker in 'refine-peaks' message.
+ * Main thread determines visible peaks + their bearing/distance/band,
+ * worker fetches higher-zoom tiles and does dense ray-march around each.
+ */
+export interface PeakRefineItem {
+  /** Peak bearing from viewer (degrees, 0=N, 90=E) */
+  bearing: number
+  /** Distance from viewer to peak (metres) */
+  distance: number
+  /** Which depth band this peak was matched to */
+  bandIndex: number
+  /** Peak name (for debug logging) */
+  name: string
+}
 
 // ─── SCAN — Skyline Precomputation ────────────────────────────────────────────
 

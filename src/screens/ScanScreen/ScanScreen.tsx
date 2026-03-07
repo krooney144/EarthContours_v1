@@ -55,7 +55,7 @@ import {
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
-import type { Peak, TerrainMeshData, SkylineData, SkylineBand, SkylineRequest, RefinedArc } from '../../core/types'
+import type { Peak, TerrainMeshData, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem } from '../../core/types'
 import { DEPTH_BANDS } from '../../core/types'
 import styles from './ScanScreen.module.css'
 
@@ -1548,6 +1548,8 @@ const ScanScreen: React.FC = () => {
   const [osmPeaks, setOsmPeaks]               = useState<Peak[]>([])
   const [isSkylineComputing, setIsSkylineComputing] = useState(false)
   const [skylineProgress, setSkylineProgress] = useState(0)
+  // Refined arcs from second-pass peak refinement (separate from skylineData)
+  const [refinedArcs, setRefinedArcs] = useState<RefinedArc[]>([])
 
   // ── Active peak set: OSM peaks when available, fallback to hardcoded ────────
   const activePeaks: Peak[] = osmPeaks.length > 0 ? osmPeaks : peaks
@@ -1570,12 +1572,13 @@ const ScanScreen: React.FC = () => {
   }, [skylineData, height_m])
 
   // ── Re-project refined arc angles when AGL changes ─────────────────────────
-  // ~4,800 atan2 calls for 20 arcs — sub-millisecond. Same pattern as band re-projection.
+  // Uses separate refinedArcs state (from second-pass 'refine-peaks' response).
+  // ~4,800 atan2 calls for 20 arcs — sub-millisecond.
   const projectedArcs = useMemo<ProjectedRefinedArc[] | null>(() => {
-    if (!skylineData || !skylineData.refinedArcs || skylineData.refinedArcs.length === 0) return null
+    if (!skylineData || refinedArcs.length === 0) return null
     const viewerElev = skylineData.computedAt.groundElev + height_m
-    return reprojectRefinedArcs(skylineData.refinedArcs, viewerElev)
-  }, [skylineData, height_m])
+    return reprojectRefinedArcs(refinedArcs, viewerElev)
+  }, [skylineData, refinedArcs, height_m])
 
   // ── Initialise Web Worker ─────────────────────────────────────────────────
 
@@ -1604,6 +1607,16 @@ const ScanScreen: React.FC = () => {
         skylineDataRef.current = newSkyline   // keep ref in sync for Option 2 distance check
         setIsSkylineComputing(false)
         setSkylineProgress(1)
+        // Clear old refined arcs — new ones will arrive via 'refined-arcs' after peak refinement
+        setRefinedArcs([])
+      } else if (type === 'refined-arcs') {
+        // Second pass complete — worker sent back dense arc data for visible peaks
+        const arcs = e.data.refinedArcs as RefinedArc[]
+        log.info('Refined arcs received', {
+          count: arcs.length,
+          totalSamples: arcs.reduce((s: number, a: RefinedArc) => s + a.numSamples, 0),
+        })
+        setRefinedArcs(arcs)
       }
     }
 
@@ -1681,6 +1694,67 @@ const ScanScreen: React.FC = () => {
       .catch(err => log.warn('OSM peak fetch failed', { err: String(err) }))
     return () => { cancelled = true }
   }, [activeLat, activeLng])
+
+  // ── Second pass: trigger peak refinement when skyline + peaks are ready ───
+  // Sends visible peak bearings/distances to the worker for dense ray-march
+  // with higher-zoom tiles.  Stale-while-revalidate: old arcs stay until new ones arrive.
+  useEffect(() => {
+    if (!skylineData || isSkylineComputing) return
+    const worker = skylineWorker.current
+    if (!worker) return
+
+    const peaks = activePeaks
+    if (peaks.length === 0) return
+
+    const viewerElev = skylineData.computedAt.groundElev + height_m
+    const eyeElev = skylineData.computedAt.elev
+    const vLat = skylineData.computedAt.lat
+    const vLng = skylineData.computedAt.lng
+    const cosLat = Math.cos(vLat * DEG_TO_RAD)
+
+    // Build refine list from ALL visible peaks (not just top 15 on screen)
+    // — the worker is fast enough to handle them all.
+    const refineItems: PeakRefineItem[] = []
+    for (const peak of peaks) {
+      const dx = (peak.lng - vLng) * 111_320 * cosLat
+      const dy = (peak.lat - vLat) * 111_132
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      if (dist > MAX_PEAK_DIST || dist < 100) continue
+
+      // Determine which band this peak falls in
+      const peakDist_m = dist
+      let bandIndex = -1
+      for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+        const cfg = DEPTH_BANDS[bi]
+        if (cfg && peakDist_m >= cfg.minDist && peakDist_m <= cfg.maxDist) {
+          bandIndex = bi
+          break
+        }
+      }
+      if (bandIndex < 0) continue
+
+      // Check peak visibility (is it above the ridgeline?)
+      const bearing = ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360
+      const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const peakAngle = Math.atan2(peak.elevation_m - curvDrop - eyeElev, dist)
+      const ridgeAngle = skylineAngleAt(skylineData, bearing, projectedBands)
+
+      // Only refine peaks that are at least near the ridgeline
+      if (peakAngle < ridgeAngle - 1 * DEG_TO_RAD) continue
+
+      refineItems.push({
+        bearing,
+        distance: dist,
+        bandIndex,
+        name: peak.name,
+      })
+    }
+
+    if (refineItems.length === 0) return
+
+    log.info('Requesting peak refinement', { peaks: refineItems.length })
+    worker.postMessage({ type: 'refine-peaks', peaks: refineItems })
+  }, [skylineData, activePeaks, isSkylineComputing, projectedBands, height_m])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Canvas sizing (only on resize) ────────────────────────────────────────
 
@@ -2112,25 +2186,23 @@ const ScanScreen: React.FC = () => {
                     })
                   })()}
 
-                  <div style={{ color: '#68B0BF', marginTop: 3 }}>REFINED ARCS</div>
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>REFINED ARCS (2nd pass)</div>
                   {(() => {
-                    const arcs = skylineData.refinedArcs || []
-                    if (arcs.length === 0) return <div style={{ color: '#666' }}>none detected</div>
-                    // Count how many arcs matched visible peaks this frame
+                    if (refinedArcs.length === 0) return <div style={{ color: '#666' }}>none (awaiting peaks)</div>
                     const matchedCount = projectedArcs ? projectedArcs.length : 0
-                    const totalSamples = arcs.reduce((sum, a) => sum + a.numSamples, 0)
+                    const totalSamples = refinedArcs.reduce((sum, a) => sum + a.numSamples, 0)
                     return (
                       <>
-                        <div>features:{arcs.length} samples:{totalSamples} matched:{matchedCount}</div>
-                        {arcs.slice(0, 5).map((arc, i) => {
+                        <div>peaks:{refinedArcs.length} samples:{totalSamples} projected:{matchedCount}</div>
+                        {refinedArcs.slice(0, 8).map((arc, i) => {
                           const bandLabel = DEPTH_BANDS[arc.bandIndex]?.label || `b${arc.bandIndex}`
                           return (
                             <div key={i} style={{ color: '#ccc', fontSize: 8 }}>
-                              {bandLabel} {arc.centerBearing.toFixed(1)}°±{arc.halfWidth}° d:{(arc.featureDist/1000).toFixed(1)}km e:{arc.featureElev.toFixed(0)}m step:{arc.stepDeg}°
+                              {bandLabel} {arc.centerBearing.toFixed(1)}°±{arc.halfWidth}° d:{(arc.featureDist/1000).toFixed(1)}km e:{arc.featureElev.toFixed(0)}m
                             </div>
                           )
                         })}
-                        {arcs.length > 5 && <div style={{ color: '#666', fontSize: 8 }}>...+{arcs.length - 5} more</div>}
+                        {refinedArcs.length > 8 && <div style={{ color: '#666', fontSize: 8 }}>...+{refinedArcs.length - 8} more</div>}
                       </>
                     )
                   })()}
