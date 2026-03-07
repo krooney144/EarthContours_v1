@@ -117,7 +117,6 @@ const SettingsScreen: React.FC = () => {
 
   log.debug('SettingsScreen render', {
     units: settings.units,
-    appName: settings.appName,
     verticalExaggeration: settings.verticalExaggeration,
   })
 
@@ -319,24 +318,6 @@ const SettingsScreen: React.FC = () => {
 
         {/* ── Section 3: Appearance ── */}
         <Section icon="◈" title="Appearance">
-          <Row
-            label="App Name"
-            description="Compare two name options for the app"
-          >
-            <Segmented<'Earth Contours' | 'EarthContours' | 'Earthscape'>
-              options={[
-                { value: 'Earth Contours', label: 'Earth Contours' },
-                { value: 'EarthContours',  label: 'EarthContours' },
-                { value: 'Earthscape',     label: 'Earthscape' },
-              ]}
-              value={settings.appName}
-              onChange={(v) => {
-                log.info('App name changed', { to: v })
-                settings.setAppName(v)
-              }}
-              ariaLabel="App name preference"
-            />
-          </Row>
           <Row label="Label Size" description="Size of peak and terrain labels">
             <Segmented<'small' | 'medium' | 'large'>
               options={[
@@ -469,23 +450,22 @@ const SettingsScreen: React.FC = () => {
           </Row>
           <Row
             label="Downloaded Regions"
-            description="Colorado Rockies and Anchorage, AK are pre-loaded (simulated for MVP)"
+            description="Terrain data from AWS Terrarium DEM tiles, cached locally"
           >
             <button className={styles.actionBtn} onClick={() => log.info('Download region tapped')}>
               + ADD
             </button>
           </Row>
-          <Row label="Colorado Rockies" description="Pre-loaded · 40km × 40km · Simulated">
+          <Row label="Colorado Rockies" description="~220 × 250 km · AWS Terrarium tiles">
             <span className={`${styles.statusBadge} ${styles.statusGranted}`}>✓ LOADED</span>
           </Row>
-          <Row label="Anchorage, Alaska" description="Pre-loaded · 40km × 40km · Simulated">
+          <Row label="Alaska Range — Denali" description="~255 × 220 km · AWS Terrarium tiles">
             <span className={`${styles.statusBadge} ${styles.statusGranted}`}>✓ LOADED</span>
           </Row>
         </Section>
 
         {/* ── Section 7: Feedback & Support ── */}
-        {/* Feedback is submitted as a GitHub Issue in the project repo.
-            Requires VITE_GITHUB_TOKEN in .env.local — see feedbackService.ts.
+        {/* Feedback is submitted as a GitHub Issue via /api/feedback serverless function.
             TODO: Add category picker (bug, feature request, general).
             TODO: Support screenshot attachment via paste or file picker. */}
         <Section icon="✉" title="Feedback & Support">
@@ -556,7 +536,7 @@ const SettingsScreen: React.FC = () => {
         {/* Version info */}
         <div className={styles.versionInfo}>
           <div className={styles.logoMark}>◈</div>
-          <div className={styles.versionText}>{settings.appName} v1.0 MVP</div>
+          <div className={styles.versionText}>Earth Contours v1.0 MVP</div>
           <div className={styles.versionText}>Built with React + Vite + Zustand</div>
           <div className={styles.versionText}>Map tiles © OpenTopoMap contributors</div>
         </div>

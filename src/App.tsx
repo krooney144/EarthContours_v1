@@ -53,7 +53,7 @@ const App: React.FC = () => {
     transitionState,
   } = useUIStore()
 
-  const { appName, reduceMotion } = useSettingsStore()
+  const { reduceMotion } = useSettingsStore()
 
   // ── Side Effects ────────────────────────────────────────────────────────────
 
@@ -64,12 +64,8 @@ const App: React.FC = () => {
       userAgent: navigator.userAgent,
       windowSize: `${window.innerWidth}×${window.innerHeight}`,
     })
+    document.title = 'Earth Contours'
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Sync app name to document title
-  useEffect(() => {
-    document.title = appName
-  }, [appName])
 
   // Apply reduce-motion class to body when setting is on
   // (enables the CSS reduce-motion override in global.css)

@@ -197,7 +197,6 @@ export interface AppSettings {
   verticalExaggeration: VerticalExaggeration
 
   // Appearance
-  appName: 'Earth Contours' | 'EarthContours' | 'Earthscape'
   colorTheme: ColorTheme
   labelSize: LabelSize
   reduceMotion: boolean

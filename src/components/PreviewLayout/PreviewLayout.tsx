@@ -13,7 +13,7 @@
  */
 
 import React, { useCallback } from 'react'
-import { useUIStore, useSettingsStore } from '../../store'
+import { useUIStore } from '../../store'
 import type { ScreenId } from '../../core/types'
 import { createLogger } from '../../core/logger'
 import styles from './PreviewLayout.module.css'
@@ -57,8 +57,6 @@ const SCREEN_CARDS: Array<{
 const PreviewLayout: React.FC = () => {
   const enterFromPreview = useUIStore((state) => state.enterFromPreview)
   const navigateTo = useUIStore((state) => state.navigateTo)
-  const appName = useSettingsStore((state) => state.appName)
-
   const handleCardClick = useCallback(
     (screenId: ScreenId) => {
       log.info('Preview card clicked — entering screen', { screenId })
@@ -80,7 +78,7 @@ const PreviewLayout: React.FC = () => {
       <div className={styles.header}>
         <div className={styles.logo}>
           <img src="/Favicon3.svg" alt="" className={styles.logoMark} width="32" height="32" aria-hidden="true" />
-          <span className={styles.appName}>{appName}</span>
+          <span className={styles.appName}>Earth Contours</span>
         </div>
         <div className={styles.subtitle}>Choose your view</div>
       </div>
