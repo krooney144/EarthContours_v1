@@ -413,11 +413,8 @@ export interface SkylineData {
 export interface SkylineRequest {
   viewerLat:      number
   viewerLng:      number
-  viewerElev:     number
-  meshElevations: Float32Array
-  meshWidth:      number
-  meshHeight:     number
-  meshBounds:     { north: number; south: number; east: number; west: number }
+  /** Eye height above ground in metres (AGL). Worker resolves ground elevation from tiles. */
+  viewerHeightM:  number
   resolution:     number
   maxRange:       number
 }
