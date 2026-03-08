@@ -250,16 +250,22 @@ function globeOpacity(zoom: number): number {
  *  subtends ~2*atan(1/d) radians of arc. A Mercator flat map at zoom z shows
  *  360 / 2^z degrees across TILE_SIZE pixels. We match degrees-per-pixel. */
 function globeEquivFlatZoom(camZ: number, viewHeight: number): number {
-  const fovRad = 45 * Math.PI / 180
-  const halfFovTan = Math.tan(fovRad / 2)
-  // Globe: visible degrees across screen ≈ 2 * asin(min(1, 1/camZ)) * (180/π)
-  // But for scale matching we want deg/px: (visible arc in degrees) / viewHeight
   const visibleArcRad = camZ > 1 ? 2 * Math.asin(1 / camZ) : Math.PI
   const globeDegPerPx = (visibleArcRad * (180 / Math.PI)) / viewHeight
-  // Flat map: degPerPx = 360 / (TILE_SIZE * 2^z)
-  // Solve: 2^z = 360 / (TILE_SIZE * globeDegPerPx)
   const equivZoom = Math.log2(360 / (TILE_SIZE * globeDegPerPx))
   return equivZoom
+}
+
+/** Compute the effective zoom for flat map rendering and drag sensitivity.
+ *  During the globe→flat transition, blends the globe's equivalent zoom toward
+ *  the actual display zoom as the globe fades out. Outside the transition zone,
+ *  returns the raw display zoom unchanged. */
+function effectiveFlatZoom(displayZoom: number, viewHeight: number): number {
+  const gOp = globeOpacity(displayZoom)
+  if (gOp <= 0 || gOp >= 1) return displayZoom
+  const camZ = zoomToCameraZ(displayZoom)
+  const equivZ = globeEquivFlatZoom(camZ, viewHeight)
+  return equivZ + (1 - gOp) * (displayZoom - equivZ)
 }
 
 /** Map zoom level to camera Z distance from globe center.
@@ -656,17 +662,10 @@ const MapScreen: React.FC = () => {
 
     // Use integer zoom for tile operations — tiles are only available at integer levels.
     // Fractional zoom is used for smooth slider/pinch feel; tiles snap to the nearest int.
-    // During globe→flat transition, render the flat map at the globe's equivalent zoom
-    // so both views show the same geographic extent — features align during crossfade.
-    const gOp = globeOpacity(zoom)
-    let effectiveZoom = zoom
-    if (gOp > 0 && gOp < 1) {
-      const camZ = zoomToCameraZ(zoom)
-      const equivZ = globeEquivFlatZoom(camZ, H)
-      // Blend from globe-equivalent zoom toward the actual zoom as globe fades
-      effectiveZoom = equivZ + (1 - gOp) * (zoom - equivZ)
-    }
-    const tileZoom = Math.max(2, Math.round(effectiveZoom))
+    // During globe→flat transition, effectiveFlatZoom() blends toward the globe's
+    // equivalent zoom so the flat map matches the globe's visible geographic extent.
+    const effZoom = effectiveFlatZoom(zoom, H)
+    const tileZoom = Math.max(2, Math.round(effZoom))
 
     log.debug('Drawing DEM map', { W, H, zoom, tileZoom, center: `${centerLat.toFixed(4)},${centerLng.toFixed(4)}` })
 
@@ -716,7 +715,41 @@ const MapScreen: React.FC = () => {
       }
     }
 
-    // ── Pass 1: DEM elevation tiles ─────────────────────────────────────────
+    // ── Pass 0: Progressive placeholder — draw cached lower-zoom tiles scaled up ──
+    // Like Google Maps: show a blurry version instantly, then sharpen as real tiles arrive.
+    // For each tile position, walk down from (tileZoom-1) to max(tileZoom-4, 2) looking
+    // for a cached parent tile. If found, compute the sub-region and draw it scaled up.
+    if (tileZoom >= 5) {
+      for (const { wrappedX, tileY, pixelX, pixelY } of tileJobs) {
+        // Already cached at target zoom? Skip placeholder.
+        if (demTileCache.has(`${tileZoom}/${wrappedX}/${tileY}`)) continue
+
+        for (let fallbackZ = tileZoom - 1; fallbackZ >= Math.max(tileZoom - 4, 2); fallbackZ--) {
+          const zoomDiff = tileZoom - fallbackZ
+          const scale = 1 << zoomDiff  // 2, 4, 8, 16
+          // Parent tile coords: integer-divide by scale
+          const parentX = wrappedX >> zoomDiff
+          const parentY = tileY >> zoomDiff
+          const parentKey = `${fallbackZ}/${parentX}/${parentY}`
+          const cached = demTileCache.get(parentKey)
+          if (!cached) continue
+
+          // Sub-region within the parent tile
+          const subX = (wrappedX % scale) * (TILE_SIZE / scale)
+          const subY = (tileY % scale) * (TILE_SIZE / scale)
+          const subSize = TILE_SIZE / scale
+
+          ctx.drawImage(
+            cached,
+            subX, subY, subSize, subSize,     // source rect within parent
+            pixelX, pixelY, TILE_SIZE, TILE_SIZE, // destination (full tile size)
+          )
+          break
+        }
+      }
+    }
+
+    // ── Pass 1: DEM elevation tiles (high-res, overwrites placeholders) ──────
     await Promise.all(tileJobs.map(({ wrappedX, tileY, pixelX, pixelY }) =>
       loadDEMTile(tileZoom, wrappedX, tileY)
         .then((tileCanvas) => {
@@ -1470,7 +1503,13 @@ const MapScreen: React.FC = () => {
       dragRef.current.hasMoved = true
     }
 
-    const scale      = Math.pow(2, zoom)
+    // Use effectiveFlatZoom so drag speed matches the rendered tile zoom.
+    // During globe→flat transition, raw zoom is higher than the tiles on screen,
+    // which makes drag feel sluggish without this correction.
+    const canvas = canvasRef.current
+    const viewH = canvas ? canvas.clientHeight : 700
+    const dragZoom = effectiveFlatZoom(zoom, viewH)
+    const scale      = Math.pow(2, dragZoom)
     const lngPerPx   = 360 / (TILE_SIZE * scale)
     const latPerPx   = lngPerPx * Math.cos((centerLat * Math.PI) / 180)
 
