@@ -428,7 +428,6 @@ async function buildGlobeTexture(
 function createStarField(): THREE.Points {
   const count = 300
   const positions = new Float32Array(count * 3)
-  const sizes = new Float32Array(count)
   for (let i = 0; i < count; i++) {
     const theta = Math.random() * Math.PI * 2
     const phi = Math.acos(2 * Math.random() - 1)
@@ -436,56 +435,55 @@ function createStarField(): THREE.Points {
     positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta)
     positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
     positions[i * 3 + 2] = r * Math.cos(phi)
-    sizes[i] = 0.03 + Math.random() * 0.1
   }
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1))
+  // Fixed screen-space size so stars are always visible regardless of distance
   const material = new THREE.PointsMaterial({
-    color: 0xd0e4f0,
-    size: 0.1,
-    sizeAttenuation: true,
+    color: 0xe8f0ff,
+    size: 2,
+    sizeAttenuation: false,
     transparent: true,
-    opacity: 0.7,
+    opacity: 0.85,
   })
   return new THREE.Points(geometry, material)
 }
 
-// ─── Atmosphere Shader ───────────────────────────────────────────────────────
+// ─── Atmosphere Glow (Radial Gradient Sprite) ───────────────────────────────
 
 /**
- * Fresnel-based atmosphere glow.
- *   - Thin glow sphere (r=1.06) — just slightly larger than Earth for a subtle rim
- *   - Steep Fresnel power (3.0) — glow concentrated at the very edge, fades fast
- *   - Low alpha cap (0.35) — translucent haze, never solid/opaque
- *   - BackSide rendering so glow is visible as a rim behind the Earth
- *   - Additive blending for bright, airy halo
+ * Atmosphere halo — a radial gradient sprite rendered behind the Earth.
+ * Much simpler and more reliable than the Fresnel BackSide shader approach.
+ * The sprite always faces the camera (billboard), so no view-angle issues.
  */
-const atmosphereVertexShader = `
-  varying vec3 vNormal;
-  varying vec3 vPosition;
-  void main() {
-    vNormal = normalize(normalMatrix * normal);
-    vPosition = (modelViewMatrix * vec4(position, 1.0)).xyz;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`
-
-const atmosphereFragmentShader = `
-  varying vec3 vNormal;
-  varying vec3 vPosition;
-  void main() {
-    vec3 viewDir = normalize(-vPosition);
-    float rim = 1.0 - max(0.0, dot(vNormal, viewDir));
-    // Steep falloff: pow 3.0 concentrates glow at the very edge
-    float intensity = pow(rim, 3.0) * 1.0;
-    // Low alpha cap — translucent haze, fades to 0 at outer edge
-    float alpha = intensity * 0.35;
-    // Ocean-depth palette glow: mix of ec-mid (#4B8EA3) and ec-glow (#84D1DB)
-    vec3 glowColor = mix(vec3(0.29, 0.56, 0.64), vec3(0.52, 0.82, 0.86), rim);
-    gl_FragColor = vec4(glowColor * intensity, alpha);
-  }
-`
+function createAtmosphereSprite(): THREE.Sprite {
+  const size = 256
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')!
+  const cx = size / 2
+  // Radial gradient: teal core fading to transparent
+  const grad = ctx.createRadialGradient(cx, cx, size * 0.28, cx, cx, cx)
+  grad.addColorStop(0, 'rgba(75, 142, 163, 0.30)')   // ec-mid, visible core
+  grad.addColorStop(0.4, 'rgba(132, 209, 219, 0.12)') // ec-glow, mid haze
+  grad.addColorStop(0.7, 'rgba(132, 209, 219, 0.04)') // faint outer
+  grad.addColorStop(1, 'rgba(132, 209, 219, 0)')       // fully transparent edge
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, size, size)
+  const tex = new THREE.CanvasTexture(canvas)
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  })
+  const sprite = new THREE.Sprite(mat)
+  sprite.scale.set(3.2, 3.2, 1) // ~1.6× Earth diameter for subtle halo
+  sprite.renderOrder = -1 // render behind everything
+  return sprite
+}
 
 // ─── Main Component ────────────────────────────────────────────────────────────
 
@@ -520,7 +518,7 @@ const MapScreen: React.FC = () => {
     scene: THREE.Scene
     camera: THREE.PerspectiveCamera
     earth: THREE.Mesh
-    atmosphere: THREE.Mesh
+    atmosphere: THREE.Sprite
     stars: THREE.Points
     earthMaterial: THREE.MeshBasicMaterial
     locationMarker: THREE.Sprite
@@ -1076,18 +1074,8 @@ const MapScreen: React.FC = () => {
     locationMarker.visible = false
     earth.add(locationMarker)
 
-    // Atmosphere glow — thin sphere (r=1.06) with BackSide rendering
-    // creates a subtle rim glow behind the Earth edge
-    const atmosGeo = new THREE.SphereGeometry(1.06, 64, 64)
-    const atmosMat = new THREE.ShaderMaterial({
-      vertexShader: atmosphereVertexShader,
-      fragmentShader: atmosphereFragmentShader,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      side: THREE.BackSide,
-      depthWrite: false,
-    })
-    const atmosphere = new THREE.Mesh(atmosGeo, atmosMat)
+    // Atmosphere glow — radial gradient sprite behind the Earth
+    const atmosphere = createAtmosphereSprite()
     scene.add(atmosphere)
 
     // Stars
@@ -1226,7 +1214,8 @@ const MapScreen: React.FC = () => {
         smMat.map?.dispose()
         smMat.dispose()
         earthGeo.dispose()
-        atmosGeo.dispose()
+        const atmosMat = threeRef.current.atmosphere.material as THREE.SpriteMaterial
+        atmosMat.map?.dispose()
         atmosMat.dispose()
       }
       threeRef.current = null
@@ -1975,7 +1964,7 @@ const MapScreen: React.FC = () => {
           )}
           Globe ready: {globeReady ? 'yes' : 'no'}<br />
           <strong>Scene</strong><br />
-          Atmos: r=1.06 BackSide · Fresnel p=3.0<br />
+          Atmos: radial gradient sprite · 3.2× scale<br />
           Render: on-demand · Frames: {globeRenderCountRef.current}<br />
           Sphere: 96×96 segments<br />
           {threeRef.current && (() => {
