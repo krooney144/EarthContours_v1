@@ -16,6 +16,7 @@ import * as THREE from 'three'
 import { createLogger } from '../core/logger'
 import type { TerrainMeshData } from '../core/types'
 import { ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../core/constants'
+import { marchingSquares } from './marchingSquares'
 
 const log = createLogger('RENDERER:THREE')
 
@@ -235,6 +236,86 @@ export class TerrainRenderer {
     })
   }
 
+  // ── Build contour lines as 3D LineSegments on top of the mesh ──────────────
+
+  buildContourLines(mesh: TerrainMeshData, contourElevations: number[], verticalExaggeration: number): void {
+    if (!this.scene) return
+
+    // Remove old contour lines
+    if (this.contourLines) {
+      this.scene.remove(this.contourLines)
+      this.contourLines.geometry.dispose()
+      ;(this.contourLines.material as THREE.Material).dispose()
+      this.contourLines = null
+    }
+
+    if (contourElevations.length === 0) return
+
+    const { elevations, width, height, minElevation_m, maxElevation_m } = mesh
+    const elevRange = maxElevation_m - minElevation_m || 1
+
+    // Small Y offset above terrain surface to prevent z-fighting
+    const yOffset = elevRange * verticalExaggeration * 0.002
+
+    // Collect all line segment vertices and colors
+    const positions: number[] = []
+    const colors: number[] = []
+
+    for (const elev of contourElevations) {
+      const segments = marchingSquares(elevations, width, height, elev)
+      if (segments.length === 0) continue
+
+      const t = (elev - minElevation_m) / elevRange
+      // Brighter than the mesh surface so lines are visible
+      const c = elevationToColor(Math.min(1, t * 0.6 + 0.4))
+      const cr = c.r / 255
+      const cg = c.g / 255
+      const cb = c.b / 255
+
+      const y = (elev - minElevation_m) * verticalExaggeration + yOffset
+      const isMajor = elev % 500 === 0
+
+      // Slightly brighter for major contours
+      const brightMult = isMajor ? 1.3 : 1.0
+
+      for (const seg of segments) {
+        // marching squares output in [0,1] grid-normalised space → ENU metres
+        const x1 = (seg.x1 - 0.5) * this.terrainWidth_m
+        const z1 = (seg.y1 - 0.5) * this.terrainDepth_m
+        const x2 = (seg.x2 - 0.5) * this.terrainWidth_m
+        const z2 = (seg.y2 - 0.5) * this.terrainDepth_m
+
+        positions.push(x1, y, z1, x2, y, z2)
+        colors.push(
+          cr * brightMult, cg * brightMult, cb * brightMult,
+          cr * brightMult, cg * brightMult, cb * brightMult,
+        )
+      }
+    }
+
+    if (positions.length === 0) return
+
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+
+    const material = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.55,
+      depthTest: true,
+      depthWrite: false,
+    })
+
+    this.contourLines = new THREE.LineSegments(geometry, material)
+    this.scene.add(this.contourLines)
+
+    log.info('Contour lines built', {
+      elevationLevels: contourElevations.length,
+      lineSegments: positions.length / 6,
+    })
+  }
+
   // ── Update terrain when vertical exaggeration changes ───────────────────────
 
   updateExaggeration(mesh: TerrainMeshData, verticalExaggeration: number): void {
@@ -273,12 +354,12 @@ export class TerrainRenderer {
     const pivotY = this.elevRange_m * 0.3
 
     // Spherical to cartesian (phi=0 is top-down, phi=PI/2 is side-on)
-    const camX = pivotX + radius * Math.sin(phi) * Math.sin(theta)
+    // Negate theta so drag-right rotates the view right (matching the old system)
+    const camX = pivotX + radius * Math.sin(phi) * Math.sin(-theta)
     const camY = pivotY + radius * Math.cos(phi)
-    const camZ = pivotZ + radius * Math.sin(phi) * Math.cos(theta)
+    const camZ = pivotZ + radius * Math.sin(phi) * Math.cos(-theta)
 
     this.camera.position.set(camX, camY, camZ)
-    this.camera.lookAt(pivotX, pivotY, camZ > pivotZ ? pivotY * 0.5 : pivotY * 0.5)
     this.camera.lookAt(pivotX, pivotY * 0.5, pivotZ)
 
     // Adjust near/far based on radius
