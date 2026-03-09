@@ -1,40 +1,39 @@
 /**
- * EarthContours — OpenStreetMap Water Body Loader
+ * EarthContours — OpenStreetMap Water Feature Loader
  *
- * Grid-cell based pipeline for worldwide lake/reservoir loading.
- * The world is divided into fixed grid cells. When the map viewport changes,
- * only uncached cells are fetched from OSM's Overpass API.
+ * Unified fetcher for lakes AND rivers from OSM's Overpass API.
+ * One function, one query, one cache entry per location.
+ * Called by MAP, EXPLORE, and SCAN screens identically.
  *
- * Grid strategy:
- *   - World divided into CELL_SIZE_DEG × CELL_SIZE_DEG cells (3° × 3°)
- *   - Each cell cached independently in IndexedDB with 24h TTL
- *   - In-flight deduplication prevents duplicate requests
- *   - Zoom-gated: no fetching below zoom 9
- *
- * Zoom behaviour:
- *   - Zoom 1–8:  Skip entirely (lakes invisible at that scale)
- *   - Zoom 9–10: Named lakes only, minimum polygon size (≥10 vertices)
- *   - Zoom 11+:  All named lakes
+ * Pattern mirrors peakLoader.ts exactly:
+ *   fetchWaterNear(lat, lng, radiusKm) → { lakes, rivers }
  *
  * Cache strategy:
- *   - Results stored in IndexedDB keyed by cell coordinate string.
+ *   - Results stored in IndexedDB keyed by rounded lat/lng string.
  *   - Cache TTL is 24 hours.
- *   - On Overpass failure returns empty array — callers show no lakes.
+ *   - On Overpass failure returns empty arrays — callers degrade gracefully.
+ *
+ * Single Overpass query fetches:
+ *   - way/relation["natural"="water"]["name"]  → lakes, reservoirs, ponds
+ *   - way["waterway"="river"]["name"]          → rivers
  */
 
 import { createLogger } from '../core/logger'
-import type { WaterBody, LatLng } from '../core/types'
+import type { WaterBody, River, LatLng } from '../core/types'
 
 const log = createLogger('DATA:WATER_LOADER')
 
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
-const DB_NAME      = 'ec-water-v2'
-const STORE_NAME   = 'water-cells'
+const DB_NAME      = 'ec-water-v3'
+const STORE_NAME   = 'water'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000  // 24 h
 
-/** Grid cell size in degrees. 3° ≈ 330 km at equator, ~200 km at 50°N.
- *  Large enough to avoid excessive queries, small enough for reasonable payloads. */
-const CELL_SIZE_DEG = 3
+// ─── Result Type ─────────────────────────────────────────────────────────────
+
+export interface WaterNearResult {
+  lakes:  WaterBody[]
+  rivers: River[]
+}
 
 // ─── IndexedDB helpers ────────────────────────────────────────────────────────
 
@@ -55,9 +54,9 @@ async function openDB(): Promise<IDBDatabase> {
   })
 }
 
-interface CachedEntry { waterBodies: WaterBody[]; timestamp: number }
+interface CachedEntry { data: WaterNearResult; timestamp: number }
 
-async function getCached(key: string): Promise<WaterBody[] | null> {
+async function getCached(key: string): Promise<WaterNearResult | null> {
   try {
     const db = await openDB()
     return new Promise((resolve) => {
@@ -68,7 +67,8 @@ async function getCached(key: string): Promise<WaterBody[] | null> {
         if (!entry || Date.now() - entry.timestamp > CACHE_TTL_MS) {
           resolve(null)
         } else {
-          resolve(entry.waterBodies)
+          log.info('Water cache hit', { key, lakes: entry.data.lakes.length, rivers: entry.data.rivers.length })
+          resolve(entry.data)
         }
       }
       req.onerror = () => resolve(null)
@@ -76,62 +76,21 @@ async function getCached(key: string): Promise<WaterBody[] | null> {
   } catch { return null }
 }
 
-async function saveCache(key: string, waterBodies: WaterBody[]): Promise<void> {
+async function saveCache(key: string, data: WaterNearResult): Promise<void> {
   try {
     const db = await openDB()
     await new Promise<void>((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readwrite')
-      tx.objectStore(STORE_NAME).put({ waterBodies, timestamp: Date.now() }, key)
+      tx.objectStore(STORE_NAME).put({ data, timestamp: Date.now() }, key)
       tx.oncomplete = () => resolve()
       tx.onerror    = () => resolve()
     })
   } catch { /* non-fatal */ }
 }
 
-// ─── Grid Cell System ─────────────────────────────────────────────────────────
+// ─── In-flight Dedup ─────────────────────────────────────────────────────────
 
-/** Cell coordinate: floor(lat/CELL_SIZE), floor(lng/CELL_SIZE) */
-interface CellCoord {
-  cellLat: number  // e.g. 13 for latitudes 39–42° (13×3=39)
-  cellLng: number  // e.g. -36 for longitudes -108–-105° (-36×3=-108)
-}
-
-function cellKey(c: CellCoord): string {
-  return `cell:${c.cellLat}:${c.cellLng}`
-}
-
-function cellBounds(c: CellCoord): { south: number; west: number; north: number; east: number } {
-  return {
-    south: c.cellLat * CELL_SIZE_DEG,
-    west:  c.cellLng * CELL_SIZE_DEG,
-    north: (c.cellLat + 1) * CELL_SIZE_DEG,
-    east:  (c.cellLng + 1) * CELL_SIZE_DEG,
-  }
-}
-
-/** Compute all grid cells that overlap a viewport bounding box */
-function viewportToCells(south: number, west: number, north: number, east: number): CellCoord[] {
-  const minCellLat = Math.floor(south / CELL_SIZE_DEG)
-  const maxCellLat = Math.floor(north / CELL_SIZE_DEG)
-  const minCellLng = Math.floor(west / CELL_SIZE_DEG)
-  const maxCellLng = Math.floor(east / CELL_SIZE_DEG)
-
-  const cells: CellCoord[] = []
-  for (let cLat = minCellLat; cLat <= maxCellLat; cLat++) {
-    for (let cLng = minCellLng; cLng <= maxCellLng; cLng++) {
-      cells.push({ cellLat: cLat, cellLng: cLng })
-    }
-  }
-  return cells
-}
-
-// ─── In-memory Cell Cache + In-flight Dedup ──────────────────────────────────
-
-/** In-memory cache of already-fetched cells (avoids IndexedDB round-trip) */
-const memoryCache = new Map<string, WaterBody[]>()
-
-/** Promises for cells currently being fetched (deduplication) */
-const inFlightCells = new Map<string, Promise<WaterBody[]>>()
+const inFlight = new Map<string, Promise<WaterNearResult>>()
 
 // ─── Overpass Fetching ────────────────────────────────────────────────────────
 
@@ -168,174 +127,119 @@ function centroid(pts: LatLng[]): LatLng {
   return { lat: lat / pts.length, lng: lng / pts.length }
 }
 
-/** Fetch all named water bodies in a single grid cell */
-async function fetchCell(cell: CellCoord): Promise<WaterBody[]> {
-  const key = cellKey(cell)
+/** Core fetch: lakes + rivers in a bounding box, one Overpass query */
+async function fetchWaterInBounds(
+  south: number, west: number, north: number, east: number,
+): Promise<WaterNearResult> {
+  // Rounded cache key — same pattern as peakLoader
+  const key = `${south.toFixed(1)},${west.toFixed(1)},${north.toFixed(1)},${east.toFixed(1)}`
 
-  // 1. Memory cache
-  const mem = memoryCache.get(key)
-  if (mem) return mem
+  // In-flight dedup
+  const existing = inFlight.get(key)
+  if (existing) return existing
 
-  // 2. IndexedDB cache
-  const cached = await getCached(key)
-  if (cached) {
-    memoryCache.set(key, cached)
-    return cached
-  }
+  const doFetch = async (): Promise<WaterNearResult> => {
+    // IndexedDB cache
+    const cached = await getCached(key)
+    if (cached) return cached
 
-  // 3. Fetch from Overpass
-  const { south, west, north, east } = cellBounds(cell)
-
-  const query = `[out:json][timeout:45];
+    // Single Overpass query: lakes + rivers
+    const query = `[out:json][timeout:60];
 (
   way["natural"="water"]["name"](${south},${west},${north},${east});
   relation["natural"="water"]["name"](${south},${west},${north},${east});
+  way["waterway"="river"]["name"](${south},${west},${north},${east});
 );
 out geom;`
 
-  log.info('Fetching water cell from Overpass', { key, south, west, north, east })
+    log.info('Fetching water features from Overpass', { south: south.toFixed(1), west: west.toFixed(1), north: north.toFixed(1), east: east.toFixed(1) })
 
-  try {
-    const resp = await fetch(OVERPASS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: query,
-    })
-    if (!resp.ok) throw new Error(`Overpass HTTP ${resp.status}`)
+    try {
+      const resp = await fetch(OVERPASS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: query,
+      })
+      if (!resp.ok) throw new Error(`Overpass HTTP ${resp.status}`)
 
-    const data = (await resp.json()) as OverpassResponse
+      const data = (await resp.json()) as OverpassResponse
 
-    const waterBodies: WaterBody[] = []
+      const lakes:  WaterBody[] = []
+      const rivers: River[]     = []
 
-    for (const el of data.elements) {
-      const tags = el.tags
-      if (!tags?.name) continue
+      for (const el of data.elements) {
+        const tags = el.tags
+        if (!tags?.name) continue
 
-      let polygon: LatLng[] | null = null
-
-      if (el.type === 'way' && el.geometry && el.geometry.length >= 4) {
-        polygon = el.geometry.map(g => ({ lat: g.lat, lng: g.lon }))
-      } else if (el.type === 'relation' && el.members) {
-        const outer = el.members.find(m => m.role === 'outer' && m.geometry && m.geometry.length >= 4)
-        if (outer?.geometry) {
-          polygon = outer.geometry.map(g => ({ lat: g.lat, lng: g.lon }))
+        // River (waterway=river)
+        if (tags.waterway === 'river') {
+          if (el.type === 'way' && el.geometry && el.geometry.length >= 2) {
+            rivers.push({
+              id:     `osm-w${el.id}`,
+              name:   tags.name,
+              points: el.geometry.map(g => ({ lat: g.lat, lng: g.lon })),
+            })
+          }
+          continue
         }
+
+        // Lake/reservoir/pond (natural=water)
+        let polygon: LatLng[] | null = null
+
+        if (el.type === 'way' && el.geometry && el.geometry.length >= 4) {
+          polygon = el.geometry.map(g => ({ lat: g.lat, lng: g.lon }))
+        } else if (el.type === 'relation' && el.members) {
+          const outer = el.members.find(m => m.role === 'outer' && m.geometry && m.geometry.length >= 4)
+          if (outer?.geometry) {
+            polygon = outer.geometry.map(g => ({ lat: g.lat, lng: g.lon }))
+          }
+        }
+
+        if (!polygon || polygon.length < 4) continue
+
+        lakes.push({
+          id:      `osm-${el.type[0]}${el.id}`,
+          name:    tags.name,
+          type:    classifyWater(tags),
+          center:  centroid(polygon),
+          polygon,
+        })
       }
 
-      if (!polygon || polygon.length < 4) continue
+      // Sort lakes by polygon size (largest first) for rendering priority
+      lakes.sort((a, b) => b.polygon.length - a.polygon.length)
 
-      waterBodies.push({
-        id:      `osm-${el.type[0]}${el.id}`,
-        name:    tags.name,
-        type:    classifyWater(tags),
-        center:  centroid(polygon),
-        polygon,
-      })
+      const result: WaterNearResult = { lakes, rivers }
+      log.info('Water features fetched', { lakes: lakes.length, rivers: rivers.length, key })
+      await saveCache(key, result)
+      return result
+    } catch (err) {
+      log.warn('Water fetch failed', { err: String(err) })
+      return { lakes: [], rivers: [] }
     }
-
-    // Sort by polygon size (more vertices = likely bigger lake) so large lakes render first
-    waterBodies.sort((a, b) => b.polygon.length - a.polygon.length)
-
-    log.info('Water cell fetched', { key, count: waterBodies.length })
-    memoryCache.set(key, waterBodies)
-    await saveCache(key, waterBodies)
-    return waterBodies
-  } catch (err) {
-    log.warn('Water cell fetch failed', { key, err: String(err) })
-    return []
   }
-}
 
-/** Fetch a cell with in-flight deduplication */
-function fetchCellDeduped(cell: CellCoord): Promise<WaterBody[]> {
-  const key = cellKey(cell)
-  const existing = inFlightCells.get(key)
-  if (existing) return existing
-
-  const promise = fetchCell(cell).finally(() => {
-    inFlightCells.delete(key)
-  })
-  inFlightCells.set(key, promise)
+  const promise = doFetch().finally(() => { inFlight.delete(key) })
+  inFlight.set(key, promise)
   return promise
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
- * Fetch water bodies visible in a map viewport.
- * Grid-cell based: only fetches cells not already cached.
+ * Fetch all named water features (lakes + rivers) within `radiusKm` of a point.
+ * One Overpass query, one cache entry. Called identically by MAP, EXPLORE, SCAN.
  *
- * @param south  - Viewport south latitude
- * @param west   - Viewport west longitude
- * @param north  - Viewport north latitude
- * @param east   - Viewport east longitude
- * @param zoom   - Current map zoom level (controls filtering)
- * @returns Merged, deduplicated water bodies for the viewport
+ * @param lat       Center latitude
+ * @param lng       Center longitude
+ * @param radiusKm  Search radius in kilometres (typically 300)
+ * @returns { lakes: WaterBody[], rivers: River[] }
  */
-export async function fetchWaterBodiesForViewport(
-  south: number, west: number, north: number, east: number,
-  zoom: number,
-): Promise<WaterBody[]> {
-  // Zoom gate: no water below zoom 9
-  if (zoom < 9) return []
-
-  const cells = viewportToCells(south, west, north, east)
-
-  // Cap cells to avoid huge queries when zoomed out at z9
-  // At z9, viewport is ~10° wide → max ~16 cells (3° grid). Allow up to 20.
-  if (cells.length > 20) {
-    log.warn('Too many water cells for viewport, trimming', { requested: cells.length })
-    cells.length = 20
-  }
-
-  log.info('Water viewport query', { zoom, cells: cells.length, south: south.toFixed(1), north: north.toFixed(1), west: west.toFixed(1), east: east.toFixed(1) })
-
-  // Fetch all needed cells in parallel
-  const results = await Promise.all(cells.map(c => fetchCellDeduped(c)))
-
-  // Merge all cells into one array
-  const all: WaterBody[] = []
-  const seenIds = new Set<string>()
-  for (const cellBodies of results) {
-    for (const wb of cellBodies) {
-      if (seenIds.has(wb.id)) continue
-      seenIds.add(wb.id)
-
-      // Zoom-based filtering:
-      // z9–10: only lakes with enough detail (≥10 polygon vertices = larger lakes)
-      if (zoom <= 10 && wb.polygon.length < 10) continue
-
-      all.push(wb)
-    }
-  }
-
-  // Sort by polygon size (largest first) for rendering priority
-  all.sort((a, b) => b.polygon.length - a.polygon.length)
-
-  log.info('Water viewport merged', { total: all.length, cells: cells.length })
-  return all
-}
-
-/**
- * Legacy convenience wrapper: fetch water bodies within `radiusKm` of a lat/lng.
- * Still useful for SCAN screen or other non-viewport contexts.
- */
-export async function fetchWaterBodiesNear(
+export async function fetchWaterNear(
   lat: number, lng: number, radiusKm: number,
-): Promise<WaterBody[]> {
+): Promise<WaterNearResult> {
   const cosLat = Math.cos(lat * Math.PI / 180)
   const dLat = radiusKm / 111.132
   const dLng = radiusKm / (111.320 * cosLat)
-  return fetchWaterBodiesForViewport(
-    lat - dLat, lng - dLng, lat + dLat, lng + dLng,
-    11,  // treat as high zoom so all named lakes are returned
-  )
-}
-
-/** Get count of cached cells (for debug panel) */
-export function getWaterCacheStats(): { memoryCells: number; inFlight: number } {
-  return {
-    memoryCells: memoryCache.size,
-    inFlight: inFlightCells.size,
-  }
+  return fetchWaterInBounds(lat - dLat, lng - dLng, lat + dLat, lng + dLng)
 }
