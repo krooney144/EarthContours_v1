@@ -1,9 +1,9 @@
 /**
- * EarthContours — EXPLORE Screen  (v1.1 — ENU metre-space)
+ * EarthContours — EXPLORE Screen  (v3.0 — Solid Three.js terrain)
  *
- * 3D terrain view with free-roam navigation: pan, zoom, and orbit.
- * Elevation data rendered using marching squares contour lines, projected
- * into an orthographic 3D view.
+ * 3D terrain view with solid mesh surface. PlaneGeometry displaced by
+ * elevation heightmap, vertex-colored with ocean-depth palette, lit by
+ * directional + ambient lights. No more see-through contour lines.
  *
  * Navigation (desktop):
  *   Left drag        → pan across terrain
@@ -17,25 +17,6 @@
  *   2 finger pinch   → zoom in / out
  *   2 finger twist   → rotate view (theta)
  *   Double-tap       → fly to that terrain location
- *
- * NOTE: The 1-finger=orbit convention matches Google Earth, iOS Maps 3D, and
- * most globe/terrain apps. Users expect single-finger to explore the view angle
- * in 3D views. Two-finger pan is the natural complement.
- *
- * ── Coordinate system ────────────────────────────────────────────────────────
- *
- * All world coordinates are in a local ENU (East-North-Up) frame centred on
- * the loaded region's geographic centre (lat0, lon0):
- *
- *   x_m = (col / (w-1) - 0.5) * terrainWidth_m  − pivotX_m   east/west
- *   z_m = (row / (h-1) - 0.5) * terrainDepth_m  − pivotZ_m   north/south (z+ = south in grid)
- *   y_m = (elevation_m − minElevation_m) × verticalExaggeration  up
- *
- *   scale  = pixels per metre  = (min(W,H) × 0.62) / orbitRadius
- *   pivot  = (panX × terrainWidth_m,  panZ × terrainDepth_m)   in metres from terrain centre
- *
- * The ONLY thing that scales the Y (elevation) axis is verticalExaggeration.
- * No hidden multipliers.  At 1× exaggeration, 1 m of elevation = 1 m of world Y.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -44,170 +25,11 @@ import {
 } from '../../store'
 import { createLogger } from '../../core/logger'
 import { formatElevation } from '../../core/utils'
-import { ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../../core/constants'
-import { marchingSquares } from '../../renderer/marchingSquares'
+import { TerrainRenderer } from '../../renderer/TerrainRenderer'
 import type { Peak, TerrainMeshData } from '../../core/types'
 import styles from './ExploreScreen.module.css'
 
 const log = createLogger('SCREEN:EXPLORE')
-
-// ─── ENU Layout Helper ────────────────────────────────────────────────────────
-
-/**
- * Pre-compute all projection constants that must be identical between the
- * canvas renderer and the HTML label overlay.  Called once per render frame.
- *
- * Returns values in metres (world space) and CSS pixels (screen space).
- */
-function computeENULayout(
-  mesh: TerrainMeshData,
-  orbitRadius: number,
-  orbitPhi: number,
-  verticalExaggeration: number,
-  W: number,
-  H: number,
-) {
-  const lat0 = (mesh.bounds.north + mesh.bounds.south) / 2
-  const MPD_LON = ENU_M_PER_DEG_LON_AT_LAT(lat0)
-
-  const terrainWidth_m = (mesh.bounds.east  - mesh.bounds.west)  * MPD_LON
-  const terrainDepth_m = (mesh.bounds.north - mesh.bounds.south) * ENU_M_PER_DEG_LAT
-  const elevRange_m    = mesh.maxElevation_m - mesh.minElevation_m || 1
-
-  // pixels per metre — zoom controlled entirely by orbitRadius
-  const scale = Math.min(W, H) * 0.62 / orbitRadius
-
-  const cx = W / 2
-  // Push cy down so the full terrain height is centred on screen:
-  // half the projected terrain elevation range shifts the view downward
-  const cy = H / 2 + (elevRange_m * verticalExaggeration * scale * Math.sin(orbitPhi)) * 0.45
-
-  return { terrainWidth_m, terrainDepth_m, elevRange_m, scale, cx, cy }
-}
-
-// ─── 3D Projection ────────────────────────────────────────────────────────────
-
-/**
- * Project an ENU world point (x_m, y_m, z_m) in metres to CSS pixel screen coords.
- *
- * theta  — horizontal orbit angle (radians)
- * phi    — vertical tilt from zenith (radians; 0.1 = top-down, 1.45 = side-on)
- * scale  — pixels per metre (from computeENULayout)
- * cx, cy — screen-space projection centre (CSS pixels)
- */
-function project3D(
-  x_m: number, y_m: number, z_m: number,
-  theta: number, phi: number,
-  cx: number, cy: number,
-  scale: number,
-): [number, number] {
-  // Rotate around Y (vertical) by theta — horizontal orbit
-  const rx = x_m * Math.cos(theta) + z_m * Math.sin(theta)
-  const rz = -x_m * Math.sin(theta) + z_m * Math.cos(theta)
-  const ry = y_m
-
-  // Rotate around X by phi — vertical tilt
-  const ry2 = ry * Math.cos(phi) - rz * Math.sin(phi)
-  const rx2 = rx
-
-  // Orthographic projection (screen-y is flipped: up = negative screen-y)
-  return [cx + rx2 * scale, cy - ry2 * scale]
-}
-
-// ─── Canvas Draw ──────────────────────────────────────────────────────────────
-
-/**
- * Render the EXPLORE terrain onto the 2D canvas.
- *
- * All world coordinates are in ENU metres.  The canvas is assumed to have
- * ctx.scale(dpr, dpr) already applied by the caller, so this function works
- * entirely in CSS pixels.
- */
-function drawExploreCanvas(
-  canvas: HTMLCanvasElement,
-  mesh: TerrainMeshData,
-  contourElevations: number[],
-  theta: number,
-  phi: number,
-  verticalExaggeration: number,
-  panX: number,   // normalised fraction of terrainWidth_m  [-0.5, 0.5]
-  panZ: number,   // normalised fraction of terrainDepth_m  [-0.5, 0.5]
-  orbitRadius: number,
-): void {
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-
-  // Work in CSS pixels so this matches the PeakLabels3D HTML overlay.
-  const dpr = window.devicePixelRatio || 1
-  const W = canvas.width  / dpr
-  const H = canvas.height / dpr
-
-  const { elevations, width, height, minElevation_m, maxElevation_m } = mesh
-  const { terrainWidth_m, terrainDepth_m, scale, cx, cy } =
-    computeENULayout(mesh, orbitRadius, phi, verticalExaggeration, W, H)
-
-  // Pivot in metres (where the camera is looking)
-  const pivotX_m = panX * terrainWidth_m
-  const pivotZ_m = panZ * terrainDepth_m
-
-  ctx.fillStyle = '#020e18'
-  ctx.fillRect(0, 0, W, H)
-
-  // Subtle ground-plane ellipse at terrain base
-  const groundY  = cy
-  const groundRX = terrainWidth_m / 2 * scale * 0.55
-  const groundRY = terrainDepth_m / 2 * scale * Math.abs(Math.cos(phi)) * 0.3 + 4
-  ctx.beginPath()
-  ctx.ellipse(cx, groundY, groundRX, groundRY, 0, 0, Math.PI * 2)
-  ctx.strokeStyle = 'rgba(18, 75, 107, 0.4)'
-  ctx.lineWidth = 1
-  ctx.stroke()
-
-  // ── Contour lines (painter's algorithm: low → high) ───────────────────────
-  const elevRange = maxElevation_m - minElevation_m || 1
-
-  for (const elev of contourElevations) {
-    const t = (elev - minElevation_m) / elevRange  // used only for colour
-
-    // Ocean-depth palette: dark navy (low) → bright teal-foam (high)
-    const r = Math.round(14  + t * (167 - 14))
-    const g = Math.round(75  + t * (221 - 75))
-    const b = Math.round(107 + t * (229 - 107))
-    const opacity = 0.3 + t * 0.55
-
-    ctx.strokeStyle = `rgba(${r},${g},${b},${opacity})`
-    ctx.lineWidth = elev % 500 === 0 ? 1.5 : 0.8
-
-    const segments = marchingSquares(elevations, width, height, elev)
-
-    // ENU Y: elevation relative to terrain base, then exaggerated
-    const y_m = (elev - minElevation_m) * verticalExaggeration
-
-    ctx.beginPath()
-    for (const seg of segments) {
-      // marching squares output: seg.x / seg.y are in [0,1] grid-normalised space
-      // Convert to ENU metres centred on terrain, then subtract pivot
-      const x1 = (seg.x1 - 0.5) * terrainWidth_m - pivotX_m
-      const z1 = (seg.y1 - 0.5) * terrainDepth_m - pivotZ_m
-      const x2 = (seg.x2 - 0.5) * terrainWidth_m - pivotX_m
-      const z2 = (seg.y2 - 0.5) * terrainDepth_m - pivotZ_m
-
-      const [sx1, sy1] = project3D(x1, y_m, z1, theta, phi, cx, cy, scale)
-      const [sx2, sy2] = project3D(x2, y_m, z2, theta, phi, cx, cy, scale)
-
-      ctx.moveTo(sx1, sy1)
-      ctx.lineTo(sx2, sy2)
-    }
-    ctx.stroke()
-  }
-
-  log.debug('Explore canvas drawn (ENU)', {
-    terrainWidth_km: (terrainWidth_m / 1000).toFixed(1),
-    elevRange_m: elevRange.toFixed(0),
-    scale_pxpm: scale.toExponential(3),
-    orbitRadius_m: orbitRadius.toFixed(0),
-  })
-}
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -225,6 +47,7 @@ const ExploreScreen: React.FC = () => {
 
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef    = useRef<HTMLCanvasElement>(null)
+  const rendererRef  = useRef<TerrainRenderer | null>(null)
 
   const pointerMapRef     = useRef<Map<number, { x: number; y: number }>>(new Map())
   const lastPinchDistRef  = useRef(0)
@@ -242,9 +65,35 @@ const ExploreScreen: React.FC = () => {
     try { localStorage.setItem('ec_explore_hint_seen', '1') } catch { /* ignore */ }
   }, [])
 
+  // ── Initialize Three.js renderer ─────────────────────────────────────────
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const container = containerRef.current
+    if (!canvas || !container) return
+
+    const renderer = new TerrainRenderer()
+    renderer.initialize(canvas)
+    rendererRef.current = renderer
+
+    // Initial size
+    const rect = container.getBoundingClientRect()
+    if (rect.width > 0 && rect.height > 0) {
+      renderer.resize(rect.width, rect.height)
+      setContainerSize({ w: rect.width, h: rect.height })
+    }
+
+    log.info('Three.js renderer initialized')
+
+    return () => {
+      renderer.dispose()
+      rendererRef.current = null
+      log.info('Three.js renderer disposed')
+    }
+  }, [])
+
   // ── Init camera when terrain loads ─────────────────────────────────────────
-  // Called whenever a new terrain mesh is loaded.  Sets orbitRadius so the
-  // full terrain is visible at the default view angle.
+
   useEffect(() => {
     if (!meshData) return
     const terrainWidth_m = meshData.worldWidth_km * 1000
@@ -253,53 +102,46 @@ const ExploreScreen: React.FC = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meshData])  // intentionally omit initOrbitCamera — stable store action
 
-  // ── Canvas draw effect ─────────────────────────────────────────────────────
+  // ── Build terrain mesh when data loads or exaggeration changes ─────────────
+
+  const lastExaggerationRef = useRef<number>(0)
 
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || !meshData || contourElevations.length === 0) return
+    const renderer = rendererRef.current
+    if (!renderer || !renderer.isReady() || !meshData) return
 
-    const container = containerRef.current
-    if (container) {
-      const rect = container.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0) {
-        const dpr = window.devicePixelRatio || 1
-        canvas.width  = Math.round(rect.width  * dpr)
-        canvas.height = Math.round(rect.height * dpr)
-        const ctx = canvas.getContext('2d')
-        if (ctx) ctx.scale(dpr, dpr)
-        setContainerSize({ w: rect.width, h: rect.height })
-      }
+    if (lastExaggerationRef.current !== 0 && lastExaggerationRef.current !== verticalExaggeration) {
+      // Just update vertex positions — no full rebuild
+      renderer.updateExaggeration(meshData, verticalExaggeration)
+    } else {
+      renderer.buildTerrain(meshData, verticalExaggeration)
     }
+    lastExaggerationRef.current = verticalExaggeration
+  }, [meshData, verticalExaggeration])
 
-    drawExploreCanvas(
-      canvas, meshData, contourElevations,
-      orbitTheta, orbitPhi, verticalExaggeration,
-      orbitPanX, orbitPanZ, orbitRadius,
-    )
-  }, [orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ, meshData, contourElevations, verticalExaggeration])
+  // ── Render loop: update camera + render on every state change ──────────────
+
+  useEffect(() => {
+    const renderer = rendererRef.current
+    if (!renderer || !renderer.isReady()) return
+
+    renderer.updateCamera(orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ)
+    renderer.render()
+  }, [orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ, meshData, verticalExaggeration])
 
   // ── Resize observer ────────────────────────────────────────────────────────
 
   useEffect(() => {
     const container = containerRef.current
-    const canvas    = canvasRef.current
-    if (!container || !canvas) return
+    if (!container) return
 
     const observer = new ResizeObserver(() => {
       const rect = container.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0 && meshData && contourElevations.length > 0) {
-        const dpr = window.devicePixelRatio || 1
-        canvas.width  = Math.round(rect.width  * dpr)
-        canvas.height = Math.round(rect.height * dpr)
-        const ctx = canvas.getContext('2d')
-        if (ctx) {
-          ctx.scale(dpr, dpr)
-          drawExploreCanvas(
-            canvas, meshData, contourElevations,
-            orbitTheta, orbitPhi, verticalExaggeration,
-            orbitPanX, orbitPanZ, orbitRadius,
-          )
+      if (rect.width > 0 && rect.height > 0) {
+        const renderer = rendererRef.current
+        if (renderer) {
+          renderer.resize(rect.width, rect.height)
+          renderer.render()
         }
         setContainerSize({ w: rect.width, h: rect.height })
       }
@@ -307,7 +149,7 @@ const ExploreScreen: React.FC = () => {
 
     observer.observe(container)
     return () => observer.disconnect()
-  }, [meshData, contourElevations, orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ, verticalExaggeration])
+  }, [])
 
   // ── Wheel zoom (non-passive) ───────────────────────────────────────────────
 
@@ -338,20 +180,6 @@ const ExploreScreen: React.FC = () => {
     dismissHint()
   }, [dismissHint])
 
-  /**
-   * Pointer move handler — gesture model:
-   *
-   * TOUCH (pointerType === 'touch'):
-   *   1 finger  → orbit (rotate + tilt) — matches Google Earth convention
-   *   2 fingers → pan + pinch-zoom + twist-rotate
-   *
-   * MOUSE (pointerType === 'mouse'):
-   *   Left drag  → pan (unchanged from desktop convention)
-   *   Right drag → orbit (rotate + tilt)
-   *
-   * TODO: When gyroscope is active on SCAN, touch drag could be disabled
-   * or used for fine-tuning offsets.
-   */
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     const prev = pointerMapRef.current.get(e.pointerId)
     if (!prev) return
@@ -359,36 +187,29 @@ const ExploreScreen: React.FC = () => {
     pointerMapRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
 
     if (pointerCount >= 2) {
-      // ── Two-finger gesture: pan + pinch zoom + twist rotate ──
       const pts   = Array.from(pointerMapRef.current.values()) as { x: number; y: number }[]
       const dx    = pts[1].x - pts[0].x
       const dy    = pts[1].y - pts[0].y
       const dist  = Math.sqrt(dx * dx + dy * dy)
       const angle = Math.atan2(dy, dx)
 
-      // Pinch zoom
       const distDelta = dist - lastPinchDistRef.current
       if (Math.abs(distDelta) > 0.5) {
         applyOrbitZoom(distDelta > 0 ? -0.4 : 0.4)
         lastPinchDistRef.current = dist
       }
 
-      // Twist rotate
       const angleDelta = angle - lastPinchAngleRef.current
       if (Math.abs(angleDelta) > 0.005) {
         applyOrbitDrag(angleDelta * 60, 0)
         lastPinchAngleRef.current = angle
       }
 
-      // Two-finger pan (touch devices pan with 2 fingers)
       applyOrbitPan(e.clientX - prev.x, e.clientY - prev.y)
     } else {
-      // ── Single pointer ──
       const deltaX = e.clientX - prev.x
       const deltaY = e.clientY - prev.y
 
-      // Touch: 1-finger = orbit (Google Earth style)
-      // Mouse: left-click = pan, right-click = orbit
       const isTouch = e.pointerType === 'touch'
       if (isTouch || isRightClickRef.current || e.buttons === 2) {
         applyOrbitDrag(deltaX, deltaY)
@@ -404,45 +225,31 @@ const ExploreScreen: React.FC = () => {
     if (e.button === 2) isRightClickRef.current = false
   }, [])
 
-  // ── Double-click: fly to terrain point ────────────────────────────────────
-  // Inverts the orthographic projection at the terrain base plane (y_m = 0)
-  // to find the ENU world position under the click, then sets the pan pivot
-  // so the camera re-centres on that point.
+  // ── Double-click: fly to terrain point (raycast) ───────────────────────────
 
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
     const container = containerRef.current
-    if (!container || !meshData) return
+    const renderer = rendererRef.current
+    if (!container || !renderer || !meshData) return
 
     const rect = container.getBoundingClientRect()
     const sx = e.clientX - rect.left
     const sy = e.clientY - rect.top
-    const W  = rect.width
-    const H  = rect.height
 
-    const { terrainWidth_m, terrainDepth_m, scale, cx, cy } =
-      computeENULayout(meshData, orbitRadius, orbitPhi, verticalExaggeration, W, H)
-
-    // Invert project3D at y_m = 0 (terrain base plane)
-    const rx2 = (sx - cx) / scale
-    const ry2 = (cy - sy) / scale
-    const rz  = -ry2 / Math.max(0.1, Math.sin(orbitPhi))
-
-    // Undo theta rotation to recover ENU world offset from pivot
-    const dx_m = rx2 * Math.cos(orbitTheta) - rz * Math.sin(orbitTheta)
-    const dz_m = rx2 * Math.sin(orbitTheta) + rz * Math.cos(orbitTheta)
-
-    // New pivot in metres from terrain centre, then normalise back to fraction
-    const newPivotX_m = orbitPanX * terrainWidth_m + dx_m
-    const newPivotZ_m = orbitPanZ * terrainDepth_m + dz_m
-
-    setOrbitPan(newPivotX_m / terrainWidth_m, newPivotZ_m / terrainDepth_m)
-
-    log.debug('Fly-to double-click', {
-      dx_m: dx_m.toFixed(0), dz_m: dz_m.toFixed(0),
-      newPanX: (newPivotX_m / terrainWidth_m).toFixed(3),
-      newPanZ: (newPivotZ_m / terrainDepth_m).toFixed(3),
-    })
-  }, [orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ, setOrbitPan, meshData, verticalExaggeration])
+    const hit = renderer.raycastTerrain(sx, sy, rect.width, rect.height)
+    if (hit) {
+      const tw = renderer.getTerrainWidth()
+      const td = renderer.getTerrainDepth()
+      if (tw > 0 && td > 0) {
+        setOrbitPan(hit.x / tw, hit.z / td)
+        log.debug('Fly-to raycast hit', {
+          x: hit.x.toFixed(0), z: hit.z.toFixed(0),
+          panX: (hit.x / tw).toFixed(3),
+          panZ: (hit.z / td).toFixed(3),
+        })
+      }
+    }
+  }, [meshData, setOrbitPan])
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -451,7 +258,8 @@ const ExploreScreen: React.FC = () => {
   // ── Location pin screen position ───────────────────────────────────────────
 
   const locationPinScreen = useMemo((): { sx: number; sy: number } | null => {
-    if (!meshData || !containerSize.w || mode !== 'exploring') return null
+    const renderer = rendererRef.current
+    if (!meshData || !containerSize.w || mode !== 'exploring' || !renderer) return null
 
     const { bounds, minElevation_m, elevations, width, height } = meshData
 
@@ -468,20 +276,10 @@ const ExploreScreen: React.FC = () => {
     const r    = Math.max(0, Math.min(height - 1, row))
     const elev = elevations[r * width + c] ?? minElevation_m
 
-    const W = containerSize.w
-    const H = containerSize.h
-    const { terrainWidth_m, terrainDepth_m, scale, cx, cy } =
-      computeENULayout(meshData, orbitRadius, orbitPhi, verticalExaggeration, W, H)
-
-    const pivotX_m = orbitPanX * terrainWidth_m
-    const pivotZ_m = orbitPanZ * terrainDepth_m
-
-    const x_m = (c / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
-    const z_m = (r / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
-    const y_m = (elev - minElevation_m) * verticalExaggeration
-
-    const [sx, sy] = project3D(x_m, y_m, z_m, orbitTheta, orbitPhi, cx, cy, scale)
-    return { sx, sy }
+    return renderer.projectToScreen(
+      meshData, c, r, elev, verticalExaggeration,
+      containerSize.w, containerSize.h,
+    )
   }, [
     meshData, activeLat, activeLng, mode,
     orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ,
@@ -543,20 +341,16 @@ const ExploreScreen: React.FC = () => {
           aria-hidden="true"
         />
 
-        {showPeakLabels && containerSize.w > 0 && (
+        {showPeakLabels && containerSize.w > 0 && rendererRef.current && (
           <div className={styles.peakLabelsLayer}>
             <PeakLabels3D
               peaks={peaks}
-              theta={orbitTheta}
-              phi={orbitPhi}
-              panX={orbitPanX}
-              panZ={orbitPanZ}
-              orbitRadius={orbitRadius}
               meshData={meshData}
               verticalExaggeration={verticalExaggeration}
               containerW={containerSize.w}
               containerH={containerSize.h}
               units={units}
+              renderer={rendererRef.current}
             />
           </div>
         )}
@@ -580,7 +374,6 @@ const ExploreScreen: React.FC = () => {
             aria-label="Dismiss navigation hint"
           >
             <div className={styles.controlsHintTitle}>EXPLORE CONTROLS</div>
-            {/* Desktop controls */}
             <div className={styles.controlsHintRow}>
               <span className={styles.controlsHintKey}>Drag</span>
               <span className={styles.controlsHintDesc}>Pan terrain</span>
@@ -593,7 +386,6 @@ const ExploreScreen: React.FC = () => {
               <span className={styles.controlsHintKey}>Scroll</span>
               <span className={styles.controlsHintDesc}>Zoom</span>
             </div>
-            {/* Mobile touch controls — Google Earth convention */}
             <div className={styles.controlsHintRow}>
               <span className={styles.controlsHintKey}>1 finger</span>
               <span className={styles.controlsHintDesc}>Rotate &amp; tilt</span>
@@ -628,34 +420,20 @@ const ExploreScreen: React.FC = () => {
 // ─── PeakLabels3D ─────────────────────────────────────────────────────────────
 
 /**
- * HTML overlay that renders peak labels projected into the same ENU world space
- * as the canvas.  Uses computeENULayout() to guarantee identical scale / cx / cy
- * values, so labels stay locked to their contour peaks at all zoom/pan levels.
- *
- * Each peak is snapped to the actual local maximum in the elevation grid within
- * a small search radius — this corrects for minor discrepancies between the
- * stored GPS coordinate and the actual tile data.
+ * HTML overlay that renders peak labels projected via the Three.js camera.
+ * Uses TerrainRenderer.projectToScreen() so labels stay locked to the
+ * terrain mesh at all zoom/pan levels.
  */
 const PeakLabels3D: React.FC<{
   peaks: Peak[]
-  theta: number
-  phi: number
-  panX: number
-  panZ: number
-  orbitRadius: number
   meshData: TerrainMeshData
   verticalExaggeration: number
   containerW: number
   containerH: number
   units: 'imperial' | 'metric'
-}> = ({ peaks, theta, phi, panX, panZ, orbitRadius, meshData, verticalExaggeration, containerW, containerH, units }) => {
+  renderer: TerrainRenderer
+}> = ({ peaks, meshData, verticalExaggeration, containerW, containerH, units, renderer }) => {
   const { minElevation_m, bounds, elevations, width, height } = meshData
-
-  const { terrainWidth_m, terrainDepth_m, scale, cx, cy } =
-    computeENULayout(meshData, orbitRadius, phi, verticalExaggeration, containerW, containerH)
-
-  const pivotX_m = panX * terrainWidth_m
-  const pivotZ_m = panZ * terrainDepth_m
 
   const SEARCH_RADIUS = 6
 
@@ -686,13 +464,13 @@ const PeakLabels3D: React.FC<{
           }
         }
 
-        // ENU world coordinates — identical formula to drawExploreCanvas
-        const x_m = (bestCol / (width  - 1) - 0.5) * terrainWidth_m - pivotX_m
-        const z_m = (bestRow / (height - 1) - 0.5) * terrainDepth_m - pivotZ_m
-        const y_m = (bestElev - minElevation_m) * verticalExaggeration
+        const screen = renderer.projectToScreen(
+          meshData, bestCol, bestRow, bestElev, verticalExaggeration,
+          containerW, containerH,
+        )
+        if (!screen) return null
 
-        const [sx, sy] = project3D(x_m, y_m, z_m, theta, phi, cx, cy, scale)
-
+        const { sx, sy } = screen
         if (sx < -80 || sx > containerW + 80 || sy < -60 || sy > containerH + 60) return null
 
         return (
