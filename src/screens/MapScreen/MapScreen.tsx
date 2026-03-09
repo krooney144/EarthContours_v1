@@ -245,30 +245,25 @@ function globeOpacity(zoom: number): number {
   return 1 - (t * t * (3 - 2 * t))
 }
 
-/** Compute the flat-map zoom level that matches the globe's visible scale.
- *  This ensures the flat map renders at the same geographic extent as the globe
- *  during the crossfade, so features align pixel-perfectly at screen center.
- *
- *  Derivation: On a unit sphere at camera distance d with FOV θ, the globe
- *  subtends ~2*atan(1/d) radians of arc. A Mercator flat map at zoom z shows
- *  360 / 2^z degrees across TILE_SIZE pixels. We match degrees-per-pixel. */
-function globeEquivFlatZoom(camZ: number, viewHeight: number): number {
-  const visibleArcRad = camZ > 1 ? 2 * Math.asin(1 / camZ) : Math.PI
-  const globeDegPerPx = (visibleArcRad * (180 / Math.PI)) / viewHeight
-  const equivZoom = Math.log2(360 / (TILE_SIZE * globeDegPerPx))
-  return equivZoom
-}
+
+/** Perspective magnification offset: the globe's center is closer to the camera
+ *  than a flat plane at the same distance, so the globe appears ~1.25 zoom levels
+ *  more magnified than a Mercator flat map at the same slider zoom. During the
+ *  crossfade we boost the flat map zoom by this amount (blended by globe opacity)
+ *  so both layers show the same geographic scale. */
+const GLOBE_PERSPECTIVE_OFFSET = 1.25
 
 /** Compute the effective zoom for flat map rendering and drag sensitivity.
- *  During the globe→flat transition, blends the globe's equivalent zoom toward
- *  the actual display zoom as the globe fades out. Outside the transition zone,
- *  returns the raw display zoom unchanged. */
-function effectiveFlatZoom(displayZoom: number, viewHeight: number): number {
+ *  During the globe→flat transition, blends toward the globe's apparent scale
+ *  (displayZoom + perspective offset) so features align during crossfade.
+ *  Outside the transition zone, returns the raw display zoom unchanged. */
+function effectiveFlatZoom(displayZoom: number, _viewHeight: number): number {
   const gOp = globeOpacity(displayZoom)
-  if (gOp <= 0 || gOp >= 1) return displayZoom
-  const camZ = zoomToCameraZ(displayZoom, viewHeight)
-  const equivZ = globeEquivFlatZoom(camZ, viewHeight)
-  return equivZ + (1 - gOp) * (displayZoom - equivZ)
+  if (gOp <= 0) return displayZoom
+  if (gOp >= 1) return displayZoom  // flat map not drawn when globe fully visible
+  // Blend: at gOp=1 (start of transition) flat map matches globe scale (zoom + offset),
+  // at gOp=0 (end of transition) flat map uses its true zoom.
+  return displayZoom + gOp * GLOBE_PERSPECTIVE_OFFSET
 }
 
 /** Map zoom level to camera Z distance from globe center.
@@ -760,7 +755,7 @@ const MapScreen: React.FC = () => {
           ctx.drawImage(
             cached,
             subX, subY, subSize, subSize,     // source rect within parent
-            pixelX, pixelY, displayTileSize, displayTileSize, // destination (sub-tile scaled)
+            pixelX, pixelY, displayTileSize + 1, displayTileSize + 1, // +1px overlap to hide sub-pixel seams
           )
           break
         }
@@ -772,7 +767,7 @@ const MapScreen: React.FC = () => {
       loadDEMTile(tileZoom, wrappedX, tileY)
         .then((tileCanvas) => {
           if (thisGeneration !== loadingRef.current) return
-          ctx.drawImage(tileCanvas, pixelX, pixelY, displayTileSize, displayTileSize)
+          ctx.drawImage(tileCanvas, pixelX, pixelY, displayTileSize + 1, displayTileSize + 1)
         })
         .catch(() => {
           log.debug('DEM tile unavailable, leaving base fill', { x: wrappedX, y: tileY })
@@ -785,7 +780,7 @@ const MapScreen: React.FC = () => {
       loadLabelTile(tileZoom, wrappedX, tileY)
         .then((img) => {
           if (thisGeneration !== loadingRef.current) return
-          ctx.drawImage(img, pixelX, pixelY, displayTileSize, displayTileSize)
+          ctx.drawImage(img, pixelX, pixelY, displayTileSize + 1, displayTileSize + 1)
         })
         .catch(() => {
           // Label tiles are optional — silent fail if CDN is unavailable
@@ -1298,8 +1293,25 @@ const MapScreen: React.FC = () => {
         requestGlobeRenderRef.current()
         log.info('Globe z3 texture applied (upgrade)')
 
+        // Upgrade to z=4 in background — 256 tiles, 4096×4096.
+        // Keeps globe sharp at zoom 5-6 where z3 gets blurry.
+        buildGlobeTexture(4, (loaded, total) => {
+          setGlobeTilesLoaded(loaded)
+          setGlobeTilesTotal(total)
+        }).then((tex4) => {
+          if (!threeRef.current) return
+          const t4 = new THREE.CanvasTexture(tex4)
+          t4.colorSpace = THREE.SRGBColorSpace
+          threeRef.current.earthMaterial.map = t4
+          threeRef.current.earthMaterial.needsUpdate = true
+          setGlobeTextureZoom(4)
+          requestGlobeRenderRef.current()
+          log.info('Globe z4 texture applied (upgrade)')
+        }).catch((err) => {
+          log.warn('Globe z4 texture failed, staying on z3', err)
+        })
+
         // Pre-cache z4 flat map tiles around center for smooth transition.
-        // z4 has 16×16 = 256 tiles total, but we only need the ~6 visible ones.
         // These cache into demTileCache so the flat map draws instantly during crossfade.
         const precacheZ = 4
         const ct = latLngToTile(centerLat, centerLng, precacheZ)
@@ -2157,10 +2169,46 @@ const MapScreen: React.FC = () => {
       {/* Globe debug panel */}
       {showGlobeDebug && (() => {
         const viewH = globeCanvasRef.current?.clientHeight || 700
+        const viewW = globeCanvasRef.current?.clientWidth || 400
         const camZ = zoomToCameraZ(zoom, viewH)
         const effZ = effectiveFlatZoom(zoom, viewH)
         const tZ = Math.round(effZ)
         const sts = Math.pow(2, effZ - tZ)
+
+        // ── Scale comparison: 300km in pixels for globe vs flat map ──
+        const SCALE_KM = 300
+        const DEG_PER_KM_LNG = 1 / (111.320 * Math.cos(centerLat * Math.PI / 180))
+        const halfDegLng = (SCALE_KM / 2) * DEG_PER_KM_LNG
+
+        // Flat map: use Mercator pixel math at effZoom
+        const flatP1 = latLngToPixel(centerLat, centerLng - halfDegLng, centerLat, centerLng, effZ, viewW, viewH)
+        const flatP2 = latLngToPixel(centerLat, centerLng + halfDegLng, centerLat, centerLng, effZ, viewW, viewH)
+        const flatPx300 = Math.abs(flatP2.x - flatP1.x)
+
+        // Globe: project two points on the sphere through the Three.js camera
+        let globePx300 = 0
+        if (threeRef.current) {
+          const cam = threeRef.current.camera
+          const { rotX, rotY } = latLngToSphereRotation(centerLat, centerLng)
+          // Point at center - halfDeg and center + halfDeg longitude on unit sphere
+          const toScreen = (lat: number, lng: number) => {
+            const latR = lat * Math.PI / 180
+            const lngR = lng * Math.PI / 180
+            // Sphere surface point (radius 1) — same convention as SphereGeometry
+            const sx = -Math.cos(latR) * Math.sin(lngR)
+            const sy = Math.sin(latR)
+            const sz = Math.cos(latR) * Math.cos(lngR)
+            const v = new THREE.Vector3(sx, sy, sz)
+            // Apply same rotation as the earth mesh
+            v.applyEuler(new THREE.Euler(rotX, rotY, 0, 'YXZ'))
+            v.project(cam)
+            return { x: (v.x + 1) / 2 * viewW, y: (1 - v.y) / 2 * viewH }
+          }
+          const gP1 = toScreen(centerLat, centerLng - halfDegLng)
+          const gP2 = toScreen(centerLat, centerLng + halfDegLng)
+          globePx300 = Math.abs(gP2.x - gP1.x)
+        }
+
         return (
           <div className={styles.globeDebug} style={{ top: 78 }}>
             <strong>Map Debug</strong><br />
@@ -2172,6 +2220,8 @@ const MapScreen: React.FC = () => {
             <strong>Transition</strong><br />
             Window: z{GLOBE_FULL_ZOOM}→z{GLOBE_GONE_ZOOM} ({(GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM).toFixed(1)} levels) · Curve: smoothstep<br />
             Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'} · Brightness: {gOpacity > 0 ? `${(1 + gOpacity * 0.35).toFixed(2)}×` : '1.00×'}<br />
+            <strong>Scale ({SCALE_KM}km)</strong><br />
+            Globe: {globePx300.toFixed(0)}px · Flat: {flatPx300.toFixed(0)}px · Ratio: {flatPx300 > 0 ? (globePx300 / flatPx300).toFixed(2) : '—'}×<br />
             <strong>Data</strong><br />
             Lakes: {showWaterLabels ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {rivers.length}
           </div>
