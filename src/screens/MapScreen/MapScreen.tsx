@@ -42,7 +42,7 @@ import {
   clamp, formatCoordinates, formatDistance,
 } from '../../core/utils'
 import { loadElevationTile } from '../../data/elevationLoader'
-import { fetchWaterBodiesForViewport } from '../../data/waterLoader'
+import { fetchWaterNear } from '../../data/waterLoader'
 import type { TileCoord } from '../../core/types'
 import styles from './MapScreen.module.css'
 
@@ -490,7 +490,7 @@ function createAtmosphereSprite(): THREE.Sprite {
 
 const MapScreen: React.FC = () => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
-  const { peaks, waterBodies, meshData, activeRegion, setWaterBodies } = useTerrainStore()
+  const { peaks, waterBodies, rivers, meshData, activeRegion, setWaterBodies, setRivers } = useTerrainStore()
   const { coordFormat, showPeakLabels, showWaterLabels, units } = useSettingsStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -909,6 +909,42 @@ const MapScreen: React.FC = () => {
       }
     }
 
+    // ── River lines ────────────────────────────────────────────────────────
+    if (showWaterLabels && rivers.length > 0 && tileZoom >= 9) {
+      ctx.strokeStyle = 'rgba(50, 120, 200, 0.5)'
+      ctx.lineWidth   = 1.5
+      ctx.lineJoin    = 'round'
+      ctx.lineCap     = 'round'
+
+      for (let rIdx = 0; rIdx < Math.min(rivers.length, 60); rIdx++) {
+        const river = rivers[rIdx]
+        const pts = river.points
+        if (pts.length < 2) continue
+
+        // Quick cull: check midpoint
+        const midIdx = Math.floor(pts.length / 2)
+        const mp = latLngToPixel(pts[midIdx].lat, pts[midIdx].lng, centerLat, centerLng, tileZoom, W, H)
+        if (mp.x < -500 || mp.x > W + 500 || mp.y < -500 || mp.y > H + 500) continue
+
+        ctx.beginPath()
+        const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, tileZoom, W, H)
+        ctx.moveTo(first.x, first.y)
+        for (let i = 1; i < pts.length; i++) {
+          const p = latLngToPixel(pts[i].lat, pts[i].lng, centerLat, centerLng, tileZoom, W, H)
+          ctx.lineTo(p.x, p.y)
+        }
+        ctx.stroke()
+
+        // Label at midpoint at zoom 11+
+        if (river.name && tileZoom >= 11) {
+          ctx.font      = `italic 9px 'Josefin Sans', sans-serif`
+          ctx.textAlign = 'center'
+          ctx.fillStyle = 'rgba(100, 170, 230, 0.8)'
+          ctx.fillText(river.name, mp.x, mp.y - 4)
+        }
+      }
+    }
+
     // ── Peak markers ─────────────────────────────────────────────────────────
     if (showPeakLabels && tileZoom >= 8) {
       ctx.font      = `bold 11px 'Josefin Sans', sans-serif`
@@ -1000,7 +1036,7 @@ const MapScreen: React.FC = () => {
 
     setIsLoading(false)
     log.debug('DEM map draw complete')
-  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, showWaterLabels, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
+  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, rivers, showWaterLabels, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
 
   // ── Resize observer ──────────────────────────────────────────────────────────
 
@@ -1037,38 +1073,23 @@ const MapScreen: React.FC = () => {
     }
   }, [drawMap])
 
-  // ── Fetch water bodies from OSM (grid-cell viewport pipeline) ───────────────
+  // ── Fetch water features from OSM (lakes + rivers, 300km radius) ────────────
 
   useEffect(() => {
     if (!showWaterLabels) return
-    // Zoom gate: no water below zoom 9 (matches waterLoader)
-    const tileZ = Math.round(zoom)
-    if (tileZ < 9) return
-
     let cancelled = false
-
-    // Compute viewport bounds from canvas dimensions
-    const canvas = canvasRef.current
-    const dpr = window.devicePixelRatio || 1
-    const W = canvas ? canvas.width / dpr : 800
-    const H = canvas ? canvas.height / dpr : 600
-
-    const topLeft = pixelToLatLng(0, 0, centerLat, centerLng, zoom, W, H)
-    const bottomRight = pixelToLatLng(W, H, centerLat, centerLng, zoom, W, H)
-
-    fetchWaterBodiesForViewport(
-      bottomRight.lat, topLeft.lng, topLeft.lat, bottomRight.lng,
-      tileZ,
-    ).then(bodies => {
-      if (!cancelled) {
-        setWaterBodies(bodies)
-        log.info('Water bodies loaded for MAP', { count: bodies.length, zoom: tileZ })
-      }
-    })
+    fetchWaterNear(centerLat, centerLng, 300)
+      .then(({ lakes, rivers: fetchedRivers }) => {
+        if (!cancelled) {
+          setWaterBodies(lakes)
+          setRivers(fetchedRivers)
+          log.info('Water features loaded for MAP', { lakes: lakes.length, rivers: fetchedRivers.length })
+        }
+      })
     return () => { cancelled = true }
-    // Re-fetch when center moves by ~0.5° or zoom changes integer level
+    // Re-fetch when center moves significantly (rounded to 0.5°)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2), Math.round(zoom)])
+  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2)])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
 
