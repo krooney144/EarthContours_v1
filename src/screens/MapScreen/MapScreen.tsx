@@ -266,28 +266,30 @@ function globeEquivFlatZoom(camZ: number, viewHeight: number): number {
 function effectiveFlatZoom(displayZoom: number, viewHeight: number): number {
   const gOp = globeOpacity(displayZoom)
   if (gOp <= 0 || gOp >= 1) return displayZoom
-  const camZ = zoomToCameraZ(displayZoom)
+  const camZ = zoomToCameraZ(displayZoom, viewHeight)
   const equivZ = globeEquivFlatZoom(camZ, viewHeight)
   return equivZ + (1 - gOp) * (displayZoom - equivZ)
 }
 
 /** Map zoom level to camera Z distance from globe center.
  *
- * Formula: z = 1.2 + 4.5 * 0.65^zoom
+ * Derives camera distance so that at the sub-camera point, the globe's
+ * degrees-per-pixel matches a Mercator flat map at the same zoom level.
+ * This ensures the globe and flat map show the same geographic scale during
+ * the crossfade transition — no size mismatch.
  *
- * Designed so the globe fills the viewport by the transition zone (zoom 4+),
- * eliminating the visible circle-over-map artifact during crossfade.
+ * Math: At distance d from sphere center (radius 1), 1 radian of arc
+ * subtends 1/(d-1) units in view space. Combined with FOV 45° and viewport
+ * height, we match the Mercator scale: degPerPx = 360 / (256 * 2^zoom).
  *
- *   Zoom 1: d≈4.1 → globe subtends ~32° of 45° FOV → full globe with space
- *   Zoom 2: d≈3.1 → ~38° → globe nearly fills screen
- *   Zoom 3: d≈2.4 → ~48° → globe just fills screen (edge at viewport border)
- *   Zoom 4: d≈2.0 → ~60° → globe overflows viewport, no visible edge
- *   Zoom 5: d≈1.7 → ~68° → globe surface looks nearly flat
- *   Zoom 6: d≈1.5 → ~77° → globe surface looks flat, max magnification
+ * For low zooms the formula is clamped so the globe stays within the viewport.
  */
-function zoomToCameraZ(zoom: number): number {
-  const z = 1.2 + 4.5 * Math.pow(0.65, zoom)
-  return clamp(z, 1.15, 5.0)
+function zoomToCameraZ(zoom: number, viewHeight: number = 700): number {
+  const degPerPx = 360 / (TILE_SIZE * Math.pow(2, zoom))
+  const radPerPx = degPerPx * Math.PI / 180
+  const halfFov = (45 / 2) * Math.PI / 180  // FOV = 45°
+  const d = 1 + radPerPx * viewHeight / (2 * Math.tan(halfFov))
+  return clamp(d, 1.12, 12.0)
 }
 
 /**
@@ -631,6 +633,7 @@ const MapScreen: React.FC = () => {
     startCenterLat: DEFAULT_MAP_CENTER.lat,
     startCenterLng: DEFAULT_MAP_CENTER.lng,
     hasMoved: false,
+    touchStartedAt: 0,  // Timestamp for pinch debounce — don't pan until 80ms elapsed
   })
 
   const pinchRef    = useRef({ isPinching: false, startDist: 0, startZoom: DEFAULT_MAP_ZOOM })
@@ -674,29 +677,27 @@ const MapScreen: React.FC = () => {
 
     const thisGeneration = ++loadingRef.current
 
-    // Use integer zoom for tile operations — tiles are only available at integer levels.
-    // Fractional zoom is used for smooth slider/pinch feel; tiles snap to the nearest int.
-    // During globe→flat transition, effectiveFlatZoom() blends toward the globe's
-    // equivalent zoom so the flat map matches the globe's visible geographic extent.
+    // Use integer zoom for tile fetching — tiles only exist at integer levels.
+    // But use fractional effZoom for all POSITIONING so the map scales smoothly
+    // between integer tile levels (sub-tile scaling, like Google/Apple Maps).
     const effZoom = effectiveFlatZoom(zoom, H)
     const tileZoom = Math.max(2, Math.round(effZoom))
+    const subTileScale = Math.pow(2, effZoom - tileZoom)  // >1 when between integer levels going up, <1 going down
+    const displayTileSize = TILE_SIZE * subTileScale
 
-    log.debug('Drawing DEM map', { W, H, zoom, tileZoom, center: `${centerLat.toFixed(4)},${centerLng.toFixed(4)}` })
+    log.debug('Drawing DEM map', { W, H, zoom, effZoom: effZoom.toFixed(2), tileZoom, subTileScale: subTileScale.toFixed(3), center: `${centerLat.toFixed(4)},${centerLng.toFixed(4)}` })
 
     // Dark ocean base — fills any gaps between tiles while loading
     ctx.fillStyle = '#000810'
     ctx.fillRect(0, 0, W, H)
 
     // ── Calculate tile range ────────────────────────────────────────────────
-    const tileCountX = Math.ceil(W / TILE_SIZE) + 2
-    const tileCountY = Math.ceil(H / TILE_SIZE) + 2
+    // Use displayTileSize so we fetch enough tiles when sub-tile scale < 1
+    const tileCountX = Math.ceil(W / displayTileSize) + 2
+    const tileCountY = Math.ceil(H / displayTileSize) + 2
 
     const centerTile    = latLngToTile(centerLat, centerLng, tileZoom)
-    const centerTileTopLeft = tileToLatLng(centerTile.x, centerTile.y, tileZoom)
-    const centerTilePixel = latLngToPixel(
-      centerTileTopLeft.lat, centerTileTopLeft.lng,
-      centerLat, centerLng, tileZoom, W, H,
-    )
+    // centerTilePixel not used directly — tile positions computed individually below
 
     const startTileX = centerTile.x - Math.floor(tileCountX / 2)
     const startTileY = centerTile.y - Math.floor(tileCountY / 2)
@@ -715,10 +716,13 @@ const MapScreen: React.FC = () => {
         const wrappedX = ((tileX % maxTile) + maxTile) % maxTile
         if (tileY < 0 || tileY >= maxTile) continue
 
+        // Position using fractional effZoom for smooth sub-tile scaling.
+        // Tile lat/lng is computed at integer tileZoom (where the tile exists),
+        // but latLngToPixel uses effZoom so the position scales continuously.
         const tileTL    = tileToLatLng(wrappedX, tileY, tileZoom)
         const tilePixel = latLngToPixel(
           tileTL.lat, tileTL.lng,
-          centerLat, centerLng, tileZoom, W, H,
+          centerLat, centerLng, effZoom, W, H,
         )
         tileJobs.push({
           wrappedX,
@@ -756,7 +760,7 @@ const MapScreen: React.FC = () => {
           ctx.drawImage(
             cached,
             subX, subY, subSize, subSize,     // source rect within parent
-            pixelX, pixelY, TILE_SIZE, TILE_SIZE, // destination (full tile size)
+            pixelX, pixelY, displayTileSize, displayTileSize, // destination (sub-tile scaled)
           )
           break
         }
@@ -768,7 +772,7 @@ const MapScreen: React.FC = () => {
       loadDEMTile(tileZoom, wrappedX, tileY)
         .then((tileCanvas) => {
           if (thisGeneration !== loadingRef.current) return
-          ctx.drawImage(tileCanvas, pixelX, pixelY, TILE_SIZE, TILE_SIZE)
+          ctx.drawImage(tileCanvas, pixelX, pixelY, displayTileSize, displayTileSize)
         })
         .catch(() => {
           log.debug('DEM tile unavailable, leaving base fill', { x: wrappedX, y: tileY })
@@ -781,7 +785,7 @@ const MapScreen: React.FC = () => {
       loadLabelTile(tileZoom, wrappedX, tileY)
         .then((img) => {
           if (thisGeneration !== loadingRef.current) return
-          ctx.drawImage(img, pixelX, pixelY, TILE_SIZE, TILE_SIZE)
+          ctx.drawImage(img, pixelX, pixelY, displayTileSize, displayTileSize)
         })
         .catch(() => {
           // Label tiles are optional — silent fail if CDN is unavailable
@@ -792,8 +796,8 @@ const MapScreen: React.FC = () => {
     // ── Loaded region border ───────────────────────────────────────────────
     if (activeRegion && meshData) {
       const { bounds } = activeRegion
-      const nw = latLngToPixel(bounds.north, bounds.west, centerLat, centerLng, tileZoom, W, H)
-      const se = latLngToPixel(bounds.south, bounds.east, centerLat, centerLng, tileZoom, W, H)
+      const nw = latLngToPixel(bounds.north, bounds.west, centerLat, centerLng, effZoom, W, H)
+      const se = latLngToPixel(bounds.south, bounds.east, centerLat, centerLng, effZoom, W, H)
 
       const rx = Math.round(nw.x)
       const ry = Math.round(nw.y)
@@ -831,7 +835,7 @@ const MapScreen: React.FC = () => {
     // TODO: Animate the accuracy ring pulse when GPS is actively updating.
     // TODO: Show accuracy radius scaled to map zoom level.
     if (mode === 'exploring' && gpsLat !== null && gpsLng !== null) {
-      const gpsPx = latLngToPixel(gpsLat, gpsLng, centerLat, centerLng, tileZoom, W, H)
+      const gpsPx = latLngToPixel(gpsLat, gpsLng, centerLat, centerLng, effZoom, W, H)
       if (gpsPx.x >= 0 && gpsPx.x <= W && gpsPx.y >= 0 && gpsPx.y <= H) {
         // Dimmed accuracy halo
         ctx.beginPath()
@@ -862,7 +866,7 @@ const MapScreen: React.FC = () => {
       const color = isGps ? '#4682E6' : '#84D1DB'
       const colorRgba = isGps ? 'rgba(70, 130, 230,' : 'rgba(132, 209, 219,'
 
-      const dotPx = latLngToPixel(dotLat, dotLng, centerLat, centerLng, tileZoom, W, H)
+      const dotPx = latLngToPixel(dotLat, dotLng, centerLat, centerLng, effZoom, W, H)
       if (dotPx.x >= 0 && dotPx.x <= W && dotPx.y >= 0 && dotPx.y <= H) {
         // Outer halo
         ctx.beginPath()
@@ -894,15 +898,15 @@ const MapScreen: React.FC = () => {
         if (pts.length < 4) continue
 
         // Quick cull: check if center is remotely near viewport
-        const cp = latLngToPixel(wb.center.lat, wb.center.lng, centerLat, centerLng, tileZoom, W, H)
+        const cp = latLngToPixel(wb.center.lat, wb.center.lng, centerLat, centerLng, effZoom, W, H)
         if (cp.x < -500 || cp.x > W + 500 || cp.y < -500 || cp.y > H + 500) continue
 
         // Draw polygon fill
         ctx.beginPath()
-        const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, tileZoom, W, H)
+        const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, effZoom, W, H)
         ctx.moveTo(first.x, first.y)
         for (let i = 1; i < pts.length; i++) {
-          const p = latLngToPixel(pts[i].lat, pts[i].lng, centerLat, centerLng, tileZoom, W, H)
+          const p = latLngToPixel(pts[i].lat, pts[i].lng, centerLat, centerLng, effZoom, W, H)
           ctx.lineTo(p.x, p.y)
         }
         ctx.closePath()
@@ -938,14 +942,14 @@ const MapScreen: React.FC = () => {
 
         // Quick cull: check midpoint
         const midIdx = Math.floor(pts.length / 2)
-        const mp = latLngToPixel(pts[midIdx].lat, pts[midIdx].lng, centerLat, centerLng, tileZoom, W, H)
+        const mp = latLngToPixel(pts[midIdx].lat, pts[midIdx].lng, centerLat, centerLng, effZoom, W, H)
         if (mp.x < -500 || mp.x > W + 500 || mp.y < -500 || mp.y > H + 500) continue
 
         ctx.beginPath()
-        const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, tileZoom, W, H)
+        const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, effZoom, W, H)
         ctx.moveTo(first.x, first.y)
         for (let i = 1; i < pts.length; i++) {
-          const p = latLngToPixel(pts[i].lat, pts[i].lng, centerLat, centerLng, tileZoom, W, H)
+          const p = latLngToPixel(pts[i].lat, pts[i].lng, centerLat, centerLng, effZoom, W, H)
           ctx.lineTo(p.x, p.y)
         }
         ctx.stroke()
@@ -966,7 +970,7 @@ const MapScreen: React.FC = () => {
       ctx.textAlign = 'center'
 
       for (const peak of peaks.slice(0, 20)) {
-        const px = latLngToPixel(peak.lat, peak.lng, centerLat, centerLng, tileZoom, W, H)
+        const px = latLngToPixel(peak.lat, peak.lng, centerLat, centerLng, effZoom, W, H)
         if (px.x < -20 || px.x > W + 20 || px.y < -20 || px.y > H + 20) continue
 
         ctx.fillStyle   = '#A7DDE5'
@@ -987,8 +991,8 @@ const MapScreen: React.FC = () => {
     // Color-coded by data size: teal (ok), orange (warning), red (danger).
     // Shows live dimensions inside the rectangle (imperial or metric).
     if (isSelectingArea && selectionStart && selectionEnd) {
-      const startPx = latLngToPixel(selectionStart.lat, selectionStart.lng, centerLat, centerLng, tileZoom, W, H)
-      const endPx   = latLngToPixel(selectionEnd.lat, selectionEnd.lng, centerLat, centerLng, tileZoom, W, H)
+      const startPx = latLngToPixel(selectionStart.lat, selectionStart.lng, centerLat, centerLng, effZoom, W, H)
+      const endPx   = latLngToPixel(selectionEnd.lat, selectionEnd.lng, centerLat, centerLng, effZoom, W, H)
 
       const rx = Math.min(startPx.x, endPx.x)
       const ry = Math.min(startPx.y, endPx.y)
@@ -1126,7 +1130,7 @@ const MapScreen: React.FC = () => {
 
     // Camera
     const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100)
-    camera.position.set(0, 0, zoomToCameraZ(zoom))
+    camera.position.set(0, 0, zoomToCameraZ(zoom, canvas.clientHeight || 700))
 
     // No lights needed — MeshBasicMaterial is unlit (texture colors are the final output).
     // This prevents Lambert lighting from darkening our already-dark DEM colors.
@@ -1337,7 +1341,8 @@ const MapScreen: React.FC = () => {
   useEffect(() => {
     const t = threeRef.current
     if (!t) return
-    t.camera.position.z = zoomToCameraZ(zoom)
+    const viewH = globeCanvasRef.current?.clientHeight || 700
+    t.camera.position.z = zoomToCameraZ(zoom, viewH)
     requestGlobeRender()
   }, [zoom, requestGlobeRender])
 
@@ -1368,7 +1373,8 @@ const MapScreen: React.FC = () => {
       r * -Math.cos(latRad) * Math.sin(lngRad),
     )
     // Scale inversely with camera distance so marker stays a consistent screen size
-    const camZ = zoomToCameraZ(zoom)
+    const viewH = globeCanvasRef.current?.clientHeight || 700
+    const camZ = zoomToCameraZ(zoom, viewH)
     const s = 0.06 * (camZ / 3)
     t.locationMarker.scale.set(s, s, 1)
     // Redraw marker texture with the right color
@@ -1506,10 +1512,10 @@ const MapScreen: React.FC = () => {
     }
   }, [requestGlobeRender, setExploreLocation])
 
-  // Globe wheel zoom — smooth fractional steps
+  // Globe wheel zoom — smooth fractional steps (0.3 per tick for smooth feel)
   const handleGlobeWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
-    const delta = e.deltaY > 0 ? -0.5 : 0.5
+    const delta = e.deltaY > 0 ? -0.3 : 0.3
     setZoom((z: number) => clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
   }, [])
 
@@ -1638,6 +1644,7 @@ const MapScreen: React.FC = () => {
       startCenterLat: centerLat,
       startCenterLng: centerLng,
       hasMoved: false,
+      touchStartedAt: e.pointerType === 'touch' ? Date.now() : 0,
     }
   }, [centerLat, centerLng, zoom, isSelectingArea])
 
@@ -1664,6 +1671,17 @@ const MapScreen: React.FC = () => {
       setCursorLat(coords.lat)
       setCursorLng(coords.lng)
       return
+    }
+
+    // Pinch debounce: for touch input, suppress pan for first 80ms so a late
+    // second finger can trigger pinch instead of causing a pan jump.
+    if (dragRef.current.touchStartedAt > 0 && pinchRef.current.isPinching) {
+      // Pinch took over — cancel the drag
+      dragRef.current.isDragging = false
+      return
+    }
+    if (dragRef.current.touchStartedAt > 0 && Date.now() - dragRef.current.touchStartedAt < 80) {
+      return  // Wait for potential second finger
     }
 
     const deltaX = e.clientX - dragRef.current.startX
@@ -1726,9 +1744,10 @@ const MapScreen: React.FC = () => {
 
   // ── Scroll Zoom ───────────────────────────────────────────────────────────────
 
+  // Flat map wheel zoom — same 0.3/tick as globe for unified feel
   const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
-    const delta = e.deltaY > 0 ? -0.5 : 0.5
+    const delta = e.deltaY > 0 ? -0.3 : 0.3
     setZoom((z: number) => {
       const newZ = clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM)
       log.debug('Map zoom', { from: z, to: newZ })
@@ -1752,6 +1771,8 @@ const MapScreen: React.FC = () => {
       const dy   = e.touches[0].clientY - e.touches[1].clientY
       const dist = Math.sqrt(dx * dx + dy * dy)
       pinchRef.current = { isPinching: true, startDist: dist, startZoom: zoom }
+      // Cancel any active single-finger drag — pinch takes priority
+      dragRef.current.isDragging = false
     }
   }, [zoom])
 
@@ -2134,19 +2155,28 @@ const MapScreen: React.FC = () => {
       </button>
 
       {/* Globe debug panel */}
-      {showGlobeDebug && (
-        <div className={styles.globeDebug} style={{ top: 78 }}>
-          <strong>Map Debug</strong><br />
-          Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'} · Zoom: {zoom.toFixed(2)} · Tile Z: {Math.round(zoom)}<br />
-          Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
-          Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
-          <strong>Transition</strong><br />
-          Window: z{GLOBE_FULL_ZOOM}→z{GLOBE_GONE_ZOOM} ({(GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM).toFixed(1)} levels) · Curve: smoothstep<br />
-          Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'} · Flat brightness: {gOpacity > 0 ? `${(1 + gOpacity * 0.35).toFixed(2)}×` : '1.00×'}<br />
-          <strong>Data</strong><br />
-          Lakes: {showWaterLabels ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {rivers.length}
-        </div>
-      )}
+      {showGlobeDebug && (() => {
+        const viewH = globeCanvasRef.current?.clientHeight || 700
+        const camZ = zoomToCameraZ(zoom, viewH)
+        const effZ = effectiveFlatZoom(zoom, viewH)
+        const tZ = Math.round(effZ)
+        const sts = Math.pow(2, effZ - tZ)
+        return (
+          <div className={styles.globeDebug} style={{ top: 78 }}>
+            <strong>Map Debug</strong><br />
+            Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'} · Zoom: {zoom.toFixed(2)}<br />
+            Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)} · CamZ: {camZ.toFixed(3)}<br />
+            Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
+            <strong>Sub-tile</strong><br />
+            EffZoom: {effZ.toFixed(2)} · TileZ: {tZ} · Scale: {sts.toFixed(3)} · Size: {(256 * sts).toFixed(0)}px<br />
+            <strong>Transition</strong><br />
+            Window: z{GLOBE_FULL_ZOOM}→z{GLOBE_GONE_ZOOM} ({(GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM).toFixed(1)} levels) · Curve: smoothstep<br />
+            Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'} · Brightness: {gOpacity > 0 ? `${(1 + gOpacity * 0.35).toFixed(2)}×` : '1.00×'}<br />
+            <strong>Data</strong><br />
+            Lakes: {showWaterLabels ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {rivers.length}
+          </div>
+        )
+      })()}
 
       {/* Coordinate bar */}
       <div className={styles.coordBar} aria-label="Map coordinates">
