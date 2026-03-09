@@ -42,8 +42,8 @@ import {
   clamp, formatCoordinates, formatDistance,
 } from '../../core/utils'
 import { loadElevationTile } from '../../data/elevationLoader'
-import { fetchWaterBodiesNear } from '../../data/waterLoader'
-import type { TileCoord, WaterBody } from '../../core/types'
+import { fetchWaterBodiesForViewport } from '../../data/waterLoader'
+import type { TileCoord } from '../../core/types'
 import styles from './MapScreen.module.css'
 
 const log = createLogger('SCREEN:MAP')
@@ -1037,22 +1037,38 @@ const MapScreen: React.FC = () => {
     }
   }, [drawMap])
 
-  // ── Fetch water bodies from OSM ──────────────────────────────────────────────
+  // ── Fetch water bodies from OSM (grid-cell viewport pipeline) ───────────────
 
   useEffect(() => {
     if (!showWaterLabels) return
+    // Zoom gate: no water below zoom 9 (matches waterLoader)
+    const tileZ = Math.round(zoom)
+    if (tileZ < 9) return
+
     let cancelled = false
-    fetchWaterBodiesNear(centerLat, centerLng, 150)
-      .then(bodies => {
-        if (!cancelled && bodies.length > 0) {
-          setWaterBodies(bodies)
-          log.info('Water bodies loaded for MAP', { count: bodies.length })
-        }
-      })
+
+    // Compute viewport bounds from canvas dimensions
+    const canvas = canvasRef.current
+    const dpr = window.devicePixelRatio || 1
+    const W = canvas ? canvas.width / dpr : 800
+    const H = canvas ? canvas.height / dpr : 600
+
+    const topLeft = pixelToLatLng(0, 0, centerLat, centerLng, zoom, W, H)
+    const bottomRight = pixelToLatLng(W, H, centerLat, centerLng, zoom, W, H)
+
+    fetchWaterBodiesForViewport(
+      bottomRight.lat, topLeft.lng, topLeft.lat, bottomRight.lng,
+      tileZ,
+    ).then(bodies => {
+      if (!cancelled) {
+        setWaterBodies(bodies)
+        log.info('Water bodies loaded for MAP', { count: bodies.length, zoom: tileZ })
+      }
+    })
     return () => { cancelled = true }
-    // Only re-fetch when center moves significantly (rounded to 0.5°)
+    // Re-fetch when center moves by ~0.5° or zoom changes integer level
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2)])
+  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2), Math.round(zoom)])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
 
