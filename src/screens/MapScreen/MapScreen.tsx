@@ -464,12 +464,16 @@ function createAtmosphereSprite(): THREE.Sprite {
   canvas.height = size
   const ctx = canvas.getContext('2d')!
   const cx = size / 2
-  // Radial gradient: teal core fading to transparent
-  const grad = ctx.createRadialGradient(cx, cx, size * 0.28, cx, cx, cx)
-  grad.addColorStop(0, 'rgba(75, 142, 163, 0.30)')   // ec-mid, visible core
-  grad.addColorStop(0.4, 'rgba(132, 209, 219, 0.12)') // ec-glow, mid haze
-  grad.addColorStop(0.7, 'rgba(132, 209, 219, 0.04)') // faint outer
-  grad.addColorStop(1, 'rgba(132, 209, 219, 0)')       // fully transparent edge
+  // Edge-only halo — fully transparent over the globe disk, glows only at the limb.
+  // At 3.2× sprite scale, the globe edge is at ~0.31 of the sprite radius (1/3.2 ≈ 0.3125).
+  // We start the glow just outside that to create a thin rim light.
+  const grad = ctx.createRadialGradient(cx, cx, 0, cx, cx, cx)
+  grad.addColorStop(0, 'rgba(0, 0, 0, 0)')              // transparent over globe center
+  grad.addColorStop(0.28, 'rgba(0, 0, 0, 0)')            // still transparent — inside globe disk
+  grad.addColorStop(0.32, 'rgba(132, 209, 219, 0.18)')   // rim glow starts at globe edge
+  grad.addColorStop(0.38, 'rgba(75, 142, 163, 0.10)')    // outer glow
+  grad.addColorStop(0.52, 'rgba(75, 142, 163, 0.03)')    // faint haze
+  grad.addColorStop(0.70, 'rgba(132, 209, 219, 0)')      // fully transparent
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, size, size)
   const tex = new THREE.CanvasTexture(canvas)
@@ -546,6 +550,9 @@ const MapScreen: React.FC = () => {
     velocityX: 0,
     velocityY: 0,
   })
+
+  // Track active touch count on globe canvas — used to suppress rotation during pinch
+  const globeTouchCountRef = useRef(0)
 
   // GPS permission prompt — shown when user taps "My Location" without permission
   const [gpsPrompt, setGpsPrompt] = useState<'needs-permission' | 'denied' | 'unavailable' | null>(null)
@@ -1393,6 +1400,8 @@ const MapScreen: React.FC = () => {
 
   const handleGlobePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isGlobeActive) return
+    // Suppress drag/rotation when 2+ fingers are active (pinch gesture)
+    if (globeTouchCountRef.current >= 2) return
     globeCanvasRef.current?.setPointerCapture(e.pointerId)
     globeDragRef.current = {
       isDragging: true,
@@ -1409,6 +1418,8 @@ const MapScreen: React.FC = () => {
   const handleGlobePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     const gd = globeDragRef.current
     if (!gd.isDragging || !threeRef.current) return
+    // Suppress rotation when 2+ fingers are active (pinch gesture)
+    if (globeTouchCountRef.current >= 2) return
 
     // Detect if pointer has moved enough to count as a drag (not a tap)
     if (!gd.hasMoved) {
@@ -1493,35 +1504,103 @@ const MapScreen: React.FC = () => {
     setZoom((z: number) => clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
   }, [])
 
-  // Globe pinch zoom
-  const globePinchRef = useRef({ isPinching: false, startDist: 0, startZoom: DEFAULT_MAP_ZOOM })
+  // Globe pinch zoom — finger-anchored (Apple Maps style)
+  const globePinchRef = useRef({
+    isPinching: false,
+    startDist: 0,
+    startZoom: DEFAULT_MAP_ZOOM,
+    anchorLat: 0,
+    anchorLng: 0,
+    centerX: 0,
+    centerY: 0,
+  })
 
   const handleGlobeTouchStart = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    globeTouchCountRef.current = e.touches.length
     if (e.touches.length === 2) {
+      // Kill any ongoing rotation momentum
+      globeDragRef.current.isDragging = false
+      globeDragRef.current.velocityX = 0
+      globeDragRef.current.velocityY = 0
+
       const dx = e.touches[0].clientX - e.touches[1].clientX
       const dy = e.touches[0].clientY - e.touches[1].clientY
       const dist = Math.sqrt(dx * dx + dy * dy)
-      globePinchRef.current = { isPinching: true, startDist: dist, startZoom: zoom }
+      const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2
+      const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2
+
+      // Raycast to find the lat/lng under the pinch center
+      let anchorLat = 0
+      let anchorLng = 0
+      if (threeRef.current && globeCanvasRef.current) {
+        const canvas = globeCanvasRef.current
+        const rect = canvas.getBoundingClientRect()
+        const ndcX = ((cx - rect.left) / rect.width) * 2 - 1
+        const ndcY = -((cy - rect.top) / rect.height) * 2 + 1
+        const raycaster = new THREE.Raycaster()
+        raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), threeRef.current.camera)
+        const hits = raycaster.intersectObject(threeRef.current.earth)
+        if (hits.length > 0) {
+          const localPt = threeRef.current.earth.worldToLocal(hits[0].point.clone())
+          anchorLat = Math.asin(clamp(localPt.y, -1, 1)) * (180 / Math.PI)
+          anchorLng = Math.atan2(-localPt.z, localPt.x) * (180 / Math.PI)
+        }
+      }
+
+      globePinchRef.current = {
+        isPinching: true,
+        startDist: dist,
+        startZoom: zoom,
+        anchorLat,
+        anchorLng,
+        centerX: cx,
+        centerY: cy,
+      }
     }
   }, [zoom])
 
   const handleGlobeTouchMove = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    globeTouchCountRef.current = e.touches.length
     if (e.touches.length === 2 && globePinchRef.current.isPinching) {
       e.preventDefault()
       const dx = e.touches[0].clientX - e.touches[1].clientX
       const dy = e.touches[0].clientY - e.touches[1].clientY
       const dist = Math.sqrt(dx * dx + dy * dy)
       const scale = dist / globePinchRef.current.startDist
-      setZoom(clamp(
+      const newZoom = clamp(
         globePinchRef.current.startZoom + Math.log2(scale),
         MAP_MIN_ZOOM,
         MAP_MAX_ZOOM,
-      ))
-    }
-  }, [])
+      )
+      setZoom(newZoom)
 
-  const handleGlobeTouchEnd = useCallback(() => {
-    globePinchRef.current.isPinching = false
+      // Rotate the globe so the anchor lat/lng stays under the pinch center.
+      // Convert anchor lat/lng to the expected globe rotation, then apply.
+      const { rotX, rotY } = latLngToSphereRotation(
+        globePinchRef.current.anchorLat,
+        globePinchRef.current.anchorLng,
+      )
+      if (threeRef.current) {
+        // Smoothly blend toward the anchor position to keep it pinned
+        const earth = threeRef.current.earth
+        const blendFactor = 0.15
+        earth.rotation.x += (rotX - earth.rotation.x) * blendFactor
+        earth.rotation.y += (rotY - earth.rotation.y) * blendFactor
+        earth.rotation.x = clamp(earth.rotation.x, -Math.PI / 2 + 0.05, Math.PI / 2 - 0.05)
+
+        const { lat, lng } = sphereRotationToLatLng(earth.rotation.x, earth.rotation.y)
+        setCenterLat(lat)
+        setCenterLng(lng)
+        requestGlobeRender()
+      }
+    }
+  }, [requestGlobeRender])
+
+  const handleGlobeTouchEnd = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    globeTouchCountRef.current = e.touches?.length || 0
+    if (globeTouchCountRef.current < 2) {
+      globePinchRef.current.isPinching = false
+    }
   }, [])
 
   // ── Pointer Handlers ─────────────────────────────────────────────────────────
@@ -1782,7 +1861,11 @@ const MapScreen: React.FC = () => {
       <canvas
         ref={canvasRef}
         className={styles.mapCanvas}
-        style={{ opacity: fOpacity, pointerEvents: gOpacity < 0.5 ? 'auto' : 'none' }}
+        style={{
+          opacity: fOpacity,
+          pointerEvents: gOpacity < 0.5 ? 'auto' : 'none',
+          filter: gOpacity > 0 ? `brightness(${1 + gOpacity * 0.35})` : 'none',
+        }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -2008,81 +2091,13 @@ const MapScreen: React.FC = () => {
         {showGlobeDebug ? '✕' : '⊙'}
       </button>
 
-      {/* Globe debug panel */}
-      {showGlobeDebug && (() => {
-        const camZ = zoomToCameraZ(zoom)
-        const gOp = globeOpacity(zoom)
-
-        // Globe scale: degrees per pixel at center of visible face
-        const globeCanvas = globeCanvasRef.current
-        const viewH = globeCanvas ? globeCanvas.clientHeight : 700
-        const globeDegPerPx = camZ * 2 * Math.tan(22.5 * Math.PI / 180) / viewH * (180 / Math.PI)
-
-        // Globe equivalent flat zoom
-        const equivZ = globeEquivFlatZoom(camZ, viewH)
-        // Effective tile zoom during transition (blended)
-        let effectiveZ = zoom
-        if (gOp > 0 && gOp < 1) {
-          effectiveZ = equivZ + (1 - gOp) * (zoom - equivZ)
-        }
-        const effectiveTileZ = Math.max(2, Math.round(effectiveZ))
-
-        // Flat map scale: degrees per pixel at tileZoom
-        const flatDegPerPx = 360 / (TILE_SIZE * Math.pow(2, effectiveTileZ))
-
-        // Globe visible arc
-        const visibleArcDeg = camZ > 1 ? 2 * Math.asin(1 / camZ) * (180 / Math.PI) : 180
-        const globeFillsScreen = visibleArcDeg > 45
-
-        const scaleRatio = globeDegPerPx / flatDegPerPx
-
-        return (
+      {/* Globe debug panel — trimmed to essentials */}
+      {showGlobeDebug && (
         <div className={styles.globeDebug} style={{ top: 78 }}>
-          <strong>Globe Debug</strong><br />
-          Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'}<br />
-          Zoom: {zoom.toFixed(2)} · Tile Z: {effectiveTileZ} {gOp > 0 && gOp < 1 ? `(equiv z${equivZ.toFixed(1)})` : ''}<br />
-          Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)} (cos ease)<br />
-          Transition: ≤{GLOBE_FULL_ZOOM} globe → {GLOBE_FULL_ZOOM}–{GLOBE_GONE_ZOOM} crossfade → ≥{GLOBE_GONE_ZOOM} flat<br />
-          Camera Z: {camZ.toFixed(2)} · Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'}<br />
-          <strong>── Alignment ──</strong><br />
-          Flat center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
-          Globe: {globeDegPerPx.toFixed(4)}°/px · Flat: {flatDegPerPx.toFixed(4)}°/px<br />
-          Ratio: {scaleRatio.toFixed(2)}× (1.0 = match)<br />
-          Globe arc: {visibleArcDeg.toFixed(0)}° of 45° FOV · {globeFillsScreen ? 'FILLS screen' : 'visible edge'}<br />
-          <strong>Texture</strong><br />
-          Globe tex: {globeTextureZoom !== null ? `z${globeTextureZoom}` : 'loading...'} · UV: Mercator (1−V)<br />
-          Material: MeshBasic (unlit)<br />
-          {globeTilesTotal > 0 && globeTilesLoaded < globeTilesTotal && (
-            <>Tiles loading: {globeTilesLoaded}/{globeTilesTotal}<br /></>
-          )}
-          Globe ready: {globeReady ? 'yes' : 'no'}<br />
-          <strong>Scene</strong><br />
-          Atmos: radial gradient sprite · 3.2× scale<br />
-          Render: on-demand · Frames: {globeRenderCountRef.current}<br />
-          Sphere: 96×96 segments<br />
-          {threeRef.current && (() => {
-            const rx = threeRef.current.earth.rotation.x
-            const ry = threeRef.current.earth.rotation.y
-            const facing = sphereRotationToLatLng(rx, ry)
-            const dLat = facing.lat - centerLat
-            const dLng = facing.lng - centerLng
-            return (<>
-              <strong>── Globe Source ──</strong><br />
-              Globe center: {facing.lat.toFixed(4)}°, {facing.lng.toFixed(4)}°<br />
-              Raw rotation: x={rx.toFixed(4)} y={ry.toFixed(4)}<br />
-              Formula: lng = −90 − rotY×(180/π)<br />
-              <strong>── Active Location ──</strong><br />
-              Dot: {activeLat.toFixed(4)}°, {activeLng.toFixed(4)}° ({mode})<br />
-              {gpsLat !== null && <>GPS: {gpsLat.toFixed(4)}°, {gpsLng!.toFixed(4)}°<br /></>}
-              <strong style={{ color: (Math.abs(dLat) > 0.5 || Math.abs(dLng) > 0.5) ? '#ff4444' : '#44ff44' }}>
-                ── Sync ──</strong><br />
-              Flat↔Globe: Δlat={dLat.toFixed(2)}° Δlng={dLng.toFixed(2)}°<br />
-            </>)
-          })()}
-          <strong>Flat Map</strong><br />
-          Draw: {lastFlatMapDrawRef.current} (#{flatMapDrawCountRef.current})<br />
-          Skip: {globeOpacity(zoom) >= 1 ? 'YES (globe α=1)' : 'no'}<br />
-          Debounce: 120ms<br />
+          <strong>Map Debug</strong><br />
+          Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'} · Zoom: {zoom.toFixed(2)} · Tile Z: {Math.round(zoom)}<br />
+          Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
+          Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
           <strong>Lakes</strong><br />
           Toggle: {showWaterLabels ? 'ON' : 'OFF'} · Count: {waterBodies.length}<br />
           {waterBodies.length > 0 && <>
@@ -2091,12 +2106,11 @@ const MapScreen: React.FC = () => {
               for (const wb of waterBodies) { counts[wb.type] = (counts[wb.type] || 0) + 1 }
               return Object.entries(counts).map(([t, c]) => `${t}:${c}`).join(' ')
             })()}<br />
-            Total vertices: {waterBodies.reduce((s, wb) => s + wb.polygon.length, 0)}<br />
-            Top 3: {waterBodies.slice(0, 3).map(wb => `${wb.name} (${wb.polygon.length}pts)`).join(', ')}
           </>}
+          <strong>Rivers</strong><br />
+          Count: {rivers.length}
         </div>
-        )
-      })()}
+      )}
 
       {/* Coordinate bar */}
       <div className={styles.coordBar} aria-label="Map coordinates">

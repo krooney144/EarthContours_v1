@@ -167,12 +167,20 @@
 
 .controls {
   position: absolute;
-  right: var(--space-3);
+  right: var(--space-2);
   bottom: calc(var(--ec-nav-height) + var(--space-10));
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   z-index: var(--z-overlay);
+}
+
+@media (max-width: 480px) {
+  .controls {
+    right: 8px;
+    bottom: calc(var(--ec-nav-height) + 16px);
+    gap: var(--space-3);
+  }
 }
 
 /**
@@ -504,15 +512,24 @@
   appearance: none;
   writing-mode: vertical-lr;
   direction: rtl;
-  width: 120px;
-  height: 4px;
-  background: transparent;
+  width: 160px;
+  height: 6px;
+  /* Fallback background for mobile browsers that ignore ::-webkit-slider-runnable-track
+     in vertical writing-mode — ensures the track is always visible */
+  background: linear-gradient(
+    to top,
+    var(--ec-abyss) 0%,
+    var(--ec-ocean) 40%,
+    var(--ec-glow) 100%
+  );
+  border-radius: 3px;
+  border: 1px solid var(--ec-border);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
 
 .zoomSlider::-webkit-slider-runnable-track {
-  width: 4px;
+  width: 6px;
   height: 100%;
   background: linear-gradient(
     to top,
@@ -520,25 +537,26 @@
     var(--ec-ocean) 40%,
     var(--ec-glow) 100%
   );
-  border-radius: 2px;
+  border-radius: 3px;
   border: 1px solid var(--ec-border);
 }
 
 .zoomSlider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: var(--ec-glow);
   border: 2px solid var(--ec-white);
-  box-shadow: 0 0 8px rgba(132, 209, 219, 0.5);
+  box-shadow: 0 0 10px rgba(132, 209, 219, 0.6);
   cursor: grab;
-  margin-left: -6px;
+  margin-left: -9px;
+  /* Larger touch target via padding trick — actual visual is 24px but hit area is bigger */
 }
 
 .zoomSlider::-moz-range-track {
-  width: 4px;
+  width: 6px;
   height: 100%;
   background: linear-gradient(
     to top,
@@ -546,17 +564,17 @@
     var(--ec-ocean) 40%,
     var(--ec-glow) 100%
   );
-  border-radius: 2px;
+  border-radius: 3px;
   border: 1px solid var(--ec-border);
 }
 
 .zoomSlider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   background: var(--ec-glow);
   border: 2px solid var(--ec-white);
-  box-shadow: 0 0 8px rgba(132, 209, 219, 0.5);
+  box-shadow: 0 0 10px rgba(132, 209, 219, 0.6);
   cursor: grab;
 }
 
