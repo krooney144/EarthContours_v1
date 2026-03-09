@@ -2169,10 +2169,46 @@ const MapScreen: React.FC = () => {
       {/* Globe debug panel */}
       {showGlobeDebug && (() => {
         const viewH = globeCanvasRef.current?.clientHeight || 700
+        const viewW = globeCanvasRef.current?.clientWidth || 400
         const camZ = zoomToCameraZ(zoom, viewH)
         const effZ = effectiveFlatZoom(zoom, viewH)
         const tZ = Math.round(effZ)
         const sts = Math.pow(2, effZ - tZ)
+
+        // ── Scale comparison: 300km in pixels for globe vs flat map ──
+        const SCALE_KM = 300
+        const DEG_PER_KM_LNG = 1 / (111.320 * Math.cos(centerLat * Math.PI / 180))
+        const halfDegLng = (SCALE_KM / 2) * DEG_PER_KM_LNG
+
+        // Flat map: use Mercator pixel math at effZoom
+        const flatP1 = latLngToPixel(centerLat, centerLng - halfDegLng, centerLat, centerLng, effZ, viewW, viewH)
+        const flatP2 = latLngToPixel(centerLat, centerLng + halfDegLng, centerLat, centerLng, effZ, viewW, viewH)
+        const flatPx300 = Math.abs(flatP2.x - flatP1.x)
+
+        // Globe: project two points on the sphere through the Three.js camera
+        let globePx300 = 0
+        if (threeRef.current) {
+          const cam = threeRef.current.camera
+          const { rotX, rotY } = latLngToSphereRotation(centerLat, centerLng)
+          // Point at center - halfDeg and center + halfDeg longitude on unit sphere
+          const toScreen = (lat: number, lng: number) => {
+            const latR = lat * Math.PI / 180
+            const lngR = lng * Math.PI / 180
+            // Sphere surface point (radius 1) — same convention as SphereGeometry
+            const sx = -Math.cos(latR) * Math.sin(lngR)
+            const sy = Math.sin(latR)
+            const sz = Math.cos(latR) * Math.cos(lngR)
+            const v = new THREE.Vector3(sx, sy, sz)
+            // Apply same rotation as the earth mesh
+            v.applyEuler(new THREE.Euler(rotX, rotY, 0, 'YXZ'))
+            v.project(cam)
+            return { x: (v.x + 1) / 2 * viewW, y: (1 - v.y) / 2 * viewH }
+          }
+          const gP1 = toScreen(centerLat, centerLng - halfDegLng)
+          const gP2 = toScreen(centerLat, centerLng + halfDegLng)
+          globePx300 = Math.abs(gP2.x - gP1.x)
+        }
+
         return (
           <div className={styles.globeDebug} style={{ top: 78 }}>
             <strong>Map Debug</strong><br />
@@ -2184,6 +2220,8 @@ const MapScreen: React.FC = () => {
             <strong>Transition</strong><br />
             Window: z{GLOBE_FULL_ZOOM}→z{GLOBE_GONE_ZOOM} ({(GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM).toFixed(1)} levels) · Curve: smoothstep<br />
             Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'} · Brightness: {gOpacity > 0 ? `${(1 + gOpacity * 0.35).toFixed(2)}×` : '1.00×'}<br />
+            <strong>Scale ({SCALE_KM}km)</strong><br />
+            Globe: {globePx300.toFixed(0)}px · Flat: {flatPx300.toFixed(0)}px · Ratio: {flatPx300 > 0 ? (globePx300 / flatPx300).toFixed(2) : '—'}×<br />
             <strong>Data</strong><br />
             Lakes: {showWaterLabels ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {rivers.length}
           </div>
