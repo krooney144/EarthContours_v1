@@ -1,98 +1,368 @@
 /**
- * EarthContours — Three.js Terrain Renderer (Scaffold)
+ * EarthContours — Three.js Terrain Renderer
  *
- * This file is the SCAFFOLD for Session 2's real Three.js renderer.
- * For the MVP, the screens use CSS/SVG simulations.
+ * Solid terrain mesh for the EXPLORE screen. Uses a displaced PlaneGeometry
+ * with vertex colors from the ocean-depth palette and directional lighting
+ * so the terrain is an opaque, shaded 3D surface you can fly around.
  *
- * In Session 2, this renderer will:
- * 1. Create a Three.js WebGLRenderer attached to a <canvas>
- * 2. Build a terrain mesh from the elevation grid data
- * 3. Generate contour line geometry by marching through the elevation data
- * 4. Render contour lines as glowing LineSegments (no filled surface)
- * 5. Apply the ocean→foam color gradient based on elevation
- * 6. Support the SCAN (first-person) and EXPLORE (orbit) camera modes
+ * Camera is driven externally via updateCamera() from the cameraStore orbit
+ * parameters (theta, phi, radius, panX, panZ).
  *
- * EXHIBIT NOTE: This renderer will also run in the museum exhibit mode at
- * 7680×1080px (triple ultra-wide) with different camera controls (gestures).
- *
- * Session 2 TODO:
- * - [ ] Initialize WebGLRenderer with alpha: true
- * - [ ] Build BufferGeometry from TerrainMeshData.elevations
- * - [ ] Marching squares algorithm for contour line extraction
- * - [ ] LineSegments material with custom GLSL shader (glow effect)
- * - [ ] OrbitControls for EXPLORE camera
- * - [ ] First-person camera rig for SCAN (heading + pitch + height)
- * - [ ] requestAnimationFrame loop with auto-rotate support
- * - [ ] Resize handling (maintain aspect ratio on window resize)
- * - [ ] WebGL availability detection (fallback to SVG if no WebGL)
- * - [ ] Peak label projection (world space → screen space via camera.project())
+ * Also exposes projectToScreen() so HTML overlays (peak labels, location pin)
+ * can project world positions to CSS pixel coordinates.
  */
 
+import * as THREE from 'three'
 import { createLogger } from '../core/logger'
-import { isWebGLAvailable } from '../core/utils'
+import type { TerrainMeshData } from '../core/types'
+import { ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../core/constants'
 
 const log = createLogger('RENDERER:THREE')
 
-/**
- * TerrainRenderer class — placeholder for Session 2 implementation.
- *
- * Design: This will be a class (not a hook) because Three.js renderers
- * are imperative objects with their own lifecycle, not React-friendly.
- * A React hook wrapper (useTerrainRenderer) will manage the lifecycle.
- */
-export class TerrainRenderer {
-  private canvas: HTMLCanvasElement | null = null
-  private isInitialized = false
+// ─── Ocean-depth palette stops (matches CSS palette) ─────────────────────────
 
-  constructor() {
-    log.info('TerrainRenderer created (scaffold only — real renderer in Session 2)')
+const PALETTE_STOPS = [
+  { t: 0.0, r: 14,  g: 57,  b: 81  },  // abyss
+  { t: 0.2, r: 18,  g: 75,  b: 107 },  // deep
+  { t: 0.4, r: 33,  g: 92,  b: 121 },  // navy
+  { t: 0.6, r: 47,  g: 109, b: 135 },  // ocean
+  { t: 0.8, r: 104, g: 176, b: 191 },  // reef
+  { t: 1.0, r: 167, g: 221, b: 229 },  // foam
+]
 
-    if (!isWebGLAvailable()) {
-      log.warn('WebGL not available — 3D renderer will be disabled')
+function elevationToColor(t: number): { r: number; g: number; b: number } {
+  const clamped = Math.max(0, Math.min(1, t))
+  // Find the two stops we're between
+  let lo = PALETTE_STOPS[0]
+  let hi = PALETTE_STOPS[PALETTE_STOPS.length - 1]
+  for (let i = 0; i < PALETTE_STOPS.length - 1; i++) {
+    if (clamped >= PALETTE_STOPS[i].t && clamped <= PALETTE_STOPS[i + 1].t) {
+      lo = PALETTE_STOPS[i]
+      hi = PALETTE_STOPS[i + 1]
+      break
     }
   }
+  const f = lo.t === hi.t ? 0 : (clamped - lo.t) / (hi.t - lo.t)
+  return {
+    r: lo.r + (hi.r - lo.r) * f,
+    g: lo.g + (hi.g - lo.g) * f,
+    b: lo.b + (hi.b - lo.b) * f,
+  }
+}
 
-  /**
-   * Initialize the renderer with a target canvas element.
-   * In Session 2: creates WebGLRenderer, scene, camera, lights.
-   */
+// ─── TerrainRenderer Class ───────────────────────────────────────────────────
+
+export class TerrainRenderer {
+  private renderer: THREE.WebGLRenderer | null = null
+  private scene: THREE.Scene | null = null
+  private camera: THREE.PerspectiveCamera | null = null
+  private terrainMesh: THREE.Mesh | null = null
+  private contourLines: THREE.LineSegments | null = null
+  private canvas: HTMLCanvasElement | null = null
+
+  // Terrain dimensions in metres (set when terrain loads)
+  private terrainWidth_m = 0
+  private terrainDepth_m = 0
+  private minElevation_m = 0
+  private elevRange_m = 1
+
+  constructor() {
+    log.info('TerrainRenderer created')
+  }
+
+  // ── Lifecycle ────────────────────────────────────────────────────────────────
+
   initialize(canvas: HTMLCanvasElement): void {
-    log.info('TerrainRenderer.initialize() called', {
+    log.info('TerrainRenderer.initialize()', {
       width: canvas.width,
       height: canvas.height,
     })
+
     this.canvas = canvas
-    this.isInitialized = true
-    // TODO Session 2: new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })
+
+    // WebGL renderer
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: false,
+    })
+    this.renderer.setPixelRatio(window.devicePixelRatio || 1)
+    this.renderer.setClearColor(0x020e18)  // match the dark bg
+
+    // Scene
+    this.scene = new THREE.Scene()
+
+    // Camera (perspective for natural fly-around feel)
+    this.camera = new THREE.PerspectiveCamera(50, canvas.width / canvas.height, 10, 5_000_000)
+    this.camera.position.set(0, 100_000, 100_000)
+    this.camera.lookAt(0, 0, 0)
+
+    // Lighting — directional from NW-45° (matches SCAN hill shading)
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2)
+    dirLight.position.set(-1, 1.5, -1).normalize()
+    this.scene.add(dirLight)
+
+    // Softer fill light from the opposite side
+    const fillLight = new THREE.DirectionalLight(0x4488aa, 0.4)
+    fillLight.position.set(1, 0.5, 1).normalize()
+    this.scene.add(fillLight)
+
+    // Ambient so shadow sides aren't pure black
+    const ambient = new THREE.AmbientLight(0x1a3040, 0.6)
+    this.scene.add(ambient)
   }
 
-  /**
-   * Dispose of all Three.js resources.
-   * Called when the component unmounts to prevent memory leaks.
-   * WebGL textures/buffers must be explicitly freed.
-   */
   dispose(): void {
     log.info('TerrainRenderer.dispose()')
+
+    if (this.terrainMesh) {
+      this.terrainMesh.geometry.dispose()
+      const mat = this.terrainMesh.material
+      if (Array.isArray(mat)) mat.forEach(m => m.dispose())
+      else mat.dispose()
+      this.terrainMesh = null
+    }
+
+    if (this.contourLines) {
+      this.contourLines.geometry.dispose()
+      const mat = this.contourLines.material
+      if (Array.isArray(mat)) mat.forEach(m => m.dispose())
+      else mat.dispose()
+      this.contourLines = null
+    }
+
+    if (this.renderer) {
+      this.renderer.dispose()
+      this.renderer = null
+    }
+
+    this.scene = null
+    this.camera = null
     this.canvas = null
-    this.isInitialized = false
-    // TODO Session 2: renderer.dispose(), geometry.dispose(), material.dispose()
   }
 
-  /**
-   * Handle canvas resize — update renderer size and camera aspect ratio.
-   */
   resize(width: number, height: number): void {
-    log.debug('TerrainRenderer.resize()', { width, height })
-    // TODO Session 2: renderer.setSize(width, height)
-    //                 camera.aspect = width / height
-    //                 camera.updateProjectionMatrix()
+    if (!this.renderer || !this.camera) return
+    this.renderer.setSize(width, height, false)
+    this.camera.aspect = width / height
+    this.camera.updateProjectionMatrix()
+  }
+
+  // ── Build terrain mesh from elevation data ──────────────────────────────────
+
+  buildTerrain(mesh: TerrainMeshData, verticalExaggeration: number): void {
+    if (!this.scene) return
+
+    // Remove old mesh + contours
+    if (this.terrainMesh) {
+      this.scene.remove(this.terrainMesh)
+      this.terrainMesh.geometry.dispose()
+      ;(this.terrainMesh.material as THREE.Material).dispose()
+      this.terrainMesh = null
+    }
+    if (this.contourLines) {
+      this.scene.remove(this.contourLines)
+      this.contourLines.geometry.dispose()
+      ;(this.contourLines.material as THREE.Material).dispose()
+      this.contourLines = null
+    }
+
+    const { elevations, width, height, minElevation_m, maxElevation_m, bounds } = mesh
+
+    const lat0 = (bounds.north + bounds.south) / 2
+    const MPD_LON = ENU_M_PER_DEG_LON_AT_LAT(lat0)
+
+    this.terrainWidth_m = (bounds.east - bounds.west) * MPD_LON
+    this.terrainDepth_m = (bounds.north - bounds.south) * ENU_M_PER_DEG_LAT
+    this.minElevation_m = minElevation_m
+    this.elevRange_m = maxElevation_m - minElevation_m || 1
+
+    const segW = width - 1
+    const segH = height - 1
+
+    // PlaneGeometry: width along X, depth along Z
+    const geometry = new THREE.PlaneGeometry(
+      this.terrainWidth_m, this.terrainDepth_m, segW, segH,
+    )
+
+    // Rotate from XY plane to XZ (horizontal)
+    geometry.rotateX(-Math.PI / 2)
+
+    // Displace vertices by elevation + set vertex colors
+    const posAttr = geometry.getAttribute('position')
+    const colors = new Float32Array(posAttr.count * 3)
+
+    for (let row = 0; row < height; row++) {
+      for (let col = 0; col < width; col++) {
+        const vi = row * width + col
+        const elev = elevations[vi]
+        const y = (elev - minElevation_m) * verticalExaggeration
+
+        // PlaneGeometry after rotateX(-PI/2): vertices are in XZ plane.
+        // Vertex order: row 0 is top (north), increasing row goes south (Z+).
+        // Set Y to displaced elevation.
+        posAttr.setY(vi, y)
+
+        // Vertex color from palette
+        const t = (elev - minElevation_m) / this.elevRange_m
+        const c = elevationToColor(t)
+        colors[vi * 3] = c.r / 255
+        colors[vi * 3 + 1] = c.g / 255
+        colors[vi * 3 + 2] = c.b / 255
+      }
+    }
+
+    posAttr.needsUpdate = true
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    geometry.computeVertexNormals()
+
+    const material = new THREE.MeshPhongMaterial({
+      vertexColors: true,
+      side: THREE.FrontSide,
+      shininess: 5,
+      specular: new THREE.Color(0x112233),
+      flatShading: false,
+    })
+
+    this.terrainMesh = new THREE.Mesh(geometry, material)
+    this.scene.add(this.terrainMesh)
+
+    log.info('Terrain mesh built', {
+      vertices: posAttr.count,
+      width_km: (this.terrainWidth_m / 1000).toFixed(1),
+      depth_km: (this.terrainDepth_m / 1000).toFixed(1),
+      elevRange_m: this.elevRange_m.toFixed(0),
+    })
+  }
+
+  // ── Update terrain when vertical exaggeration changes ───────────────────────
+
+  updateExaggeration(mesh: TerrainMeshData, verticalExaggeration: number): void {
+    if (!this.terrainMesh) return
+
+    const posAttr = this.terrainMesh.geometry.getAttribute('position')
+    const { elevations, width, height, minElevation_m } = mesh
+
+    for (let row = 0; row < height; row++) {
+      for (let col = 0; col < width; col++) {
+        const vi = row * width + col
+        const y = (elevations[vi] - minElevation_m) * verticalExaggeration
+        posAttr.setY(vi, y)
+      }
+    }
+
+    posAttr.needsUpdate = true
+    this.terrainMesh.geometry.computeVertexNormals()
+  }
+
+  // ── Camera update from cameraStore orbit params ─────────────────────────────
+
+  updateCamera(
+    theta: number,
+    phi: number,
+    radius: number,
+    panX: number,
+    panZ: number,
+  ): void {
+    if (!this.camera) return
+
+    // Pivot point in metres (panX/panZ are fractions of terrain dimensions)
+    const pivotX = panX * this.terrainWidth_m
+    const pivotZ = panZ * this.terrainDepth_m
+    // Y pivot at mid-elevation for nicer orbiting
+    const pivotY = this.elevRange_m * 0.3
+
+    // Spherical to cartesian (phi=0 is top-down, phi=PI/2 is side-on)
+    const camX = pivotX + radius * Math.sin(phi) * Math.sin(theta)
+    const camY = pivotY + radius * Math.cos(phi)
+    const camZ = pivotZ + radius * Math.sin(phi) * Math.cos(theta)
+
+    this.camera.position.set(camX, camY, camZ)
+    this.camera.lookAt(pivotX, pivotY, camZ > pivotZ ? pivotY * 0.5 : pivotY * 0.5)
+    this.camera.lookAt(pivotX, pivotY * 0.5, pivotZ)
+
+    // Adjust near/far based on radius
+    this.camera.near = Math.max(1, radius * 0.001)
+    this.camera.far = Math.max(radius * 10, 5_000_000)
+    this.camera.updateProjectionMatrix()
+  }
+
+  // ── Render one frame ────────────────────────────────────────────────────────
+
+  render(): void {
+    if (!this.renderer || !this.scene || !this.camera) return
+    this.renderer.render(this.scene, this.camera)
+  }
+
+  // ── Project a world point to CSS screen coords ──────────────────────────────
+
+  /**
+   * Project a terrain point (grid col, row, elevation) to CSS pixel coordinates.
+   * Used by PeakLabels3D and the location pin overlay.
+   *
+   * Returns null if the point is behind the camera.
+   */
+  projectToScreen(
+    mesh: TerrainMeshData,
+    col: number,
+    row: number,
+    elevation_m: number,
+    verticalExaggeration: number,
+    containerW: number,
+    containerH: number,
+  ): { sx: number; sy: number } | null {
+    if (!this.camera) return null
+
+    const { width, height, minElevation_m } = mesh
+
+    // ENU world coordinates (same as what buildTerrain produces)
+    const x = (col / (width - 1) - 0.5) * this.terrainWidth_m
+    const y = (elevation_m - minElevation_m) * verticalExaggeration
+    const z = (row / (height - 1) - 0.5) * this.terrainDepth_m
+
+    const vec = new THREE.Vector3(x, y, z)
+    vec.project(this.camera)
+
+    // vec is now in NDC [-1, 1]. Convert to CSS pixels.
+    if (vec.z > 1) return null  // behind camera
+
+    const sx = (vec.x * 0.5 + 0.5) * containerW
+    const sy = (-vec.y * 0.5 + 0.5) * containerH
+
+    return { sx, sy }
   }
 
   /**
-   * Render one frame.
-   * Called from requestAnimationFrame loop.
+   * Raycast from a screen point to find the terrain intersection.
+   * Used for double-click fly-to.
+   * Returns the intersection point in ENU metres, or null.
    */
-  render(): void {
-    // TODO Session 2: renderer.render(scene, camera)
+  raycastTerrain(
+    screenX: number,
+    screenY: number,
+    containerW: number,
+    containerH: number,
+  ): { x: number; y: number; z: number } | null {
+    if (!this.camera || !this.terrainMesh) return null
+
+    const ndc = new THREE.Vector2(
+      (screenX / containerW) * 2 - 1,
+      -(screenY / containerH) * 2 + 1,
+    )
+
+    const raycaster = new THREE.Raycaster()
+    raycaster.setFromCamera(ndc, this.camera)
+
+    const intersects = raycaster.intersectObject(this.terrainMesh)
+    if (intersects.length === 0) return null
+
+    const p = intersects[0].point
+    return { x: p.x, y: p.y, z: p.z }
   }
+
+  // ── Accessors ───────────────────────────────────────────────────────────────
+
+  getTerrainWidth(): number { return this.terrainWidth_m }
+  getTerrainDepth(): number { return this.terrainDepth_m }
+  isReady(): boolean { return this.renderer !== null && this.scene !== null }
 }
