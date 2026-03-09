@@ -116,8 +116,12 @@ const ExploreScreen: React.FC = () => {
     } else {
       renderer.buildTerrain(meshData, verticalExaggeration)
     }
+    // Build contour lines on top of the solid mesh
+    if (contourElevations.length > 0) {
+      renderer.buildContourLines(meshData, contourElevations, verticalExaggeration)
+    }
     lastExaggerationRef.current = verticalExaggeration
-  }, [meshData, verticalExaggeration])
+  }, [meshData, verticalExaggeration, contourElevations])
 
   // ── Render loop: update camera + render on every state change ──────────────
 
