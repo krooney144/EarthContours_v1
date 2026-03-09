@@ -873,7 +873,8 @@ const MapScreen: React.FC = () => {
 
     // ── Water body polygons ──────────────────────────────────────────────────
     if (showWaterLabels && waterBodies.length > 0 && tileZoom >= 7) {
-      for (const wb of waterBodies.slice(0, 40)) {
+      for (let wbIdx = 0; wbIdx < Math.min(waterBodies.length, 40); wbIdx++) {
+        const wb = waterBodies[wbIdx]
         const pts = wb.polygon
         if (pts.length < 4) continue
 
@@ -898,8 +899,8 @@ const MapScreen: React.FC = () => {
         ctx.lineWidth   = 1
         ctx.stroke()
 
-        // Label at center (zoom 9+)
-        if (tileZoom >= 9 && wb.name) {
+        // Label at center — progressive: top 5 largest at z10+, all at z12+
+        if (wb.name && (tileZoom >= 12 || (tileZoom >= 10 && wbIdx < 5))) {
           ctx.font      = `10px 'Josefin Sans', sans-serif`
           ctx.textAlign = 'center'
           ctx.fillStyle = 'rgba(120, 190, 240, 0.85)'
