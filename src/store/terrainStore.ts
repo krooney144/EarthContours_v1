@@ -45,6 +45,7 @@ interface TerrainStore {
 
   loadRegion: (regionId: string) => Promise<void>
   setActiveRegion: (region: Region) => void
+  setWaterBodies: (waterBodies: WaterBody[]) => void
 }
 
 // ─── Store Implementation ─────────────────────────────────────────────────────
@@ -183,6 +184,11 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
   setActiveRegion: (region) => {
     log.info('Active region set', { id: region.id })
     set({ activeRegion: region })
+  },
+
+  setWaterBodies: (waterBodies) => {
+    log.info('Water bodies set', { count: waterBodies.length })
+    set({ waterBodies })
   },
 }))
 

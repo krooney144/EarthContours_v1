@@ -42,7 +42,8 @@ import {
   clamp, formatCoordinates, formatDistance,
 } from '../../core/utils'
 import { loadElevationTile } from '../../data/elevationLoader'
-import type { TileCoord } from '../../core/types'
+import { fetchWaterBodiesNear } from '../../data/waterLoader'
+import type { TileCoord, WaterBody } from '../../core/types'
 import styles from './MapScreen.module.css'
 
 const log = createLogger('SCREEN:MAP')
@@ -489,8 +490,8 @@ function createAtmosphereSprite(): THREE.Sprite {
 
 const MapScreen: React.FC = () => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
-  const { peaks, meshData, activeRegion } = useTerrainStore()
-  const { coordFormat, showPeakLabels, units } = useSettingsStore()
+  const { peaks, waterBodies, meshData, activeRegion, setWaterBodies } = useTerrainStore()
+  const { coordFormat, showPeakLabels, showWaterLabels, units } = useSettingsStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const globeCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -870,6 +871,43 @@ const MapScreen: React.FC = () => {
       }
     }
 
+    // ── Water body polygons ──────────────────────────────────────────────────
+    if (showWaterLabels && waterBodies.length > 0 && tileZoom >= 7) {
+      for (const wb of waterBodies.slice(0, 40)) {
+        const pts = wb.polygon
+        if (pts.length < 4) continue
+
+        // Quick cull: check if center is remotely near viewport
+        const cp = latLngToPixel(wb.center.lat, wb.center.lng, centerLat, centerLng, tileZoom, W, H)
+        if (cp.x < -500 || cp.x > W + 500 || cp.y < -500 || cp.y > H + 500) continue
+
+        // Draw polygon fill
+        ctx.beginPath()
+        const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, tileZoom, W, H)
+        ctx.moveTo(first.x, first.y)
+        for (let i = 1; i < pts.length; i++) {
+          const p = latLngToPixel(pts[i].lat, pts[i].lng, centerLat, centerLng, tileZoom, W, H)
+          ctx.lineTo(p.x, p.y)
+        }
+        ctx.closePath()
+
+        // Semi-transparent blue fill with thin outline
+        ctx.fillStyle   = 'rgba(30, 90, 160, 0.35)'
+        ctx.fill()
+        ctx.strokeStyle = 'rgba(70, 140, 210, 0.6)'
+        ctx.lineWidth   = 1
+        ctx.stroke()
+
+        // Label at center (zoom 9+)
+        if (tileZoom >= 9 && wb.name) {
+          ctx.font      = `10px 'Josefin Sans', sans-serif`
+          ctx.textAlign = 'center'
+          ctx.fillStyle = 'rgba(120, 190, 240, 0.85)'
+          ctx.fillText(wb.name, cp.x, cp.y)
+        }
+      }
+    }
+
     // ── Peak markers ─────────────────────────────────────────────────────────
     if (showPeakLabels && tileZoom >= 8) {
       ctx.font      = `bold 11px 'Josefin Sans', sans-serif`
@@ -961,7 +999,7 @@ const MapScreen: React.FC = () => {
 
     setIsLoading(false)
     log.debug('DEM map draw complete')
-  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
+  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, showWaterLabels, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
 
   // ── Resize observer ──────────────────────────────────────────────────────────
 
@@ -997,6 +1035,23 @@ const MapScreen: React.FC = () => {
       if (drawMapTimerRef.current) clearTimeout(drawMapTimerRef.current)
     }
   }, [drawMap])
+
+  // ── Fetch water bodies from OSM ──────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!showWaterLabels) return
+    let cancelled = false
+    fetchWaterBodiesNear(centerLat, centerLng, 150)
+      .then(bodies => {
+        if (!cancelled && bodies.length > 0) {
+          setWaterBodies(bodies)
+          log.info('Water bodies loaded for MAP', { count: bodies.length })
+        }
+      })
+    return () => { cancelled = true }
+    // Only re-fetch when center moves significantly (rounded to 0.5°)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2)])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
 
@@ -1989,7 +2044,18 @@ const MapScreen: React.FC = () => {
           <strong>Flat Map</strong><br />
           Draw: {lastFlatMapDrawRef.current} (#{flatMapDrawCountRef.current})<br />
           Skip: {globeOpacity(zoom) >= 1 ? 'YES (globe α=1)' : 'no'}<br />
-          Debounce: 120ms
+          Debounce: 120ms<br />
+          <strong>Lakes</strong><br />
+          Toggle: {showWaterLabels ? 'ON' : 'OFF'} · Count: {waterBodies.length}<br />
+          {waterBodies.length > 0 && <>
+            Types: {(() => {
+              const counts: Record<string, number> = {}
+              for (const wb of waterBodies) { counts[wb.type] = (counts[wb.type] || 0) + 1 }
+              return Object.entries(counts).map(([t, c]) => `${t}:${c}`).join(' ')
+            })()}<br />
+            Total vertices: {waterBodies.reduce((s, wb) => s + wb.polygon.length, 0)}<br />
+            Top 3: {waterBodies.slice(0, 3).map(wb => `${wb.name} (${wb.polygon.length}pts)`).join(', ')}
+          </>}
         </div>
         )
       })()}
