@@ -59,7 +59,7 @@ Five Zustand stores in `src/store/`:
 | `settingsStore` | User prefs — persisted to localStorage |
 | `cameraStore` | AR camera (heading/pitch/height) + orbit camera (theta/phi/radius/panX/panZ) |
 | `locationStore` | GPS position, explore location, sensor data |
-| `terrainStore` | Elevation mesh, peaks, rivers, loading state |
+| `terrainStore` | Elevation mesh, peaks, rivers, water bodies, loading state |
 
 ---
 
@@ -84,6 +84,7 @@ Transitions use zoom animation stored in `uiStore`.
 | `src/data/elevationLoader.ts` | 4-tier elevation fallback (IndexedDB → local → AWS → procedural) |
 | `src/data/ScanTileCache.ts` | Multi-zoom tile cache (z8–z13) for SCAN 250km range |
 | `src/data/peakLoader.ts` | OSM Overpass peak loader with 24h IndexedDB cache |
+| `src/data/waterLoader.ts` | OSM Overpass lake/reservoir polygon loader with 24h IndexedDB cache |
 | `src/data/simulatedTerrain.ts` | Procedural terrain (Gaussian peaks + sine waves) |
 | `src/data/simulatedData.ts` | Real Colorado/Alaska/Cascades peak coords |
 | `src/workers/skylineWorker.ts` | Web Worker — 360° skyline precomputation (720 az) + Phase 6 refined arcs |
@@ -118,7 +119,7 @@ Transitions use zoom animation stored in `uiStore`.
   - Teal dot renders at MAP-selected location using `locationStore.mode === 'exploring'`
   - `cameraStore.orbitPanX/orbitPanZ` = pan as fraction of terrain width/depth [-0.5, 0.5]
   - `cameraStore.orbitRadius` = camera distance from pivot in **metres**; auto-set by `initOrbitCamera(terrainWidth_m)`
-- **MAP**: Dual-canvas map with Three.js globe (zoom 1–6) and Canvas 2D flat DEM (zoom 7–16). Globe uses Mercator-corrected sphere with brightness-lifted DEM texture. Smooth CSS opacity crossfade at zoom 5–7. Carto dark_only_labels overlay at flat zoom. All overlays (GPS dot, explore marker, peaks, area selection) on flat map. Tap to `setExploreLocation(lat, lng)` — syncs EXPLORE and SCAN. Smooth zoom slider with 0.1 step granularity.
+- **MAP**: Dual-canvas map with Three.js globe (zoom 1–6) and Canvas 2D flat DEM (zoom 7–16). Globe uses Mercator-corrected sphere with brightness-lifted DEM texture. Smooth CSS opacity crossfade at zoom 5–7. Carto dark_only_labels overlay at flat zoom. All overlays (GPS dot, explore marker, peaks, lakes, area selection) on flat map. Tap to `setExploreLocation(lat, lng)` — syncs EXPLORE and SCAN. Smooth zoom slider with 0.1 step granularity. **Lake polygons**: `waterLoader.ts` fetches lake/reservoir polygons from OSM Overpass API (`natural=water` ways+relations with `name` tag, `out geom`). IndexedDB-cached 24h. Rendered as semi-transparent blue polygons on flat map at zoom 7+, labels at zoom 9+. Controlled by `showWaterLabels` toggle in Settings. Lake stats visible in Globe Debug panel.
 
 ---
 

@@ -83,12 +83,13 @@ export interface River {
   points: LatLng[]      // Path of the river
 }
 
-/** A lake, reservoir, or water body */
+/** A lake, reservoir, or water body polygon from OSM */
 export interface WaterBody {
   id: string
   name: string
+  type: 'lake' | 'reservoir' | 'pond' | 'water'
   center: LatLng
-  area_km2?: number
+  polygon: LatLng[]
 }
 
 /** A terrain region (Colorado Rockies, Anchorage, etc.) */
