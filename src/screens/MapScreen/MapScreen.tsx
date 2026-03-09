@@ -495,6 +495,40 @@ function createAtmosphereMesh(): THREE.Mesh {
   return new THREE.Mesh(atmosGeo, atmosMat)
 }
 
+// ─── Scale Bar Helpers ────────────────────────────────────────────────────────
+
+/** "Nice" scale bar distances in km, ascending. Pick the one that gives 60–250px. */
+const SCALE_STEPS_KM = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+const SCALE_STEPS_MI = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]
+
+/** Compute scale bar width and label for a given pixels-per-km.
+ *  Returns null if no step fits in 50-250px range. */
+function computeScaleBar(
+  pxPerKm: number,
+  unitSystem: string,
+): { widthPx: number; label: string } | null {
+  const steps = unitSystem === 'imperial' ? SCALE_STEPS_MI : SCALE_STEPS_KM
+  const kmFactor = unitSystem === 'imperial' ? 1.60934 : 1 // convert step to km for px calc
+  for (const step of steps) {
+    const km = step * kmFactor
+    const px = km * pxPerKm
+    if (px >= 50 && px <= 250) {
+      const label = unitSystem === 'imperial' ? `${step} mi` : `${step} km`
+      return { widthPx: px, label }
+    }
+  }
+  // Fallback: use the first step that's at least 20px
+  for (const step of steps) {
+    const km = step * kmFactor
+    const px = km * pxPerKm
+    if (px >= 20) {
+      const label = unitSystem === 'imperial' ? `${step} mi` : `${step} km`
+      return { widthPx: Math.min(px, 300), label }
+    }
+  }
+  return null
+}
+
 // ─── Main Component ────────────────────────────────────────────────────────────
 
 const MapScreen: React.FC = () => {
@@ -2186,21 +2220,25 @@ const MapScreen: React.FC = () => {
         const flatPx300 = Math.abs(flatP2.x - flatP1.x)
 
         // Globe: project two points on the sphere through the Three.js camera
+        // Uses the earth mesh's actual world matrix so rotation matches exactly.
         let globePx300 = 0
         if (threeRef.current) {
           const cam = threeRef.current.camera
-          const { rotX, rotY } = latLngToSphereRotation(centerLat, centerLng)
-          // Point at center - halfDeg and center + halfDeg longitude on unit sphere
+          const earthMesh = threeRef.current.earth
+          cam.updateMatrixWorld()
+          earthMesh.updateMatrixWorld()
+
           const toScreen = (lat: number, lng: number) => {
             const latR = lat * Math.PI / 180
             const lngR = lng * Math.PI / 180
-            // Sphere surface point (radius 1) — same convention as SphereGeometry
-            const sx = -Math.cos(latR) * Math.sin(lngR)
-            const sy = Math.sin(latR)
-            const sz = Math.cos(latR) * Math.cos(lngR)
-            const v = new THREE.Vector3(sx, sy, sz)
-            // Apply same rotation as the earth mesh
-            v.applyEuler(new THREE.Euler(rotX, rotY, 0, 'YXZ'))
+            // Same convention as location marker (line 1382-1385)
+            const v = new THREE.Vector3(
+              Math.cos(latR) * Math.cos(lngR),
+              Math.sin(latR),
+              -Math.cos(latR) * Math.sin(lngR),
+            )
+            // Transform through the earth mesh's world matrix (includes rotation)
+            v.applyMatrix4(earthMesh.matrixWorld)
             v.project(cam)
             return { x: (v.x + 1) / 2 * viewW, y: (1 - v.y) / 2 * viewH }
           }
@@ -2224,6 +2262,58 @@ const MapScreen: React.FC = () => {
             Globe: {globePx300.toFixed(0)}px · Flat: {flatPx300.toFixed(0)}px · Ratio: {flatPx300 > 0 ? (globePx300 / flatPx300).toFixed(2) : '—'}×<br />
             <strong>Data</strong><br />
             Lakes: {showWaterLabels ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {rivers.length}
+          </div>
+        )
+      })()}
+
+      {/* Scale bar */}
+      {(() => {
+        const viewH = globeCanvasRef.current?.clientHeight || 700
+        const viewW = globeCanvasRef.current?.clientWidth || 400
+        const effZ = effectiveFlatZoom(zoom, viewH)
+        // Flat map: px per km via Mercator at center lat
+        const testKm = 100
+        const degLng100 = testKm / (111.320 * Math.cos(centerLat * Math.PI / 180))
+        const fP1 = latLngToPixel(centerLat, centerLng - degLng100 / 2, centerLat, centerLng, effZ, viewW, viewH)
+        const fP2 = latLngToPixel(centerLat, centerLng + degLng100 / 2, centerLat, centerLng, effZ, viewW, viewH)
+        const flatPxPerKm = Math.abs(fP2.x - fP1.x) / testKm
+
+        // Globe: px per km via Three.js projection
+        let globePxPerKm = 0
+        if (threeRef.current) {
+          const cam = threeRef.current.camera
+          const earthMesh = threeRef.current.earth
+          cam.updateMatrixWorld()
+          earthMesh.updateMatrixWorld()
+          const latR = centerLat * Math.PI / 180
+          const halfDegLng = degLng100 / 2
+          const lngR1 = (centerLng - halfDegLng) * Math.PI / 180
+          const lngR2 = (centerLng + halfDegLng) * Math.PI / 180
+          const v1 = new THREE.Vector3(Math.cos(latR) * Math.cos(lngR1), Math.sin(latR), -Math.cos(latR) * Math.sin(lngR1))
+          const v2 = new THREE.Vector3(Math.cos(latR) * Math.cos(lngR2), Math.sin(latR), -Math.cos(latR) * Math.sin(lngR2))
+          v1.applyMatrix4(earthMesh.matrixWorld); v1.project(cam)
+          v2.applyMatrix4(earthMesh.matrixWorld); v2.project(cam)
+          const gPx = Math.abs(((v2.x + 1) / 2 * viewW) - ((v1.x + 1) / 2 * viewW))
+          globePxPerKm = gPx / testKm
+        }
+
+        // Use globe scale when globe visible, flat when flat visible, blend during transition
+        const pxPerKm = gOpacity >= 1 ? globePxPerKm
+          : gOpacity <= 0 ? flatPxPerKm
+          : globePxPerKm * gOpacity + flatPxPerKm * (1 - gOpacity)
+
+        const bar = computeScaleBar(pxPerKm, units)
+        if (!bar) return null
+
+        return (
+          <div className={styles.scaleBar} aria-label="Map scale">
+            <div className={styles.scaleBarLine} style={{ width: bar.widthPx }} />
+            <span className={styles.scaleBarLabel}>{bar.label}</span>
+            {showGlobeDebug && gOpacity > 0 && gOpacity < 1 && (
+              <span className={styles.scaleBarDebug}>
+                G:{globePxPerKm.toFixed(1)}px/km F:{flatPxPerKm.toFixed(1)}px/km
+              </span>
+            )}
           </div>
         )
       })()}

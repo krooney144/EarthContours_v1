@@ -330,6 +330,44 @@
   pointer-events: none;
 }
 
+/* ── Scale bar ──────────────────────────────────────────────────────────────── */
+
+.scaleBar {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height) + 44px);
+  left: var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: var(--z-hud);
+  pointer-events: none;
+}
+
+.scaleBarLine {
+  height: 2px;
+  background: rgba(132, 209, 219, 0.7);
+  border-left: 2px solid rgba(132, 209, 219, 0.7);
+  border-right: 2px solid rgba(132, 209, 219, 0.7);
+  box-sizing: content-box;
+  min-width: 20px;
+}
+
+.scaleBarLabel {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: rgba(132, 209, 219, 0.8);
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.scaleBarDebug {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: rgba(132, 209, 219, 0.5);
+  white-space: nowrap;
+  margin-left: 4px;
+}
+
 /* ── Coordinates bar ─────────────────────────────────────────────────────────── */
 
 .coordBar {
