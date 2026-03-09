@@ -497,92 +497,41 @@
   opacity: 1;
 }
 
-/* ── Zoom Slider ───────────────────────────────────────────────────────────── */
+/* ── Custom Vertical Zoom Slider ──────────────────────────────────────────── */
+/* Div-based vertical slider — avoids cross-browser writing-mode issues.
+   Layout: wide touch target (44px) with narrow visible track (4px) centered. */
 
-.zoomSliderWrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) 0;
-}
-
-.zoomSlider {
-  -webkit-appearance: none;
-  appearance: none;
-  writing-mode: vertical-lr;
-  direction: rtl;
-  width: 160px;
-  height: 6px;
-  /* Fallback background for mobile browsers that ignore ::-webkit-slider-runnable-track
-     in vertical writing-mode — ensures the track is always visible */
-  background: linear-gradient(
-    to top,
-    var(--ec-abyss) 0%,
-    var(--ec-ocean) 40%,
-    var(--ec-glow) 100%
-  );
-  border-radius: 3px;
-  border: 1px solid var(--ec-border);
+.zoomTrackContainer {
+  position: relative;
+  width: 44px;
+  height: 120px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.zoomSlider::-webkit-slider-runnable-track {
-  width: 6px;
+.zoomTrack {
+  position: absolute;
+  width: 4px;
   height: 100%;
-  background: linear-gradient(
-    to top,
-    var(--ec-abyss) 0%,
-    var(--ec-ocean) 40%,
-    var(--ec-glow) 100%
-  );
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
   border: 1px solid var(--ec-border);
 }
 
-.zoomSlider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 24px;
-  height: 24px;
+.zoomThumb {
+  position: absolute;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
-  background: var(--ec-glow);
-  border: 2px solid var(--ec-white);
-  box-shadow: 0 0 10px rgba(132, 209, 219, 0.6);
-  cursor: grab;
-  margin-left: -9px;
-  /* Larger touch target via padding trick — actual visual is 24px but hit area is bigger */
-}
-
-.zoomSlider::-moz-range-track {
-  width: 6px;
-  height: 100%;
-  background: linear-gradient(
-    to top,
-    var(--ec-abyss) 0%,
-    var(--ec-ocean) 40%,
-    var(--ec-glow) 100%
-  );
-  border-radius: 3px;
-  border: 1px solid var(--ec-border);
-}
-
-.zoomSlider::-moz-range-thumb {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--ec-glow);
-  border: 2px solid var(--ec-white);
-  box-shadow: 0 0 10px rgba(132, 209, 219, 0.6);
-  cursor: grab;
-}
-
-.zoomSliderLabel {
-  font-family: var(--font-display);
-  font-size: 8px;
-  color: var(--ec-text-muted);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  background: var(--ec-white);
+  border: 2px solid var(--ec-glow);
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.5);
+  transform: translate(-50%, -50%);
+  left: 50%;
   pointer-events: none;
+  transition: top 60ms ease-out;
 }

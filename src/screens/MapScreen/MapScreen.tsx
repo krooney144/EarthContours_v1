@@ -228,19 +228,21 @@ function loadLabelTile(z: number, x: number, y: number): Promise<HTMLImageElemen
 
 // ─── Globe Constants ──────────────────────────────────────────────────────────
 
-/** Zoom thresholds for globe / flat map crossfade */
-const GLOBE_FULL_ZOOM = 5      // Globe fully visible at zoom <= 5
-const GLOBE_GONE_ZOOM = 6.5    // Globe fully hidden at zoom >= 6.5
+/** Zoom thresholds for globe / flat map crossfade.
+ *  Quick clean cut — narrow window so the user zooms through it fast,
+ *  like Apple/Google Maps where the 3D→2D switch takes < 1 second. */
+const GLOBE_FULL_ZOOM = 5.5    // Globe fully visible at zoom <= 5.5
+const GLOBE_GONE_ZOOM = 6.3    // Globe fully hidden at zoom >= 6.3
 
-/** Compute globe opacity from current zoom with ease-in-out curve.
- *  1.0 at zoom <= 5, 0.0 at zoom >= 6.5, smooth cosine blend between.
- *  Cosine easing starts/ends slowly and accelerates through the middle —
- *  feels more natural than a linear ramp during crossfade. */
+/** Compute globe opacity from current zoom with steep ease-in-out.
+ *  0.8-level window — a single pinch/scroll tick crosses most of it.
+ *  Uses smoothstep (Hermite) for a fast mid-transition. */
 function globeOpacity(zoom: number): number {
   if (zoom <= GLOBE_FULL_ZOOM) return 1
   if (zoom >= GLOBE_GONE_ZOOM) return 0
   const t = (zoom - GLOBE_FULL_ZOOM) / (GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM)
-  return 0.5 + 0.5 * Math.cos(Math.PI * t)
+  // Hermite smoothstep — steeper through the middle than cosine
+  return 1 - (t * t * (3 - 2 * t))
 }
 
 /** Compute the flat-map zoom level that matches the globe's visible scale.
@@ -450,44 +452,50 @@ function createStarField(): THREE.Points {
   return new THREE.Points(geometry, material)
 }
 
-// ─── Atmosphere Glow (Radial Gradient Sprite) ───────────────────────────────
+// ─── Atmosphere Glow (Fresnel BackSide Mesh) ────────────────────────────────
 
 /**
- * Atmosphere halo — a radial gradient sprite rendered behind the Earth.
- * Much simpler and more reliable than the Fresnel BackSide shader approach.
- * The sprite always faces the camera (billboard), so no view-angle issues.
+ * Atmosphere halo — a Fresnel shader on a slightly larger sphere rendered with
+ * THREE.BackSide. Only the inner face of the atmosphere sphere is visible, and
+ * the Earth mesh (r=1.0) naturally occludes the front via the depth buffer.
+ * Result: glow is ONLY visible at the limb (edge) where the atmosphere sphere
+ * extends past the Earth — proper planetary atmosphere rendering.
  */
-function createAtmosphereSprite(): THREE.Sprite {
-  const size = 256
-  const canvas = document.createElement('canvas')
-  canvas.width = size
-  canvas.height = size
-  const ctx = canvas.getContext('2d')!
-  const cx = size / 2
-  // Edge-only halo — fully transparent over the globe disk, glows only at the limb.
-  // At 3.2× sprite scale, the globe edge is at ~0.31 of the sprite radius (1/3.2 ≈ 0.3125).
-  // We start the glow just outside that to create a thin rim light.
-  const grad = ctx.createRadialGradient(cx, cx, 0, cx, cx, cx)
-  grad.addColorStop(0, 'rgba(0, 0, 0, 0)')              // transparent over globe center
-  grad.addColorStop(0.28, 'rgba(0, 0, 0, 0)')            // still transparent — inside globe disk
-  grad.addColorStop(0.32, 'rgba(132, 209, 219, 0.18)')   // rim glow starts at globe edge
-  grad.addColorStop(0.38, 'rgba(75, 142, 163, 0.10)')    // outer glow
-  grad.addColorStop(0.52, 'rgba(75, 142, 163, 0.03)')    // faint haze
-  grad.addColorStop(0.70, 'rgba(132, 209, 219, 0)')      // fully transparent
-  ctx.fillStyle = grad
-  ctx.fillRect(0, 0, size, size)
-  const tex = new THREE.CanvasTexture(canvas)
-  const mat = new THREE.SpriteMaterial({
-    map: tex,
+function createAtmosphereMesh(): THREE.Mesh {
+  const atmosGeo = new THREE.SphereGeometry(1.04, 64, 64)
+  const atmosMat = new THREE.ShaderMaterial({
+    vertexShader: `
+      varying vec3 vNormal;
+      varying vec3 vWorldPosition;
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPosition = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uIntensity;
+      varying vec3 vNormal;
+      varying vec3 vWorldPosition;
+      void main() {
+        vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+        float rim = 1.0 - abs(dot(viewDir, vNormal));
+        float glow = pow(rim, 3.0) * uIntensity;
+        gl_FragColor = vec4(uColor, glow);
+      }
+    `,
+    uniforms: {
+      uColor: { value: new THREE.Vector3(0.35, 0.78, 0.88) },  // teal, matching ec-glow
+      uIntensity: { value: 1.4 },
+    },
+    side: THREE.BackSide,
     transparent: true,
-    depthTest: false,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   })
-  const sprite = new THREE.Sprite(mat)
-  sprite.scale.set(3.2, 3.2, 1) // ~1.6× Earth diameter for subtle halo
-  sprite.renderOrder = -1 // render behind everything
-  return sprite
+  return new THREE.Mesh(atmosGeo, atmosMat)
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
@@ -523,7 +531,7 @@ const MapScreen: React.FC = () => {
     scene: THREE.Scene
     camera: THREE.PerspectiveCamera
     earth: THREE.Mesh
-    atmosphere: THREE.Sprite
+    atmosphere: THREE.Mesh
     stars: THREE.Points
     earthMaterial: THREE.MeshBasicMaterial
     locationMarker: THREE.Sprite
@@ -1174,8 +1182,9 @@ const MapScreen: React.FC = () => {
     locationMarker.visible = false
     earth.add(locationMarker)
 
-    // Atmosphere glow — radial gradient sprite behind the Earth
-    const atmosphere = createAtmosphereSprite()
+    // Atmosphere glow — Fresnel BackSide mesh slightly larger than Earth.
+    // Only the limb (edge) glows because the Earth sphere occludes the front.
+    const atmosphere = createAtmosphereMesh()
     scene.add(atmosphere)
 
     // Stars
@@ -1314,9 +1323,9 @@ const MapScreen: React.FC = () => {
         smMat.map?.dispose()
         smMat.dispose()
         earthGeo.dispose()
-        const atmosMat = threeRef.current.atmosphere.material as THREE.SpriteMaterial
-        atmosMat.map?.dispose()
-        atmosMat.dispose()
+        const atmosMesh = threeRef.current.atmosphere
+        ;(atmosMesh.material as THREE.ShaderMaterial).dispose()
+        atmosMesh.geometry.dispose()
       }
       threeRef.current = null
     }
@@ -1770,6 +1779,35 @@ const MapScreen: React.FC = () => {
   const handleZoomIn  = () => setZoom((z) => clamp(Math.floor(z) + 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
   const handleZoomOut = () => setZoom((z) => clamp(Math.ceil(z)  - 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
 
+  // ── Custom vertical zoom slider ────────────────────────────────────────────
+  const zoomTrackRef = useRef<HTMLDivElement>(null)
+  const zoomDraggingRef = useRef(false)
+
+  const zoomFromClientY = useCallback((clientY: number) => {
+    const track = zoomTrackRef.current
+    if (!track) return
+    const rect = track.getBoundingClientRect()
+    // Top of track = max zoom, bottom = min zoom
+    const fraction = 1 - clamp((clientY - rect.top) / rect.height, 0, 1)
+    setZoom(MAP_MIN_ZOOM + fraction * (MAP_MAX_ZOOM - MAP_MIN_ZOOM))
+  }, [])
+
+  const handleSliderPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    zoomDraggingRef.current = true
+    zoomFromClientY(e.clientY)
+  }, [zoomFromClientY])
+
+  const handleSliderPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!zoomDraggingRef.current) return
+    zoomFromClientY(e.clientY)
+  }, [zoomFromClientY])
+
+  const handleSliderPointerUp = useCallback(() => {
+    zoomDraggingRef.current = false
+  }, [])
+
   /**
    * GPS crosshair button handler.
    * Centers the map on GPS AND switches SCAN/EXPLORE to use GPS as viewpoint.
@@ -1967,29 +2005,14 @@ const MapScreen: React.FC = () => {
         </div>
       )}
 
-      {/* Map controls — zoom slider + location + area selection */}
+      {/* Map controls — Google Maps style: location + area on top, then zoom */}
       <div className={styles.controls}>
-        <button className={styles.controlBtn} onClick={handleZoomIn}  aria-label="Zoom in">+</button>
-        <div className={styles.zoomSliderWrap}>
-          <input
-            type="range"
-            className={styles.zoomSlider}
-            min={MAP_MIN_ZOOM}
-            max={MAP_MAX_ZOOM}
-            step={0.1}
-            value={zoom}
-            onChange={(e) => setZoom(parseFloat(e.target.value))}
-            aria-label="Zoom level"
-          />
-        </div>
-        <button className={styles.controlBtn} onClick={handleZoomOut} aria-label="Zoom out">−</button>
         <button
           className={`${styles.controlBtn} ${styles.locationBtn} ${gpsLat !== null ? styles.locationActive : ''}`}
           onClick={handleMyLocation}
           aria-label="Center on my GPS location"
           title="My Location"
         >
-          {/* Crosshair icon — standard "locate me" symbol */}
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             <circle cx="9" cy="9" r="4" />
             <line x1="9" y1="1" x2="9" y2="4" />
@@ -1998,12 +2021,10 @@ const MapScreen: React.FC = () => {
             <line x1="14" y1="9" x2="17" y2="9" />
           </svg>
         </button>
-        {/* Area selection toggle — enters rectangle drawing mode for EXPLORE. */}
         <button
           className={`${styles.controlBtn} ${styles.selectAreaBtn} ${isSelectingArea ? styles.selectAreaActive : ''}`}
           onClick={() => {
             if (isSelectingArea) {
-              // Exit selection mode — clear the drawn rectangle
               setIsSelectingArea(false)
               setSelectionStart(null)
               setSelectionEnd(null)
@@ -2014,7 +2035,6 @@ const MapScreen: React.FC = () => {
           aria-label={isSelectingArea ? 'Cancel area selection' : 'Select area on map'}
           title={isSelectingArea ? 'Cancel Selection' : 'Select Area'}
         >
-          {/* Rectangle icon — represents area selection */}
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             <rect x="3" y="3" width="12" height="12" strokeDasharray="3 2" />
             <rect x="1.5" y="1.5" width="3" height="3" fill="currentColor" stroke="none" />
@@ -2023,6 +2043,28 @@ const MapScreen: React.FC = () => {
             <rect x="13.5" y="13.5" width="3" height="3" fill="currentColor" stroke="none" />
           </svg>
         </button>
+        <button className={styles.controlBtn} onClick={handleZoomIn}  aria-label="Zoom in">+</button>
+        {/* Custom vertical zoom slider — div-based for cross-browser reliability */}
+        <div
+          ref={zoomTrackRef}
+          className={styles.zoomTrackContainer}
+          onPointerDown={handleSliderPointerDown}
+          onPointerMove={handleSliderPointerMove}
+          onPointerUp={handleSliderPointerUp}
+          onPointerCancel={handleSliderPointerUp}
+          role="slider"
+          aria-label="Zoom level"
+          aria-valuemin={MAP_MIN_ZOOM}
+          aria-valuemax={MAP_MAX_ZOOM}
+          aria-valuenow={Math.round(zoom)}
+        >
+          <div className={styles.zoomTrack} />
+          <div
+            className={styles.zoomThumb}
+            style={{ top: `${(1 - (zoom - MAP_MIN_ZOOM) / (MAP_MAX_ZOOM - MAP_MIN_ZOOM)) * 100}%` }}
+          />
+        </div>
+        <button className={styles.controlBtn} onClick={handleZoomOut} aria-label="Zoom out">−</button>
       </div>
 
       {/* Area selection overlay — instructions, dimensions, and EXPLORE action.
@@ -2091,24 +2133,18 @@ const MapScreen: React.FC = () => {
         {showGlobeDebug ? '✕' : '⊙'}
       </button>
 
-      {/* Globe debug panel — trimmed to essentials */}
+      {/* Globe debug panel */}
       {showGlobeDebug && (
         <div className={styles.globeDebug} style={{ top: 78 }}>
           <strong>Map Debug</strong><br />
           Mode: {gOpacity > 0 ? (fOpacity > 0 ? 'TRANSITION' : 'GLOBE') : 'FLAT MAP'} · Zoom: {zoom.toFixed(2)} · Tile Z: {Math.round(zoom)}<br />
           Globe α: {gOpacity.toFixed(2)} · Flat α: {fOpacity.toFixed(2)}<br />
           Center: {centerLat.toFixed(4)}°, {centerLng.toFixed(4)}°<br />
-          <strong>Lakes</strong><br />
-          Toggle: {showWaterLabels ? 'ON' : 'OFF'} · Count: {waterBodies.length}<br />
-          {waterBodies.length > 0 && <>
-            Types: {(() => {
-              const counts: Record<string, number> = {}
-              for (const wb of waterBodies) { counts[wb.type] = (counts[wb.type] || 0) + 1 }
-              return Object.entries(counts).map(([t, c]) => `${t}:${c}`).join(' ')
-            })()}<br />
-          </>}
-          <strong>Rivers</strong><br />
-          Count: {rivers.length}
+          <strong>Transition</strong><br />
+          Window: z{GLOBE_FULL_ZOOM}→z{GLOBE_GONE_ZOOM} ({(GLOBE_GONE_ZOOM - GLOBE_FULL_ZOOM).toFixed(1)} levels) · Curve: smoothstep<br />
+          Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'} · Flat brightness: {gOpacity > 0 ? `${(1 + gOpacity * 0.35).toFixed(2)}×` : '1.00×'}<br />
+          <strong>Data</strong><br />
+          Lakes: {showWaterLabels ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {rivers.length}
         </div>
       )}
 
