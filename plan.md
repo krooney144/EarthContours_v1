@@ -1,147 +1,86 @@
-# Plan: Mobile Map Zoom UX Improvements
+# Plan: Fix Atmosphere, Zoom Transition, and Slider
 
-## Problem Summary (with screenshot reference)
-The MAP screen has several mobile UX issues visible in the screenshot:
-1. **Pinch-to-zoom is jumpy** — pointer events (globe rotation) fire simultaneously with touch events (zoom), causing the globe to spin wildly when trying to zoom
-2. **Zoom slider is a floating dot** — visible in screenshot as a tiny teal circle to the right of the +/- buttons with NO visible track line behind it. Completely unusable on phone.
-3. **Atmosphere washes out the globe** — the teal-grey haze in the screenshot covers the entire globe surface, making terrain look faded and low-contrast
-4. **Zoom 6 is too dark** — during globe→flat crossfade, the flat map (no brightness lift) blends with the brighter globe, creating a dark muddy appearance
-5. **Control buttons positioning** — the +/- and control buttons sit inboard from the screen edge
-6. **Debug panel too large** — shows ~30 lines of info, overwhelming on mobile
+## Problem 1: Atmosphere halo renders IN FRONT of the Earth
 
----
+**Root cause:** The atmosphere is a `THREE.Sprite` (flat billboard quad) with `depthTest: false` and additive blending. Sprites are always camera-facing 2D planes — they cannot wrap around a 3D sphere. Even with `renderOrder = -1` (draws first), additive blending adds its glow on top of the dark background, then the Earth draws over the center. But the semi-transparent gradient edges still show through, because the sprite's glow extends across the entire globe disk area before the Earth can occlude it. A sprite fundamentally cannot produce a "behind the sphere" atmosphere.
 
-## Change 1: Fix Pinch-to-Zoom (Stop Globe Rotation During Pinch)
+**Fix — Replace sprite with a Fresnel BackSide shader on a larger sphere:**
+- Create a `THREE.SphereGeometry(1.03, 64, 64)` — slightly larger than the Earth (r=1.0)
+- Apply a `THREE.ShaderMaterial` with `side: THREE.BackSide`:
+  - BackSide means only the inner face of the sphere renders
+  - The Earth (r=1.0) naturally occludes the front-facing region via depth buffer
+  - Only the limb (edge) of the atmosphere sphere peeks past the Earth → edge-only glow
+- Vertex shader: pass `vNormal` and view direction to fragment
+- Fragment shader: Fresnel term `pow(1.0 - abs(dot(viewDir, normal)), 3.0)`
+  - At face-on angles: dot ≈ 1, Fresnel ≈ 0 → transparent
+  - At grazing angles (edge): dot ≈ 0, Fresnel ≈ 1 → bright glow
+- Color: `vec3(0.35, 0.75, 0.85)` (teal, matching ec-glow palette)
+- `transparent: true`, `depthWrite: false`, additive blending
+- Delete the `createAtmosphereSprite()` function entirely
+- Update `threeRef` type: `atmosphere: THREE.Sprite` → `atmosphere: THREE.Mesh`
+- Update scene init to use `createAtmosphereMesh()` instead
 
-**File:** `src/screens/MapScreen/MapScreen.tsx`
+## Problem 2: Zoom 5→7 crossfade is jarring
 
-**Root cause:** `handleGlobePointerMove` (line ~1409) fires for each finger individually during a 2-finger pinch gesture. It applies rotation deltas via `earth.rotation.y += dx` and `earth.rotation.x += dy`. Meanwhile `handleGlobeTouchMove` (line ~1508) is trying to apply zoom. The rotation and zoom fight each other — the globe spins to the South Pole while the user is just trying to zoom.
+**Root cause:** The transition window is only 1.5 zoom levels (GLOBE_FULL_ZOOM=5 → GLOBE_GONE_ZOOM=6.5). This creates three issues:
+1. The scale difference between globe at z5 and flat map at z7 is huge — the visual "jump" is sudden
+2. During the 1.5-level blend, both layers are semi-transparent — globe (low-res z2/z3 texture) and flat (sharp z7 tiles) look completely different, creating a muddy double-exposure
+3. A couple of pinch ticks or scroll events can skip the entire transition
 
-**Fix:**
-- Add a `touchCountRef = useRef(0)` that tracks active touch count on the globe canvas
-- In `handleGlobeTouchStart`: set `touchCountRef.current = e.touches.length`
-- In `handleGlobeTouchEnd`: set `touchCountRef.current = e.touches?.length || 0`
-- In `handleGlobePointerDown`: if `touchCountRef.current >= 2`, don't start drag state
-- In `handleGlobePointerMove`: early-return if `touchCountRef.current >= 2` — completely suppress rotation during any multi-touch gesture
-- When pinch begins, kill momentum: set `velocityX = velocityY = 0`
+**Fix — Widen transition range + ease the camera curve:**
+- Change `GLOBE_FULL_ZOOM = 4` (was 5) and `GLOBE_GONE_ZOOM = 8` (was 6.5)
+- This gives **4 zoom levels** of gradual transition instead of 1.5
+- The cosine ease-in-out is already good — wider range means it's naturally smoother
+- Adjust `zoomToCameraZ()` so the camera Z at zoom 8 still produces reasonable globe scale
+- The brightness filter on the flat map (already applied) will continue to smooth the brightness match
+- Consider: at the wide transition midpoint (zoom 6), globe α ≈ 0.5 — the longer blend gives the eye more time to adjust
 
-**Finger-anchored zoom (Apple Maps style):**
-- On `handleGlobeTouchStart` with 2 fingers: record the midpoint between fingers in client coords (`pinchCenterX/Y`)
-- Raycast from that midpoint to get the lat/lng on the globe under the pinch center
-- Store as `globePinchRef.current.anchorLat/anchorLng`
-- On `handleGlobeTouchMove`: compute new zoom from pinch scale ratio, then adjust globe rotation so the anchor lat/lng stays projected to the same screen position
-- This keeps the terrain between your fingers visually pinned while zooming — same behavior as Apple/Google Maps
+## Problem 3: Zoom slider doesn't match reference (Google Maps style)
 
----
+**Reference image analysis:** The Google Maps-style control shows:
+```
+  [◎]  ← location button (separate, above zoom controls)
+  [+]  ← zoom in button
+   |
+   ●   ← vertical slider track with round thumb
+   |
+  [−]  ← zoom out button
+```
 
-## Change 2: Improve Zoom Slider for Mobile
+**Current problems:**
+- Uses CSS `writing-mode: vertical-lr` hack that renders as horizontal on many mobile browsers (visible in screenshot — the track extends to the right, not downward)
+- Track is thin (6px) and hard to see
+- No visible relationship between +/− buttons and slider
 
-**Files:** `src/screens/MapScreen/MapScreen.module.css` + `MapScreen.tsx`
+**Fix — Custom div-based vertical slider (no `<input type="range">`):**
+- Replace `<input type="range">` with a custom component:
+  - `.zoomTrackContainer` — 32px wide touch target, 120px tall, centered between +/−
+  - `.zoomTrack` — 4px wide, full height, centered, rounded, subtle border color
+  - `.zoomThumb` — 18px circle, white with glow, positioned via CSS `top` percentage
+  - Thumb position: `top = (1 - (zoom - min) / (max - min)) * 100%` (top = zoomed in, bottom = zoomed out)
+- Pointer events:
+  - `onPointerDown` on container: start drag, calculate zoom from clientY
+  - `onPointerMove` while dragging: map clientY to zoom value
+  - `onPointerUp`: end drag
+  - Tap anywhere on track: jump thumb to that position
+- Layout order in `.controls` div:
+  1. Location button (◎)
+  2. Area select button (⬜)
+  3. `+` button
+  4. Custom vertical slider
+  5. `−` button
 
-**Problem (visible in screenshot):** The slider uses `writing-mode: vertical-lr` with `width: 120px` (becomes height) and `height: 4px` (becomes track width). The `::-webkit-slider-runnable-track` styles don't render on many mobile browsers with vertical writing mode, leaving just the 16px thumb dot floating with no track.
-
-**Fix — CSS improvements:**
-- Increase track width from 4px to 6px
-- Increase thumb from 16×16 to 24×24px with padding for 44px touch target
-- Add a `background` gradient directly on `.zoomSlider` as a fallback for browsers that ignore `::-webkit-slider-runnable-track` in vertical mode
-- Add a subtle 1px border on the track for visibility against dark backgrounds
-- Increase slider length from 120px to 160px for more precision
-
-**Fix — JSX improvements:**
-- Add small "+" label above and "−" label below the slider (or zoom numbers) for orientation
-- Show current zoom level as a small floating badge near the thumb position
-
----
-
-## Change 3: Atmosphere → Subtle Edge-Only Halo
-
-**File:** `src/screens/MapScreen/MapScreen.tsx` — `createAtmosphereSprite()` (line ~460)
-
-**Problem (visible in screenshot):** The radial gradient starts at `r * 0.28` (28% of texture radius = well inside the globe disk) with opacity 0.30, and uses `AdditiveBlending`. The 3.2× scale sprite covers the entire globe and beyond. The screenshot shows the teal-grey wash across all terrain, killing contrast.
-
-**Fix — edge-only halo ring:**
-- Reshape the radial gradient so it's fully transparent over the globe's disk area and only glows outside the limb:
-  - `0 → 0.44`: `rgba(0,0,0,0)` — fully transparent (this covers the globe surface)
-  - `0.44 → 0.48`: ramp up to `rgba(132, 209, 219, 0.15)` — the visible rim
-  - `0.48 → 0.58`: `rgba(75, 142, 163, 0.10)` — outer glow
-  - `0.58 → 1.0`: fade to transparent
-- Keep `AdditiveBlending` and `renderOrder: -1`
-- Keep `scale.set(3.2, 3.2, 1)` — same size, just the gradient shape changes
-- Result: a thin teal rim light at the edge of the globe (like Earth's atmosphere seen from space), with zero fog on the surface
-
----
-
-## Change 4: Fix Zoom 6 Darkness
-
-**File:** `src/screens/MapScreen/MapScreen.tsx`
-
-**Problem:** The globe texture has a brightness lift applied during `buildGlobeTexture()` (line ~416: `R×1.5+18, G×1.4+22, B×1.3+28`). The flat DEM map has no such lift. During the crossfade (zoom 5–6.5), the brighter globe blends with the darker flat map, creating a muddy dark appearance at zoom 6.
-
-**Fix — CSS brightness filter during transition:**
-- In the JSX where the flat map canvas `style` is set (line ~1785), add a dynamic `filter` property:
-  ```
-  filter: gOpacity > 0 ? `brightness(${1 + gOpacity * 0.35})` : 'none'
-  ```
-- At zoom 5 (gOpacity=1): flat map gets `brightness(1.35)` — matches the globe's lift
-- At zoom 6 (gOpacity≈0.33): flat map gets `brightness(1.12)` — gentle boost
-- At zoom 6.5+ (gOpacity=0): flat map is normal `brightness(1)` — no change
-- This is GPU-accelerated via CSS compositing, no pixel processing needed
-
----
-
-## Change 5: Reposition Control Buttons for Mobile Edge
-
-**File:** `src/screens/MapScreen/MapScreen.module.css`
-
-**Fix:**
-- Change `.controls` from `right: var(--space-3)` to `right: var(--space-2)` (closer to edge)
-- Add mobile media query `@media (max-width: 480px)`:
-  - `right: 8px` — snug to screen edge
-  - `bottom: calc(var(--ec-nav-height) + 16px)` — slightly less space above nav
-  - Slightly increase `gap` to `var(--space-3)` to prevent accidental adjacent button presses
-
----
-
-## Change 6: Trim Debug Panel to Essential Info
-
-**File:** `src/screens/MapScreen/MapScreen.tsx` (line ~2040–2097)
-
-**Currently shows (~30 lines):** Mode, Zoom+TileZ, Globe/Flat alpha, Transition explanation, Camera Z, Pointer target, Alignment (flat center, deg/px globe & flat, ratio, arc), Texture (tex zoom, UV, material, tiles, ready), Scene (atmos, frames, segments), Globe Source (center, raw rotation, formula), Active Location (dot, GPS), Sync (delta), Flat Map (draw time, skip, debounce), Lakes (toggle, count, types, vertices, top 3)
-
-**Trim to (~8 lines):**
-- **Line 1:** `Mode: GLOBE | Zoom: 3.20 | Tile Z: 3`
-- **Line 2:** `Globe α: 1.00 · Flat α: 0.00`
-- **Line 3:** `Center: 39.8597°, -105.2230°`
-- **Line 4:** `── Lakes ──`
-- **Line 5:** `Toggle: ON · Count: 47`
-- **Line 6:** `Types: lake:32 reservoir:15`
-- **Line 7:** `── Rivers ──`
-- **Line 8:** River count / status if available
-
-**Remove everything else:** Camera Z, Pointer routing, Alignment section, Texture section, Scene section, Globe Source section, Active Location, Sync deltas, Flat Map stats, formula notes. These are dev-only diagnostics that aren't needed for regular use.
-
----
+**CSS:**
+- Track: `background: rgba(255, 255, 255, 0.15)`, 4px wide, rounded
+- Thumb: `background: white`, `border: 2px solid var(--ec-glow)`, `box-shadow: glow`
+- No labels needed — +/− buttons above and below are self-explanatory
+- Delete all the old `.zoomSlider`, `::-webkit-slider-*`, `::-moz-range-*` CSS rules
 
 ## Files Modified
-1. `src/screens/MapScreen/MapScreen.tsx` — Changes 1, 2 (minor), 3, 4, 6
-2. `src/screens/MapScreen/MapScreen.module.css` — Changes 2, 5
+1. `src/screens/MapScreen/MapScreen.tsx` — All 3 changes
+2. `src/screens/MapScreen/MapScreen.module.css` — Slider CSS
 
 ## Order of Implementation
-
-| Step | Change | Impact |
-|------|--------|--------|
-| 1 | Fix pinch-to-zoom (Change 1) | **Critical** — biggest pain point |
-| 2 | Atmosphere edge halo (Change 3) | **High** — immediate visual improvement |
-| 3 | Zoom slider visibility (Change 2) | **High** — currently unusable |
-| 4 | Zoom 6 brightness (Change 4) | **Medium** — transition polish |
-| 5 | Button positioning (Change 5) | **Medium** — ergonomics |
-| 6 | Debug panel trim (Change 6) | **Medium** — cleanup |
-
-## Testing
-- `npm run dev` → test on phone or Chrome DevTools mobile emulation
-- Verify: pinch-to-zoom doesn't rotate the globe
-- Verify: zoom slider track is visible and thumb is grabbable on mobile
-- Verify: globe surface has full-contrast terrain with thin edge glow only
-- Verify: zoom 5→7 transition doesn't go dark
-- Verify: debug panel is compact (~8 lines)
-- `npm run type-check` and `npm run build` for no regressions
+1. Atmosphere → Fresnel BackSide mesh (biggest visual impact)
+2. Custom vertical slider (most visible UX fix)
+3. Widen zoom transition (smoothness)
