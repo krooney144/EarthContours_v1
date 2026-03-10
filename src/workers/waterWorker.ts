@@ -392,73 +392,108 @@ out geom;`
   return { result, fromCache: false, fetchMs }
 }
 
-// ─── Concurrency-Limited Tile Fetcher ───────────────────────────────────────
+// ─── Global Concurrency-Limited Queue ────────────────────────────────────────
+// Single queue shared across all fetch-tiles messages. This prevents
+// multiple concurrent fetchAllTiles batches from hammering Overpass.
 
-async function fetchAllTiles(
-  tiles: WaterTileRequest[],
-  generation: number,
-): Promise<void> {
-  let completed = 0
-  let cached = 0
-  let fetched = 0
-  let totalFetchMs = 0
-  let totalLakes = 0
-  let totalRivers = 0
+interface QueueItem {
+  tile: WaterTileRequest
+  generation: number
+}
 
-  // Process tiles with concurrency limit
-  const queue = [...tiles]
-  const active: Promise<void>[] = []
+const globalQueue: QueueItem[] = []
+let activeWorkers = 0
+let currentGeneration = 0
 
-  const processNext = async (): Promise<void> => {
-    while (queue.length > 0) {
-      const tile = queue.shift()!
-      try {
-        const { result, fromCache, fetchMs } = await fetchTile(tile)
-        completed++
-        if (fromCache) cached++
-        else { fetched++; totalFetchMs += fetchMs }
-        totalLakes += result.lakes.length
-        totalRivers += result.rivers.length
+// Stats tracked per generation
+const genStats = new Map<number, {
+  totalTiles: number; completed: number; cached: number; fetched: number;
+  totalFetchMs: number; totalLakes: number; totalRivers: number
+}>()
 
-        self.postMessage({
-          type: 'tile-result',
-          key: tile.key,
-          lakes: result.lakes,
-          rivers: result.rivers,
-          fromCache,
-          fetchMs: Math.round(fetchMs),
-          generation,
-        })
-      } catch (err) {
-        completed++
-        self.postMessage({
-          type: 'error',
-          key: tile.key,
-          error: String(err),
-          generation,
-        })
+function ensureGenStats(gen: number, totalTiles: number) {
+  if (!genStats.has(gen)) {
+    genStats.set(gen, {
+      totalTiles, completed: 0, cached: 0, fetched: 0,
+      totalFetchMs: 0, totalLakes: 0, totalRivers: 0,
+    })
+  }
+}
+
+async function processQueue(): Promise<void> {
+  while (globalQueue.length > 0) {
+    const item = globalQueue.shift()!
+    const { tile, generation } = item
+    const stats = genStats.get(generation)
+
+    try {
+      const { result, fromCache, fetchMs } = await fetchTile(tile)
+
+      if (stats) {
+        stats.completed++
+        if (fromCache) stats.cached++
+        else { stats.fetched++; stats.totalFetchMs += fetchMs }
+        stats.totalLakes += result.lakes.length
+        stats.totalRivers += result.rivers.length
       }
+
+      self.postMessage({
+        type: 'tile-result',
+        key: tile.key,
+        lakes: result.lakes,
+        rivers: result.rivers,
+        fromCache,
+        fetchMs: Math.round(fetchMs),
+        generation,
+      })
+    } catch (err) {
+      if (stats) stats.completed++
+
+      // Send empty result so main thread marks tile as loaded (prevents re-request storm)
+      self.postMessage({
+        type: 'tile-result',
+        key: tile.key,
+        lakes: [],
+        rivers: [],
+        fromCache: false,
+        fetchMs: 0,
+        generation,
+        error: String(err),
+      })
+    }
+
+    // Check if this generation's batch is complete
+    if (stats && stats.completed >= stats.totalTiles) {
+      self.postMessage({
+        type: 'all-complete',
+        generation,
+        stats: {
+          totalTiles: stats.totalTiles,
+          cached: stats.cached,
+          fetched: stats.fetched,
+          totalFetchMs: Math.round(stats.totalFetchMs),
+          totalLakes: stats.totalLakes,
+          totalRivers: stats.totalRivers,
+        },
+      })
+      genStats.delete(generation)
     }
   }
 
-  // Launch MAX_CONCURRENT workers
-  for (let i = 0; i < Math.min(MAX_CONCURRENT, tiles.length); i++) {
-    active.push(processNext())
-  }
-  await Promise.all(active)
+  activeWorkers--
+}
 
-  self.postMessage({
-    type: 'all-complete',
-    generation,
-    stats: {
-      totalTiles: tiles.length,
-      cached,
-      fetched,
-      totalFetchMs: Math.round(totalFetchMs),
-      totalLakes,
-      totalRivers,
-    },
-  })
+function enqueueTiles(tiles: WaterTileRequest[], generation: number) {
+  ensureGenStats(generation, tiles.length)
+  for (const tile of tiles) {
+    globalQueue.push({ tile, generation })
+  }
+
+  // Start workers up to MAX_CONCURRENT
+  while (activeWorkers < MAX_CONCURRENT && globalQueue.length > 0) {
+    activeWorkers++
+    processQueue()
+  }
 }
 
 // ─── Message Handler ────────────────────────────────────────────────────────
@@ -471,6 +506,7 @@ self.onmessage = (e: MessageEvent) => {
       tiles: WaterTileRequest[]
       generation: number
     }
-    fetchAllTiles(tiles, generation)
+    currentGeneration = generation
+    enqueueTiles(tiles, generation)
   }
 }

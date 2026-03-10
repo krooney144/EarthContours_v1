@@ -110,18 +110,21 @@ export class WaterTileManager {
 
       // Accept results from ANY generation — tiles are immutable 1° grid cells
       if (type === 'tile-result') {
-        const { key, lakes, rivers, fromCache, fetchMs } = e.data
+        const { key, lakes, rivers, fromCache, fetchMs, error } = e.data
         this.tileData.set(key, { lakes, rivers })
         this.pendingKeys.delete(key)
         this.stats.pendingTiles = this.pendingKeys.size
 
-        if (fromCache) this.stats.cached++
-        else {
+        if (error) {
+          log.warn('Water tile failed (empty result cached)', { key, error })
+        } else if (fromCache) {
+          this.stats.cached++
+          log.debug('Water tile received', { key, lakes: lakes.length, rivers: rivers.length, fromCache })
+        } else {
           this.stats.fetched++
           this.stats.totalFetchMs += fetchMs
+          log.debug('Water tile received', { key, lakes: lakes.length, rivers: rivers.length, fetchMs })
         }
-
-        log.debug('Water tile received', { key, lakes: lakes.length, rivers: rivers.length, fromCache, fetchMs })
 
         // Emit merged results for all visible tiles so far
         this.emitMerged()
@@ -136,11 +139,6 @@ export class WaterTileManager {
           rivers: workerStats.totalRivers,
         })
         this.emitMerged()
-      } else if (type === 'error') {
-        const { key, error } = e.data
-        this.pendingKeys.delete(key)
-        this.stats.pendingTiles = this.pendingKeys.size
-        log.warn('Water tile error', { key, error })
       }
     }
 
