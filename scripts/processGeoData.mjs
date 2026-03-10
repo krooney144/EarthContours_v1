@@ -1,37 +1,46 @@
 /**
- * Download Natural Earth 10m GeoJSON data files.
+ * Download Natural Earth GeoJSON data files (v5.1.2).
  *
- * Source: https://github.com/martynafford/natural-earth-geojson
- * License: CC0 (public domain)
+ * Source: https://github.com/nvkelso/natural-earth-vector (official repo)
+ * License: Public domain
  *
- * Downloads three files into /public/geo/:
- *   - rivers.json  (ne_10m_rivers_lake_centerlines)
- *   - lakes.json   (ne_10m_lakes)
- *   - glaciers.json (ne_10m_glaciated_areas)
+ * Downloads 6 files into /public/geo/:
+ *   - rivers.json             (ne_10m_rivers_lake_centerlines)
+ *   - lakes.json              (ne_10m_lakes)
+ *   - glaciers.json           (ne_10m_glaciated_areas)
+ *   - coastline.json          (ne_10m_coastline)
+ *   - ocean.json              (ne_50m_ocean)
+ *   - antarctic_ice_shelves.json (ne_10m_antarctic_ice_shelves_polys)
  *
  * Usage: node scripts/processGeoData.mjs
+ *        node scripts/processGeoData.mjs --force   (re-download all)
  */
 
-import { writeFileSync, existsSync } from 'node:fs'
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const GEO_DIR = join(__dirname, '..', 'public', 'geo')
 
-const BASE_URL = 'https://raw.githubusercontent.com/martynafford/natural-earth-geojson/master/10m/physical'
+const BASE_URL = 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson'
 
 const FILES = [
-  { remote: 'ne_10m_rivers_lake_centerlines.json', local: 'rivers.json' },
-  { remote: 'ne_10m_lakes.json',                   local: 'lakes.json' },
-  { remote: 'ne_10m_glaciated_areas.json',         local: 'glaciers.json' },
+  { remote: 'ne_10m_rivers_lake_centerlines.geojson', local: 'rivers.json' },
+  { remote: 'ne_10m_lakes.geojson',                   local: 'lakes.json' },
+  { remote: 'ne_10m_glaciated_areas.geojson',          local: 'glaciers.json' },
+  { remote: 'ne_10m_coastline.geojson',                local: 'coastline.json' },
+  { remote: 'ne_50m_ocean.geojson',                    local: 'ocean.json' },
+  { remote: 'ne_10m_antarctic_ice_shelves_polys.geojson', local: 'antarctic_ice_shelves.json' },
 ]
+
+const force = process.argv.includes('--force')
 
 async function download(remote, local) {
   const outPath = join(GEO_DIR, local)
 
-  if (existsSync(outPath)) {
-    console.log(`  ✓ ${local} already exists, skipping`)
+  if (!force && existsSync(outPath)) {
+    console.log(`  ✓ ${local} already exists, skipping (use --force to re-download)`)
     return
   }
 
@@ -51,8 +60,10 @@ async function download(remote, local) {
 }
 
 async function main() {
-  console.log('Natural Earth 10m GeoJSON downloader')
+  console.log('Natural Earth GeoJSON downloader (v5.1.2 from nvkelso/natural-earth-vector)')
   console.log(`Output: ${GEO_DIR}\n`)
+
+  mkdirSync(GEO_DIR, { recursive: true })
 
   for (const { remote, local } of FILES) {
     await download(remote, local)
