@@ -533,7 +533,7 @@ function computeScaleBar(
 const MapScreen: React.FC = () => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
   const { peaks, waterBodies, rivers, meshData, activeRegion, setWaterBodies, setRivers } = useTerrainStore()
-  const { coordFormat, showPeakLabels, showWaterLabels, units } = useSettingsStore()
+  const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, units } = useSettingsStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const globeCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -925,7 +925,7 @@ const MapScreen: React.FC = () => {
     // z7-8: top 15 largest lakes only
     // z9-10: top 30 lakes
     // z11+: all lakes (max 50)
-    if (showWaterLabels && waterBodies.length > 0 && tileZoom >= 7) {
+    if (showLakes && waterBodies.length > 0 && tileZoom >= 7) {
       const maxLakes = tileZoom <= 8 ? 15 : tileZoom <= 10 ? 30 : 50
       // Min polygon points filter — skip tiny polygons at low zoom
       const minPts = tileZoom <= 9 ? 10 : 4
@@ -983,7 +983,7 @@ const MapScreen: React.FC = () => {
     // ── River lines (progressive by zoom) ─────────────────────────────────
     // z9-11: rivers only (no streams), max 40
     // z12+: rivers + streams, max 80
-    if (showWaterLabels && rivers.length > 0 && tileZoom >= 9) {
+    if (showRiversSetting && rivers.length > 0 && tileZoom >= 9) {
       const showStreams = tileZoom >= 12
       const maxRivers = showStreams ? 80 : 40
 
@@ -1124,7 +1124,7 @@ const MapScreen: React.FC = () => {
 
     setIsLoading(false)
     log.debug('DEM map draw complete')
-  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, rivers, showWaterLabels, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
+  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, rivers, showLakes, showRiversSetting, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
 
   // ── Resize observer ──────────────────────────────────────────────────────────
 
@@ -1179,7 +1179,7 @@ const MapScreen: React.FC = () => {
 
   // Request tiles based on viewport — debounced via rounded center
   useEffect(() => {
-    if (!showWaterLabels) return
+    if (!showLakes && !showRiversSetting) return
 
     // Compute viewport bounds with some padding (1.5× viewport for prefetch)
     const viewW = canvasRef.current?.clientWidth || 400
@@ -1192,7 +1192,7 @@ const MapScreen: React.FC = () => {
 
     waterManagerRef.current.requestTiles(se.lat, nw.lng, nw.lat, se.lng)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2), Math.round(zoom)])
+  }, [showLakes, showRiversSetting, Math.round(centerLat * 2), Math.round(centerLng * 2), Math.round(zoom)])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
 
@@ -2321,7 +2321,7 @@ const MapScreen: React.FC = () => {
             <strong>Scale ({SCALE_KM}km)</strong><br />
             Globe: {globePx300.toFixed(0)}px · Flat: {flatPx300.toFixed(0)}px · Ratio: {flatPx300 > 0 ? (globePx300 / flatPx300).toFixed(2) : '—'}×<br />
             <strong>Water (tiled worker)</strong><br />
-            {showWaterLabels ? 'ON' : 'OFF'} · Lakes: {waterBodies.length} · Rivers: {rivers.length}<br />
+            Lakes: {showLakes ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {showRiversSetting ? 'ON' : 'OFF'} ({rivers.length})<br />
             {waterStats && <>
               Tiles: {waterStats.totalTiles} ({waterStats.cached} cached, {waterStats.fetched} fetched{waterStats.pendingTiles > 0 ? `, ${waterStats.pendingTiles} pending` : ''})<br />
               {waterStats.fetched > 0 && <>Overpass: {waterStats.totalFetchMs}ms · </>}

@@ -13,7 +13,7 @@
  * All elevations stored in METERS.
  */
 
-import type { Peak, River } from '../core/types'
+import type { Peak } from '../core/types'
 
 // ─── Colorado Rockies Peaks ───────────────────────────────────────────────────
 
@@ -103,60 +103,3 @@ export const CASCADES_PEAKS: Peak[] = [
   { id: 'mt-mcloughlin',   name: 'Mt. McLoughlin',   lat: 42.4461, lng: -122.3164, elevation_m: 2894 },
 ]
 
-// ─── Colorado Rivers ──────────────────────────────────────────────────────────
-
-export const COLORADO_RIVERS: River[] = [
-  {
-    id: 'boulder-creek',
-    name: 'Boulder Creek',
-    points: [
-      { lat: 40.0150, lng: -105.5500 },
-      { lat: 40.0100, lng: -105.3800 },
-      { lat: 40.0100, lng: -105.2800 },
-      { lat: 40.0150, lng: -105.2500 },
-    ],
-  },
-  {
-    id: 'arkansas-river',
-    name: 'Arkansas River',
-    points: [
-      { lat: 39.3400, lng: -106.1500 },
-      { lat: 38.8500, lng: -106.1000 },
-      { lat: 38.5000, lng: -105.9000 },
-      { lat: 38.3000, lng: -105.6000 },
-    ],
-  },
-  {
-    id: 'south-platte',
-    name: 'South Platte River',
-    points: [
-      { lat: 39.5000, lng: -106.0000 },
-      { lat: 39.4000, lng: -105.7000 },
-      { lat: 39.3500, lng: -105.3500 },
-    ],
-  },
-]
-
-// ─── Alaska Rivers ────────────────────────────────────────────────────────────
-
-export const ALASKA_RIVERS: River[] = [
-  {
-    id: 'matanuska-river',
-    name: 'Matanuska River',
-    points: [
-      { lat: 61.7500, lng: -148.2000 },
-      { lat: 61.5500, lng: -148.5000 },
-      { lat: 61.4500, lng: -149.0000 },
-    ],
-  },
-  {
-    id: 'susitna-river',
-    name: 'Susitna River',
-    points: [
-      { lat: 62.5000, lng: -150.5000 },
-      { lat: 62.0000, lng: -150.2000 },
-      { lat: 61.5000, lng: -150.5000 },
-      { lat: 61.2000, lng: -150.3000 },
-    ],
-  },
-]

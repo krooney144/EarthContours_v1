@@ -238,20 +238,28 @@ const SettingsScreen: React.FC = () => {
               onChange={settings.togglePeakLabels}
             />
           </Row>
-          <Row label="River Labels" description="Show river and stream names">
+          <Row label="Rivers" description="Show rivers and streams on map">
             <Toggle
               id="toggle-rivers"
-              label="Toggle river labels"
-              checked={settings.showRiverLabels}
-              onChange={settings.toggleRiverLabels}
+              label="Toggle rivers"
+              checked={settings.showRivers}
+              onChange={settings.toggleRivers}
             />
           </Row>
-          <Row label="Water Body Labels" description="Show lake and reservoir names">
+          <Row label="Lakes" description="Show lakes and reservoirs on map">
             <Toggle
-              id="toggle-water"
-              label="Toggle water labels"
-              checked={settings.showWaterLabels}
-              onChange={settings.toggleWaterLabels}
+              id="toggle-lakes"
+              label="Toggle lakes"
+              checked={settings.showLakes}
+              onChange={settings.toggleLakes}
+            />
+          </Row>
+          <Row label="Glaciers" description="Show glaciated areas on map">
+            <Toggle
+              id="toggle-glaciers"
+              label="Toggle glaciers"
+              checked={settings.showGlaciers}
+              onChange={settings.toggleGlaciers}
             />
           </Row>
           <Row label="Town Labels" description="Show cities and towns (off by default)">

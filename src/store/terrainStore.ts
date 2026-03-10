@@ -17,12 +17,12 @@
  */
 
 import { create } from 'zustand'
-import type { Peak, River, WaterBody, TerrainMeshData, LoadingState, Region } from '../core/types'
+import type { Peak, River, WaterBody, Glacier, TerrainMeshData, LoadingState, Region } from '../core/types'
 import { createLogger } from '../core/logger'
 import { TerrainLoadError } from '../core/errors'
 import { loadRegionElevation } from '../data/elevationLoader'
 import { generateSimulatedTerrain } from '../data/simulatedTerrain'
-import { COLORADO_PEAKS, ALASKA_PEAKS, COLORADO_RIVERS, ALASKA_RIVERS } from '../data/simulatedData'
+import { COLORADO_PEAKS, ALASKA_PEAKS } from '../data/simulatedData'
 import { REGIONS } from '../data/regions'
 import { TERRAIN_GRID_SIZE, ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../core/constants'
 
@@ -35,6 +35,7 @@ interface TerrainStore {
   peaks: Peak[]
   rivers: River[]
   waterBodies: WaterBody[]
+  glaciers: Glacier[]
   meshData: TerrainMeshData | null
   contourElevations: number[]
   loadingState: LoadingState
@@ -47,6 +48,7 @@ interface TerrainStore {
   setActiveRegion: (region: Region) => void
   setWaterBodies: (waterBodies: WaterBody[]) => void
   setRivers: (rivers: River[]) => void
+  setGlaciers: (glaciers: Glacier[]) => void
 }
 
 // ─── Store Implementation ─────────────────────────────────────────────────────
@@ -56,6 +58,7 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
   peaks: [],
   rivers: [],
   waterBodies: [],
+  glaciers: [],
   meshData: null,
   contourElevations: [],
   loadingState: 'idle',
@@ -82,14 +85,13 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
     set({ loadingState: 'loading', loadingProgress: 0, loadingMessage: `Loading ${region.name}...`, activeRegion: region })
 
     try {
-      // ── Phase 1: Peak & river data ─────────────────────────────────────────
+      // ── Phase 1: Peak data ────────────────────────────────────────────────
       set({ loadingProgress: 5, loadingMessage: 'Loading peak data...' })
       const peaks =
         regionId === 'colorado-rockies' ? COLORADO_PEAKS :
         ALASKA_PEAKS
-      const rivers = regionId === 'colorado-rockies' ? COLORADO_RIVERS : ALASKA_RIVERS
-      log.info('Peak/river data loaded', { peaks: peaks.length, rivers: rivers.length })
-      set({ peaks, rivers, waterBodies: [], loadingProgress: 15 })
+      log.info('Peak data loaded', { peaks: peaks.length })
+      set({ peaks, loadingProgress: 15 })
 
       // ── Phase 2: Real elevation data (AWS Terrarium with fallback) ─────────
       let elevations: Float32Array | null = null
@@ -195,6 +197,11 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
   setRivers: (rivers) => {
     log.info('Rivers set', { count: rivers.length })
     set({ rivers })
+  },
+
+  setGlaciers: (glaciers) => {
+    log.info('Glaciers set', { count: glaciers.length })
+    set({ glaciers })
   },
 }))
 
