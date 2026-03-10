@@ -30,7 +30,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
-import { useLocationStore, useTerrainStore, useSettingsStore } from '../../store'
+import { useLocationStore, useTerrainStore, useSettingsStore, useUIStore } from '../../store'
 import { createLogger } from '../../core/logger'
 import {
   DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM,
@@ -531,8 +531,9 @@ function computeScaleBar(
 
 const MapScreen: React.FC = () => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
-  const { peaks, waterBodies, rivers, glaciers, coastlines, meshData, activeRegion, setWaterBodies, setRivers, setGlaciers, setCoastlines } = useTerrainStore()
+  const { peaks, waterBodies, rivers, glaciers, coastlines, meshData, activeRegion, isCustomBounds, setWaterBodies, setRivers, setGlaciers, setCoastlines, loadCustomBounds } = useTerrainStore()
   const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, showGlaciers, showCoastlines, units } = useSettingsStore()
+  const { navigateTo } = useUIStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const globeCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -850,7 +851,7 @@ const MapScreen: React.FC = () => {
         ctx.textAlign = 'left'
         ctx.shadowColor = 'rgba(132, 209, 219, 0.7)'
         ctx.shadowBlur  = 6
-        ctx.fillText('▣ ' + activeRegion.name.toUpperCase(), rx + 6, ry + 15)
+        ctx.fillText('▣ 3D EXPLORE VIEW', rx + 6, ry + 15)
         ctx.restore()
       }
     }
@@ -2298,16 +2299,21 @@ const MapScreen: React.FC = () => {
                 className={`${styles.controlBtn} ${styles.selectionActionBtn} ${selectionSeverity === 'danger' ? styles.selectionActionDisabled : ''}`}
                 onClick={() => {
                   if (selectionSeverity === 'danger') return
-                  log.info('Explore area selected', {
-                    start: `${selectionStart.lat.toFixed(4)},${selectionStart.lng.toFixed(4)}`,
-                    end: `${selectionEnd.lat.toFixed(4)},${selectionEnd.lng.toFixed(4)}`,
+                  const bounds = {
+                    north: Math.max(selectionStart.lat, selectionEnd.lat),
+                    south: Math.min(selectionStart.lat, selectionEnd.lat),
+                    east:  Math.max(selectionStart.lng, selectionEnd.lng),
+                    west:  Math.min(selectionStart.lng, selectionEnd.lng),
+                  }
+                  log.info('Explore area selected — loading custom bounds', {
+                    north: bounds.north.toFixed(4), south: bounds.south.toFixed(4),
+                    east: bounds.east.toFixed(4), west: bounds.west.toFixed(4),
                     dims: `${selectionDims.widthKm.toFixed(0)}×${selectionDims.heightKm.toFixed(0)} km`,
-                    tiles: selectionDims.tileCount,
                   })
-                  // TODO: Load selected bounds in EXPLORE screen —
-                  // create a dynamic region from selectionStart/selectionEnd,
-                  // call terrainStore.loadRegion() with the custom bounds,
-                  // then navigate to the explore screen via uiStore.setActiveScreen('explore').
+                  // Start loading custom bounds and navigate to EXPLORE
+                  loadCustomBounds(bounds)
+                  navigateTo('explore')
+                  setIsSelectingArea(false)
                 }}
                 aria-label="Open selected area in Explore 3D view"
                 disabled={selectionSeverity === 'danger'}
@@ -2404,7 +2410,25 @@ const MapScreen: React.FC = () => {
             <strong>Scale ({SCALE_KM}km)</strong><br />
             Globe: {globePx300.toFixed(0)}px · Flat: {flatPx300.toFixed(0)}px · Ratio: {flatPx300 > 0 ? (globePx300 / flatPx300).toFixed(2) : '—'}×<br />
             <strong>Natural Earth</strong><br />
-            Lakes: {showLakes ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {showRiversSetting ? 'ON' : 'OFF'} ({rivers.length}) · Glaciers: {showGlaciers ? 'ON' : 'OFF'} ({glaciers.length}) · Coast: {showCoastlines ? 'ON' : 'OFF'} ({coastlines.length})
+            Lakes: {showLakes ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {showRiversSetting ? 'ON' : 'OFF'} ({rivers.length}) · Glaciers: {showGlaciers ? 'ON' : 'OFF'} ({glaciers.length}) · Coast: {showCoastlines ? 'ON' : 'OFF'} ({coastlines.length})<br />
+            <strong>Selection Area</strong><br />
+            {selectionStart && selectionEnd ? (() => {
+              const n = Math.max(selectionStart.lat, selectionEnd.lat)
+              const s = Math.min(selectionStart.lat, selectionEnd.lat)
+              const e = Math.max(selectionStart.lng, selectionEnd.lng)
+              const w = Math.min(selectionStart.lng, selectionEnd.lng)
+              return <>
+                NW: {n.toFixed(4)}°, {w.toFixed(4)}°<br />
+                NE: {n.toFixed(4)}°, {e.toFixed(4)}°<br />
+                SE: {s.toFixed(4)}°, {e.toFixed(4)}°<br />
+                SW: {s.toFixed(4)}°, {w.toFixed(4)}°<br />
+                {selectionDims && <>Size: {selectionDims.widthKm.toFixed(1)} × {selectionDims.heightKm.toFixed(1)} km</>}
+              </>
+            })() : 'No selection drawn'}<br />
+            <strong>Loaded Region</strong><br />
+            {activeRegion ? <>
+              {isCustomBounds ? 'Custom' : activeRegion.id}: {activeRegion.bounds.north.toFixed(4)}°N, {activeRegion.bounds.south.toFixed(4)}°S, {activeRegion.bounds.east.toFixed(4)}°E, {activeRegion.bounds.west.toFixed(4)}°W
+            </> : 'None'}
           </div>
         )
       })()}

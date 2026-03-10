@@ -20,9 +20,10 @@ import { create } from 'zustand'
 import type { Peak, River, WaterBody, Glacier, Coastline, TerrainMeshData, LoadingState, Region } from '../core/types'
 import { createLogger } from '../core/logger'
 import { TerrainLoadError } from '../core/errors'
-import { loadRegionElevation } from '../data/elevationLoader'
+import { loadRegionElevation, adaptiveZoomForArea } from '../data/elevationLoader'
 import { generateSimulatedTerrain } from '../data/simulatedTerrain'
 import { COLORADO_PEAKS, ALASKA_PEAKS } from '../data/simulatedData'
+import { fetchPeaksInBounds } from '../data/peakLoader'
 import { REGIONS } from '../data/regions'
 import { TERRAIN_GRID_SIZE, ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../core/constants'
 
@@ -44,8 +45,13 @@ interface TerrainStore {
   loadingMessage: string
   /** Whether the current elevation data is real (AWS/local) vs simulated */
   isRealElevation: boolean
+  /** The tile zoom level used for the current terrain load */
+  terrainZoom: number
+  /** Whether the current region was user-drawn (custom bounds) vs predefined */
+  isCustomBounds: boolean
 
   loadRegion: (regionId: string) => Promise<void>
+  loadCustomBounds: (bounds: { north: number; south: number; east: number; west: number }) => Promise<void>
   setActiveRegion: (region: Region) => void
   setWaterBodies: (waterBodies: WaterBody[]) => void
   setRivers: (rivers: River[]) => void
@@ -68,6 +74,8 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
   loadingProgress: 0,
   loadingMessage: '',
   isRealElevation: false,
+  terrainZoom: 10,
+  isCustomBounds: false,
 
   loadRegion: async (regionId) => {
     log.info('Loading terrain region', { regionId })
@@ -85,7 +93,7 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
       return
     }
 
-    set({ loadingState: 'loading', loadingProgress: 0, loadingMessage: `Loading ${region.name}...`, activeRegion: region })
+    set({ loadingState: 'loading', loadingProgress: 0, loadingMessage: `Loading ${region.name}...`, activeRegion: region, isCustomBounds: false })
 
     try {
       // ── Phase 1: Peak data ────────────────────────────────────────────────
@@ -171,6 +179,7 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
         meshData,
         contourElevations,
         isRealElevation,
+        terrainZoom: 10,
         loadingState: 'success',
         loadingProgress: 100,
         loadingMessage: isRealElevation
@@ -183,6 +192,141 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
     } catch (err) {
       const loadError = new TerrainLoadError(regionId, err)
       log.error('Region load FAILED', { regionId, error: loadError })
+      set({ loadingState: 'error', loadingMessage: loadError.message, loadingProgress: 0 })
+    }
+  },
+
+  loadCustomBounds: async (bounds) => {
+    const { north, south, east, west } = bounds
+    const midLat = (north + south) / 2
+    const midLng = (east + west) / 2
+
+    // Calculate area dimensions for adaptive zoom
+    const heightKm = (north - south) * 111.132
+    const widthKm = (east - west) * 111.320 * Math.cos((midLat * Math.PI) / 180)
+    const maxSideKm = Math.max(widthKm, heightKm)
+    const tileZoom = adaptiveZoomForArea(maxSideKm)
+
+    log.info('Loading custom bounds', {
+      north: north.toFixed(4), south: south.toFixed(4),
+      east: east.toFixed(4), west: west.toFixed(4),
+      widthKm: widthKm.toFixed(1), heightKm: heightKm.toFixed(1),
+      tileZoom,
+    })
+
+    // Create a dynamic Region object for the custom bounds
+    const customRegion: Region = {
+      id: `custom-${Date.now()}`,
+      name: '3D Explore View',
+      description: `Custom area: ${widthKm.toFixed(0)} × ${heightKm.toFixed(0)} km`,
+      center: { lat: midLat, lng: midLng },
+      bounds,
+    }
+
+    set({
+      loadingState: 'loading',
+      loadingProgress: 0,
+      loadingMessage: 'Loading custom area...',
+      activeRegion: customRegion,
+      isCustomBounds: true,
+      terrainZoom: tileZoom,
+    })
+
+    try {
+      // ── Phase 1: Fetch OSM peaks for the selected bounds ────────────────
+      set({ loadingProgress: 3, loadingMessage: 'Fetching peak data...' })
+      let peaks: Peak[] = []
+      try {
+        peaks = await fetchPeaksInBounds(south, west, north, east)
+        log.info('OSM peaks loaded for custom bounds', { count: peaks.length })
+      } catch (peakErr) {
+        log.warn('OSM peak fetch failed for custom bounds', { err: String(peakErr) })
+      }
+      set({ peaks, loadingProgress: 12 })
+
+      // ── Phase 2: Real elevation data with adaptive zoom ─────────────────
+      let elevations: Float32Array | null = null
+      let isRealElevation = false
+
+      set({ loadingMessage: `Fetching z${tileZoom} elevation tiles...` })
+
+      try {
+        elevations = await loadRegionElevation(
+          customRegion,
+          TERRAIN_GRID_SIZE,
+          (p) => set({ loadingProgress: 12 + Math.round(p * 65) }),
+          tileZoom,
+        )
+        isRealElevation = true
+        log.info('━━━ TERRAIN SOURCE: REAL (AWS Terrarium DEM tiles) ━━━', {
+          region: customRegion.id, zoom: tileZoom,
+        })
+      } catch (elevErr) {
+        log.warn('━━━ TERRAIN SOURCE: SIMULATED (real data unavailable) ━━━', {
+          region: customRegion.id, reason: elevErr,
+        })
+        set({ loadingMessage: 'Network unavailable — using simulated terrain...' })
+        const simData = await generateSimulatedTerrain(customRegion, (p) => {
+          set({ loadingProgress: 12 + Math.round(p * 65) })
+        })
+        elevations = simData.elevations
+        isRealElevation = false
+      }
+
+      // ── Phase 3: Assemble TerrainMeshData ──────────────────────────────────
+      set({ loadingProgress: 82, loadingMessage: 'Processing elevation grid...' })
+
+      let minElev = Infinity, maxElev = -Infinity
+      for (let i = 0; i < elevations.length; i++) {
+        if (elevations[i] < minElev) minElev = elevations[i]
+        if (elevations[i] > maxElev) maxElev = elevations[i]
+      }
+
+      const lat0 = midLat
+      const worldWidth_km  = (east - west) * ENU_M_PER_DEG_LON_AT_LAT(lat0) / 1000
+      const worldDepth_km  = (north - south) * ENU_M_PER_DEG_LAT / 1000
+
+      log.info('Custom terrain physical dimensions', {
+        worldWidth_km: worldWidth_km.toFixed(1),
+        worldDepth_km: worldDepth_km.toFixed(1),
+        tileZoom,
+        elevRange: `${minElev.toFixed(0)}–${maxElev.toFixed(0)}m`,
+      })
+
+      const meshData: TerrainMeshData = {
+        width: TERRAIN_GRID_SIZE,
+        height: TERRAIN_GRID_SIZE,
+        elevations,
+        minElevation_m: minElev,
+        maxElevation_m: maxElev,
+        worldWidth_km,
+        worldDepth_km,
+        bounds,
+      }
+
+      // ── Phase 4: Contour elevations ────────────────────────────────────────
+      set({ loadingProgress: 90, loadingMessage: 'Calculating contours...' })
+      const contourElevations = calculateContourElevations(minElev, maxElev)
+
+      set({
+        meshData,
+        contourElevations,
+        isRealElevation,
+        loadingState: 'success',
+        loadingProgress: 100,
+        loadingMessage: isRealElevation
+          ? `Custom area — real elevation data (z${tileZoom})`
+          : 'Custom area — simulated terrain',
+      })
+
+      log.info('Custom bounds load COMPLETE', {
+        tileZoom, isRealElevation, peaks: peaks.length,
+        widthKm: worldWidth_km.toFixed(1), heightKm: worldDepth_km.toFixed(1),
+      })
+
+    } catch (err) {
+      const loadError = new TerrainLoadError(customRegion.id, err)
+      log.error('Custom bounds load FAILED', { error: loadError })
       set({ loadingState: 'error', loadingMessage: loadError.message, loadingProgress: 0 })
     }
   },

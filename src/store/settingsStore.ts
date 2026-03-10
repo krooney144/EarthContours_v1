@@ -46,6 +46,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showTownLabels: false,        // Off by default per briefing
   showContourLines: true,
   showBandLines: true,           // Depth band ridgeline strokes in SCAN
+  solidTerrain: true,            // Solid terrain mesh in EXPLORE (off = contour lines only)
   contourAnimation: true,       // Slow pulse on by default
   verticalExaggeration: 4,     // 4× default — real mountains visible without being overwhelming
 
@@ -85,6 +86,7 @@ interface SettingsStore extends AppSettings {
   toggleTownLabels: () => void
   toggleContourLines: () => void
   toggleBandLines: () => void
+  toggleSolidTerrain: () => void
   toggleContourAnimation: () => void
   setVerticalExaggeration: (v: VerticalExaggeration) => void
   setColorTheme: (theme: ColorTheme) => void
@@ -170,6 +172,12 @@ export const useSettingsStore = create<SettingsStore>()(
         const next = !get().showBandLines
         log.info('Band lines toggled', { now: next })
         set({ showBandLines: next })
+      },
+
+      toggleSolidTerrain: () => {
+        const next = !get().solidTerrain
+        log.info('Solid terrain toggled', { now: next })
+        set({ solidTerrain: next })
       },
 
       toggleContourAnimation: () => {
@@ -303,6 +311,7 @@ export const useSettingsStore = create<SettingsStore>()(
         showTownLabels: state.showTownLabels,
         showContourLines: state.showContourLines,
         showBandLines: state.showBandLines,
+        solidTerrain: state.solidTerrain,
         contourAnimation: state.contourAnimation,
         verticalExaggeration: state.verticalExaggeration,
         colorTheme: state.colorTheme,

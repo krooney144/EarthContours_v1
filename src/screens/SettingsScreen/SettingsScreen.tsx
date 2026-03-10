@@ -286,6 +286,14 @@ const SettingsScreen: React.FC = () => {
               onChange={settings.toggleContourLines}
             />
           </Row>
+          <Row label="Solid Terrain" description="Show solid 3D mesh in EXPLORE (off = contour lines only)">
+            <Toggle
+              id="toggle-solid-terrain"
+              label="Toggle solid terrain"
+              checked={settings.solidTerrain}
+              onChange={settings.toggleSolidTerrain}
+            />
+          </Row>
           <Row label="Band Lines" description="Show depth band ridgeline strokes in SCAN view">
             <Toggle
               id="toggle-bandlines"
