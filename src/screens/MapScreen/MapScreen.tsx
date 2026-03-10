@@ -918,11 +918,11 @@ const MapScreen: React.FC = () => {
     }
 
     // ── Water body polygons (Natural Earth, filtered by scalerank + zoom) ────
-    // z7-8: scalerank ≤ 3 (major lakes: Great Lakes, Caspian, etc.)
-    // z9-10: scalerank ≤ 6 (medium lakes)
-    // z11+: all lakes
+    // z7: scalerank ≤ 6 (major + medium lakes)
+    // z8-9: scalerank ≤ 8
+    // z10+: all lakes
     if (showLakes && waterBodies.length > 0 && tileZoom >= 7) {
-      const maxScalerank = tileZoom <= 8 ? 3 : tileZoom <= 10 ? 6 : 99
+      const maxScalerank = tileZoom <= 7 ? 6 : tileZoom <= 9 ? 8 : 99
       const minPts = tileZoom <= 9 ? 10 : 4
 
       for (let wbIdx = 0; wbIdx < waterBodies.length; wbIdx++) {
@@ -966,9 +966,9 @@ const MapScreen: React.FC = () => {
         ctx.lineWidth   = 1
         ctx.stroke()
 
-        // Labels: scalerank ≤ 3 at z9+, all named at z12+. Size scales with zoom.
-        if (wb.name && (tileZoom >= 12 || (tileZoom >= 9 && (wb.scalerank ?? 10) <= 3))) {
-          const fontSize = tileZoom <= 9 ? 9 : tileZoom <= 11 ? 10 : 12
+        // Label whenever the lake is visible — size scales with zoom
+        if (wb.name) {
+          const fontSize = tileZoom <= 8 ? 9 : tileZoom <= 10 ? 10 : 12
           ctx.font      = `${fontSize}px 'Josefin Sans', sans-serif`
           ctx.textAlign = 'center'
           ctx.fillStyle = 'rgba(120, 190, 240, 0.85)'
@@ -978,12 +978,12 @@ const MapScreen: React.FC = () => {
     }
 
     // ── River lines (Natural Earth, filtered by scalerank + zoom) ──────────
-    // z7-8: scalerank ≤ 3 (major rivers: Mississippi, Amazon, Nile, etc.)
-    // z9-10: scalerank ≤ 6 (medium rivers)
-    // z11+: all rivers including streams
+    // z7: scalerank ≤ 6 (major + medium rivers)
+    // z8-9: scalerank ≤ 8
+    // z10+: all rivers including streams
     // Line thickness scales with zoom for visual weight.
     if (showRiversSetting && rivers.length > 0 && tileZoom >= 7) {
-      const maxScalerank = tileZoom <= 8 ? 3 : tileZoom <= 10 ? 6 : 99
+      const maxScalerank = tileZoom <= 7 ? 6 : tileZoom <= 9 ? 8 : 99
 
       ctx.lineJoin    = 'round'
       ctx.lineCap     = 'round'
@@ -1023,26 +1023,23 @@ const MapScreen: React.FC = () => {
         }
         ctx.stroke()
 
-        // Labels: major rivers (scalerank ≤ 3) at z9+, all named at z12+. Size scales with zoom.
+        // Label whenever the river is visible — size scales with zoom
         if (river.name) {
-          const labelZoom = sr <= 3 ? 9 : river.isStream ? 13 : 12
-          if (tileZoom >= labelZoom) {
-            const fontSize = tileZoom <= 9 ? 8 : tileZoom <= 11 ? 9 : 11
-            ctx.font      = `italic ${fontSize}px 'Josefin Sans', sans-serif`
-            ctx.textAlign = 'center'
-            ctx.fillStyle = 'rgba(100, 170, 230, 0.8)'
-            ctx.fillText(river.name, mp.x, mp.y - 4)
-          }
+          const fontSize = tileZoom <= 8 ? 8 : tileZoom <= 10 ? 9 : 11
+          ctx.font      = `italic ${fontSize}px 'Josefin Sans', sans-serif`
+          ctx.textAlign = 'center'
+          ctx.fillStyle = 'rgba(100, 170, 230, 0.8)'
+          ctx.fillText(river.name, mp.x, mp.y - 4)
         }
       }
     }
 
     // ── Glacier polygons (Natural Earth, filtered by scalerank + zoom) ──────
-    // z7-8: scalerank ≤ 1 (ice sheets, major ice caps)
-    // z9-10: scalerank ≤ 3 (large glaciers)
-    // z11+: all glaciers
+    // z7: scalerank ≤ 3 (ice sheets, major ice caps, large glaciers)
+    // z8-9: scalerank ≤ 6
+    // z10+: all glaciers
     if (showGlaciers && glaciers.length > 0 && tileZoom >= 7) {
-      const maxScalerank = tileZoom <= 8 ? 1 : tileZoom <= 10 ? 3 : 99
+      const maxScalerank = tileZoom <= 7 ? 3 : tileZoom <= 9 ? 6 : 99
 
       for (let gIdx = 0; gIdx < glaciers.length; gIdx++) {
         const gl = glaciers[gIdx]
@@ -1081,8 +1078,8 @@ const MapScreen: React.FC = () => {
         ctx.lineWidth   = 0.8
         ctx.stroke()
 
-        // Labels: major glaciers (scalerank ≤ 1) at z9+, all named at z12+
-        if (gl.name && (tileZoom >= 12 || (tileZoom >= 9 && gl.scalerank <= 1))) {
+        // Label whenever the glacier is visible — size scales with zoom
+        if (gl.name) {
           const fontSize = tileZoom <= 9 ? 8 : tileZoom <= 11 ? 9 : 11
           ctx.font      = `${fontSize}px 'Josefin Sans', sans-serif`
           ctx.textAlign = 'center'
