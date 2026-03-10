@@ -81,6 +81,7 @@ export interface River {
   id: string
   name: string
   points: LatLng[]      // Path of the river
+  isStream?: boolean    // true for waterway=stream (smaller waterways)
 }
 
 /** A lake, reservoir, or water body polygon from OSM */

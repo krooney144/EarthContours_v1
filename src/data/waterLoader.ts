@@ -87,6 +87,7 @@ export class WaterTileManager {
   private generation = 0
   private tileData = new Map<string, { lakes: WaterBody[]; rivers: River[] }>()
   private visibleKeys = new Set<string>()
+  private pendingKeys = new Set<string>()
   private callback: TileCallback | null = null
   private stats: WaterTileStats = {
     totalTiles: 0, cached: 0, fetched: 0,
@@ -105,15 +106,14 @@ export class WaterTileManager {
     )
 
     this.worker.onmessage = (e: MessageEvent) => {
-      const { type, generation } = e.data
+      const { type } = e.data
 
-      // Ignore stale generations
-      if (generation !== this.generation) return
-
+      // Accept results from ANY generation — tiles are immutable 1° grid cells
       if (type === 'tile-result') {
         const { key, lakes, rivers, fromCache, fetchMs } = e.data
         this.tileData.set(key, { lakes, rivers })
-        this.stats.pendingTiles--
+        this.pendingKeys.delete(key)
+        this.stats.pendingTiles = this.pendingKeys.size
 
         if (fromCache) this.stats.cached++
         else {
@@ -127,9 +127,6 @@ export class WaterTileManager {
         this.emitMerged()
       } else if (type === 'all-complete') {
         const { stats: workerStats } = e.data
-        this.stats.totalLakes = workerStats.totalLakes
-        this.stats.totalRivers = workerStats.totalRivers
-        this.stats.pendingTiles = 0
         log.info('Water tiles complete', {
           tiles: workerStats.totalTiles,
           cached: workerStats.cached,
@@ -141,7 +138,8 @@ export class WaterTileManager {
         this.emitMerged()
       } else if (type === 'error') {
         const { key, error } = e.data
-        this.stats.pendingTiles--
+        this.pendingKeys.delete(key)
+        this.stats.pendingTiles = this.pendingKeys.size
         log.warn('Water tile error', { key, error })
       }
     }
@@ -161,30 +159,27 @@ export class WaterTileManager {
     const tiles = computeTiles(south, west, north, east)
     this.visibleKeys = new Set(tiles.map(t => t.key))
 
-    // Filter to tiles not already in memory
-    const needed = tiles.filter(t => !this.tileData.has(t.key))
+    // Filter to tiles not already in memory AND not already in-flight
+    const needed = tiles.filter(t => !this.tileData.has(t.key) && !this.pendingKeys.has(t.key))
+
+    // Always emit what we have (visible tiles already cached)
+    this.emitMerged()
 
     if (needed.length === 0) {
-      // All tiles cached in memory — emit immediately
-      this.emitMerged()
       return
     }
 
-    // Bump generation to ignore stale results
+    // Keep same generation — don't invalidate in-flight results.
+    // Tiles are immutable 1° grid cells, so old results are always valid.
     this.generation++
+    for (const t of needed) this.pendingKeys.add(t.key)
+
     this.stats = {
+      ...this.stats,
       totalTiles: tiles.length,
-      cached: tiles.length - needed.length,  // already-in-memory count
-      fetched: 0,
-      totalFetchMs: 0,
-      totalLakes: 0,
-      totalRivers: 0,
-      pendingTiles: needed.length,
+      pendingTiles: this.pendingKeys.size,
       generation: this.generation,
     }
-
-    // Emit what we have now (cached tiles), worker will fill in the rest
-    this.emitMerged()
 
     log.info('Requesting water tiles', {
       total: tiles.length,
@@ -218,6 +213,12 @@ export class WaterTileManager {
     // Sort lakes by polygon size (largest first)
     allLakes.sort((a, b) => b.polygon.length - a.polygon.length)
 
+    // Sort rivers: rivers before streams, then by point count (longest first)
+    allRivers.sort((a, b) => {
+      if (a.isStream !== b.isStream) return a.isStream ? 1 : -1
+      return b.points.length - a.points.length
+    })
+
     // Update total stats
     this.stats.totalLakes = allLakes.length
     this.stats.totalRivers = allRivers.length
@@ -236,6 +237,7 @@ export class WaterTileManager {
     this.worker = null
     this.tileData.clear()
     this.visibleKeys.clear()
+    this.pendingKeys.clear()
   }
 }
 

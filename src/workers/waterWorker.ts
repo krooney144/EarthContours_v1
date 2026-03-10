@@ -45,6 +45,7 @@ interface River {
   id: string
   name: string
   points: LatLng[]
+  isStream?: boolean
 }
 
 interface WaterTileRequest {
@@ -377,7 +378,7 @@ out geom;`
   const stitched = stitchRivers(riverSegments)
   const rivers: River[] = stitched
     .filter(r => !r._isStream || pathLengthM(r.points) >= 2000)
-    .map(({ _isStream: _, ...river }) => river)
+    .map(({ _isStream, ...river }) => ({ ...river, isStream: _isStream || undefined }))
 
   // Sort lakes by polygon size
   lakes.sort((a, b) => b.polygon.length - a.polygon.length)
