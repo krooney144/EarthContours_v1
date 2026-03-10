@@ -921,12 +921,19 @@ const MapScreen: React.FC = () => {
       }
     }
 
-    // ── Water body polygons ──────────────────────────────────────────────────
+    // ── Water body polygons (progressive by zoom) ───────────────────────────
+    // z7-8: top 15 largest lakes only
+    // z9-10: top 30 lakes
+    // z11+: all lakes (max 50)
     if (showWaterLabels && waterBodies.length > 0 && tileZoom >= 7) {
-      for (let wbIdx = 0; wbIdx < Math.min(waterBodies.length, 40); wbIdx++) {
+      const maxLakes = tileZoom <= 8 ? 15 : tileZoom <= 10 ? 30 : 50
+      // Min polygon points filter — skip tiny polygons at low zoom
+      const minPts = tileZoom <= 9 ? 10 : 4
+
+      for (let wbIdx = 0; wbIdx < Math.min(waterBodies.length, maxLakes); wbIdx++) {
         const wb = waterBodies[wbIdx]
         const pts = wb.polygon
-        if (pts.length < 4) continue
+        if (pts.length < minPts) continue
 
         // Quick cull: check if center is remotely near viewport
         const cp = latLngToPixel(wb.center.lat, wb.center.lng, centerLat, centerLng, effZoom, W, H)
@@ -973,15 +980,21 @@ const MapScreen: React.FC = () => {
       }
     }
 
-    // ── River lines ────────────────────────────────────────────────────────
+    // ── River lines (progressive by zoom) ─────────────────────────────────
+    // z9-11: rivers only (no streams), max 40
+    // z12+: rivers + streams, max 80
     if (showWaterLabels && rivers.length > 0 && tileZoom >= 9) {
-      ctx.strokeStyle = 'rgba(50, 120, 200, 0.5)'
-      ctx.lineWidth   = 1.5
+      const showStreams = tileZoom >= 12
+      const maxRivers = showStreams ? 80 : 40
+
       ctx.lineJoin    = 'round'
       ctx.lineCap     = 'round'
 
-      for (let rIdx = 0; rIdx < Math.min(rivers.length, 60); rIdx++) {
+      let drawn = 0
+      for (let rIdx = 0; rIdx < rivers.length && drawn < maxRivers; rIdx++) {
         const river = rivers[rIdx]
+        if (!showStreams && river.isStream) continue
+
         const pts = river.points
         if (pts.length < 2) continue
 
@@ -989,6 +1002,15 @@ const MapScreen: React.FC = () => {
         const midIdx = Math.floor(pts.length / 2)
         const mp = latLngToPixel(pts[midIdx].lat, pts[midIdx].lng, centerLat, centerLng, effZoom, W, H)
         if (mp.x < -500 || mp.x > W + 500 || mp.y < -500 || mp.y > H + 500) continue
+
+        // Streams get thinner, more transparent lines
+        if (river.isStream) {
+          ctx.strokeStyle = 'rgba(50, 120, 200, 0.3)'
+          ctx.lineWidth   = 1
+        } else {
+          ctx.strokeStyle = 'rgba(50, 120, 200, 0.5)'
+          ctx.lineWidth   = 1.5
+        }
 
         ctx.beginPath()
         const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, effZoom, W, H)
@@ -998,9 +1020,11 @@ const MapScreen: React.FC = () => {
           ctx.lineTo(p.x, p.y)
         }
         ctx.stroke()
+        drawn++
 
-        // Label at midpoint at zoom 11+
-        if (river.name && tileZoom >= 11) {
+        // Label at midpoint — rivers at z11+, streams at z13+
+        const labelZoom = river.isStream ? 13 : 11
+        if (river.name && tileZoom >= labelZoom) {
           ctx.font      = `italic 9px 'Josefin Sans', sans-serif`
           ctx.textAlign = 'center'
           ctx.fillStyle = 'rgba(100, 170, 230, 0.8)'
