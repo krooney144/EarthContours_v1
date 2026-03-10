@@ -1133,23 +1133,25 @@ const MapScreen: React.FC = () => {
     }
   }, [drawMap])
 
-  // ── Fetch water features from OSM (lakes + rivers, 300km radius) ────────────
+  // ── Fetch water features from OSM (zoom-dependent radius) ──────────────────
+  // Radius scales with zoom: zoomed out = larger area with just rivers,
+  // zoomed in = smaller area but includes streams. Keeps queries fast (~1-5s).
+
+  const waterRadiusKm = zoom <= 7 ? 200 : zoom <= 9 ? 80 : zoom <= 11 ? 30 : 15
+  const waterRadiusRounded = waterRadiusKm  // stable value per zoom bracket
 
   useEffect(() => {
     if (!showWaterLabels) return
-    let cancelled = false
-    fetchWaterNear(centerLat, centerLng, 300)
+    // Stale-while-revalidate: don't clear old data, just replace when new arrives
+    fetchWaterNear(centerLat, centerLng, waterRadiusRounded)
       .then(({ lakes, rivers: fetchedRivers }) => {
-        if (!cancelled) {
-          setWaterBodies(lakes)
-          setRivers(fetchedRivers)
-          log.info('Water features loaded for MAP', { lakes: lakes.length, rivers: fetchedRivers.length })
-        }
+        setWaterBodies(lakes)
+        setRivers(fetchedRivers)
+        log.info('Water features loaded for MAP', { lakes: lakes.length, rivers: fetchedRivers.length, radiusKm: waterRadiusRounded })
       })
-    return () => { cancelled = true }
-    // Re-fetch when center moves significantly (rounded to 0.5°)
+    // Re-fetch when center moves significantly (rounded to 0.5°) or zoom bracket changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2)])
+  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2), waterRadiusRounded])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
 
