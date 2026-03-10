@@ -42,8 +42,9 @@ import {
   clamp, formatCoordinates, formatDistance,
 } from '../../core/utils'
 import { loadElevationTile } from '../../data/elevationLoader'
-import { fetchWaterNear } from '../../data/waterLoader'
-import type { TileCoord } from '../../core/types'
+import { getWaterTileManager } from '../../data/waterLoader'
+import type { WaterTileStats } from '../../data/waterLoader'
+import type { TileCoord, River } from '../../core/types'
 import styles from './MapScreen.module.css'
 
 const log = createLogger('SCREEN:MAP')
@@ -548,6 +549,9 @@ const MapScreen: React.FC = () => {
   const [globeTilesLoaded, setGlobeTilesLoaded] = useState(0)
   const [globeTilesTotal, setGlobeTilesTotal] = useState(0)
   const [showGlobeDebug, setShowGlobeDebug] = useState(false)
+
+  // Water tile stats (for debug panel)
+  const [waterStats, setWaterStats] = useState<WaterTileStats | null>(null)
 
   // Debug counters
   const globeRenderCountRef = useRef(0)
@@ -1133,25 +1137,38 @@ const MapScreen: React.FC = () => {
     }
   }, [drawMap])
 
-  // ── Fetch water features from OSM (zoom-dependent radius) ──────────────────
-  // Radius scales with zoom: zoomed out = larger area with just rivers,
-  // zoomed in = smaller area but includes streams. Keeps queries fast (~1-5s).
+  // ── Tiled water features via Web Worker ─────────────────────────────────────
+  // Compute viewport bounds → 1° tiles → worker fetches + caches each tile.
+  // Tiles persist in IndexedDB (24h) and in-memory, so panning reuses cached tiles.
 
-  const waterRadiusKm = zoom <= 7 ? 200 : zoom <= 9 ? 80 : zoom <= 11 ? 30 : 15
-  const waterRadiusRounded = waterRadiusKm  // stable value per zoom bracket
+  const waterManagerRef = useRef(getWaterTileManager())
 
   useEffect(() => {
+    const mgr = waterManagerRef.current
+    mgr.onResults((lakes, rivers: River[], stats) => {
+      setWaterBodies(lakes)
+      setRivers(rivers)
+      setWaterStats(stats)
+    })
+    return () => { mgr.onResults(() => {}) }
+  }, [setWaterBodies, setRivers])
+
+  // Request tiles based on viewport — debounced via rounded center
+  useEffect(() => {
     if (!showWaterLabels) return
-    // Stale-while-revalidate: don't clear old data, just replace when new arrives
-    fetchWaterNear(centerLat, centerLng, waterRadiusRounded)
-      .then(({ lakes, rivers: fetchedRivers }) => {
-        setWaterBodies(lakes)
-        setRivers(fetchedRivers)
-        log.info('Water features loaded for MAP', { lakes: lakes.length, rivers: fetchedRivers.length, radiusKm: waterRadiusRounded })
-      })
-    // Re-fetch when center moves significantly (rounded to 0.5°) or zoom bracket changes
+
+    // Compute viewport bounds with some padding (1.5× viewport for prefetch)
+    const viewW = canvasRef.current?.clientWidth || 400
+    const viewH = canvasRef.current?.clientHeight || 700
+    const padX = viewW * 0.25
+    const padY = viewH * 0.25
+
+    const nw = pixelToLatLng(-padX, -padY, centerLat, centerLng, zoom, viewW, viewH)
+    const se = pixelToLatLng(viewW + padX, viewH + padY, centerLat, centerLng, zoom, viewW, viewH)
+
+    waterManagerRef.current.requestTiles(se.lat, nw.lng, nw.lat, se.lng)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2), waterRadiusRounded])
+  }, [showWaterLabels, Math.round(centerLat * 2), Math.round(centerLng * 2), Math.round(zoom)])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
 
@@ -2279,8 +2296,13 @@ const MapScreen: React.FC = () => {
             Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'} · Brightness: {gOpacity > 0 ? `${(1 + gOpacity * 0.35).toFixed(2)}×` : '1.00×'}<br />
             <strong>Scale ({SCALE_KM}km)</strong><br />
             Globe: {globePx300.toFixed(0)}px · Flat: {flatPx300.toFixed(0)}px · Ratio: {flatPx300 > 0 ? (globePx300 / flatPx300).toFixed(2) : '—'}×<br />
-            <strong>Data</strong><br />
-            Lakes: {showWaterLabels ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {rivers.length}
+            <strong>Water (tiled worker)</strong><br />
+            {showWaterLabels ? 'ON' : 'OFF'} · Lakes: {waterBodies.length} · Rivers: {rivers.length}<br />
+            {waterStats && <>
+              Tiles: {waterStats.totalTiles} ({waterStats.cached} cached, {waterStats.fetched} fetched{waterStats.pendingTiles > 0 ? `, ${waterStats.pendingTiles} pending` : ''})<br />
+              {waterStats.fetched > 0 && <>Overpass: {waterStats.totalFetchMs}ms · </>}
+              Gen: {waterStats.generation}
+            </>}
           </div>
         )
       })()}
