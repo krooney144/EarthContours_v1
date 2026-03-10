@@ -82,16 +82,32 @@ export interface River {
   name: string
   points: LatLng[]      // Path of the river
   isStream?: boolean    // true for waterway=stream (smaller waterways)
+  scalerank?: number    // Natural Earth importance rank (0 = most important)
 }
 
-/** A lake, reservoir, or water body polygon from OSM */
+/** A lake, reservoir, or water body polygon */
 export interface WaterBody {
   id: string
   name: string
-  type: 'lake' | 'reservoir' | 'pond' | 'water'
+  type: 'lake' | 'reservoir' | 'pond' | 'water' | 'alkaline'
   center: LatLng
   polygon: LatLng[]
   innerRings?: LatLng[][]  // Island/hole polygons for multipolygon relations
+  scalerank?: number       // Natural Earth importance rank (0 = most important)
+}
+
+/** Glacier classification based on Natural Earth scalerank */
+export type GlacierType = 'ice_sheet' | 'ice_cap' | 'glacier'
+
+/** A glaciated area polygon from Natural Earth */
+export interface Glacier {
+  id: string
+  name: string
+  type: GlacierType
+  center: LatLng
+  polygon: LatLng[]
+  innerRings?: LatLng[][]  // Nunatak/hole polygons
+  scalerank: number        // Natural Earth importance rank (0 = most important)
 }
 
 /** A terrain region (Colorado Rockies, Anchorage, etc.) */
@@ -191,8 +207,9 @@ export interface AppSettings {
 
   // Map & Terrain Display
   showPeakLabels: boolean
-  showRiverLabels: boolean
-  showWaterLabels: boolean
+  showRivers: boolean
+  showLakes: boolean
+  showGlaciers: boolean
   showTownLabels: boolean
   showContourLines: boolean
   showBandLines: boolean

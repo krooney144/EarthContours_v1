@@ -39,8 +39,9 @@ const DEFAULT_SETTINGS: AppSettings = {
 
   // Map & Terrain Display
   showPeakLabels: true,
-  showRiverLabels: false,
-  showWaterLabels: false,
+  showRivers: true,
+  showLakes: true,
+  showGlaciers: false,
   showTownLabels: false,        // Off by default per briefing
   showContourLines: true,
   showBandLines: true,           // Depth band ridgeline strokes in SCAN
@@ -76,8 +77,9 @@ interface SettingsStore extends AppSettings {
   setUnits: (units: UnitSystem) => void
   setCoordFormat: (format: CoordFormat) => void
   togglePeakLabels: () => void
-  toggleRiverLabels: () => void
-  toggleWaterLabels: () => void
+  toggleRivers: () => void
+  toggleLakes: () => void
+  toggleGlaciers: () => void
   toggleTownLabels: () => void
   toggleContourLines: () => void
   toggleBandLines: () => void
@@ -126,16 +128,22 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ showPeakLabels: next })
       },
 
-      toggleRiverLabels: () => {
-        const next = !get().showRiverLabels
-        log.info('River labels toggled', { now: next })
-        set({ showRiverLabels: next })
+      toggleRivers: () => {
+        const next = !get().showRivers
+        log.info('Rivers toggled', { now: next })
+        set({ showRivers: next })
       },
 
-      toggleWaterLabels: () => {
-        const next = !get().showWaterLabels
-        log.info('Water labels toggled', { now: next })
-        set({ showWaterLabels: next })
+      toggleLakes: () => {
+        const next = !get().showLakes
+        log.info('Lakes toggled', { now: next })
+        set({ showLakes: next })
+      },
+
+      toggleGlaciers: () => {
+        const next = !get().showGlaciers
+        log.info('Glaciers toggled', { now: next })
+        set({ showGlaciers: next })
       },
 
       toggleTownLabels: () => {
@@ -233,12 +241,11 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'earthcontours-settings',      // localStorage key
-      version: 2,                          // bump when persisted shape changes
+      version: 3,                          // bump when persisted shape changes
       /**
-       * Migration: snap old verticalExaggeration values to the new set.
-       * v1 options were 1 | 1.5 | 2 | 3 | 4 | 5
-       * v2 options are  1 | 2   | 4 | 10 | 20
-       * Snap rule: pick the nearest valid value.
+       * Migrations:
+       * v1→v2: snap old verticalExaggeration values to new set (1|2|4|10|20).
+       * v2→v3: replace showRiverLabels + showWaterLabels with showRivers + showLakes + showGlaciers.
        */
       migrate: (persisted: unknown, fromVersion: number) => {
         const state = persisted as Record<string, unknown>
@@ -250,6 +257,15 @@ export const useSettingsStore = create<SettingsStore>()(
           )
           log.info('Migrating verticalExaggeration', { from: old, to: snapped })
           state.verticalExaggeration = snapped
+        }
+        if (fromVersion < 3) {
+          log.info('Migrating water settings v2→v3')
+          // Map old toggles to new: if either was on, turn on the corresponding new toggle
+          state.showRivers = state.showRiverLabels ?? true
+          state.showLakes = state.showWaterLabels ?? true
+          state.showGlaciers = false
+          delete state.showRiverLabels
+          delete state.showWaterLabels
         }
         return state as unknown as AppSettings
       },
@@ -272,8 +288,9 @@ export const useSettingsStore = create<SettingsStore>()(
         units: state.units,
         coordFormat: state.coordFormat,
         showPeakLabels: state.showPeakLabels,
-        showRiverLabels: state.showRiverLabels,
-        showWaterLabels: state.showWaterLabels,
+        showRivers: state.showRivers,
+        showLakes: state.showLakes,
+        showGlaciers: state.showGlaciers,
         showTownLabels: state.showTownLabels,
         showContourLines: state.showContourLines,
         showBandLines: state.showBandLines,
