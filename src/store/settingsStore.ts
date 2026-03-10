@@ -42,6 +42,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showRivers: true,
   showLakes: true,
   showGlaciers: false,
+  showCoastlines: true,
   showTownLabels: false,        // Off by default per briefing
   showContourLines: true,
   showBandLines: true,           // Depth band ridgeline strokes in SCAN
@@ -80,6 +81,7 @@ interface SettingsStore extends AppSettings {
   toggleRivers: () => void
   toggleLakes: () => void
   toggleGlaciers: () => void
+  toggleCoastlines: () => void
   toggleTownLabels: () => void
   toggleContourLines: () => void
   toggleBandLines: () => void
@@ -144,6 +146,12 @@ export const useSettingsStore = create<SettingsStore>()(
         const next = !get().showGlaciers
         log.info('Glaciers toggled', { now: next })
         set({ showGlaciers: next })
+      },
+
+      toggleCoastlines: () => {
+        const next = !get().showCoastlines
+        log.info('Coastlines toggled', { now: next })
+        set({ showCoastlines: next })
       },
 
       toggleTownLabels: () => {
@@ -291,6 +299,7 @@ export const useSettingsStore = create<SettingsStore>()(
         showRivers: state.showRivers,
         showLakes: state.showLakes,
         showGlaciers: state.showGlaciers,
+        showCoastlines: state.showCoastlines,
         showTownLabels: state.showTownLabels,
         showContourLines: state.showContourLines,
         showBandLines: state.showBandLines,

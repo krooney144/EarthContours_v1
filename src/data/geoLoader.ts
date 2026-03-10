@@ -16,7 +16,7 @@ const log = createLogger('GEO:LOADER')
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type GeoLayerName = 'rivers' | 'lakes' | 'glaciers'
+export type GeoLayerName = 'rivers' | 'lakes' | 'glaciers' | 'coastline'
 
 export interface GeoJSONFeatureCollection {
   type: 'FeatureCollection'

@@ -110,6 +110,13 @@ export interface Glacier {
   scalerank: number        // Natural Earth importance rank (0 = most important)
 }
 
+/** A coastline segment from Natural Earth */
+export interface Coastline {
+  id: string
+  points: LatLng[]
+  scalerank: number
+}
+
 /** A terrain region (Colorado Rockies, Anchorage, etc.) */
 export interface Region {
   id: string
@@ -210,6 +217,7 @@ export interface AppSettings {
   showRivers: boolean
   showLakes: boolean
   showGlaciers: boolean
+  showCoastlines: boolean
   showTownLabels: boolean
   showContourLines: boolean
   showBandLines: boolean

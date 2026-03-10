@@ -262,6 +262,14 @@ const SettingsScreen: React.FC = () => {
               onChange={settings.toggleGlaciers}
             />
           </Row>
+          <Row label="Coastlines" description="Show coastline outlines on map">
+            <Toggle
+              id="toggle-coastlines"
+              label="Toggle coastlines"
+              checked={settings.showCoastlines}
+              onChange={settings.toggleCoastlines}
+            />
+          </Row>
           <Row label="Town Labels" description="Show cities and towns (off by default)">
             <Toggle
               id="toggle-towns"
