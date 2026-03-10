@@ -1,9 +1,8 @@
 /**
- * EarthContours — Static Peak & River Data
+ * EarthContours — Static Peak Data
  *
  * Real peak names, elevations, and coordinates for Colorado, Alaska, and Washington Cascades.
- * Phase 2 will replace this with live OpenStreetMap Overpass API queries per the
- * CLAUDE/phase-2-scan-overhaul.md spec.
+ * Used as fallback when Overpass API is unavailable (peakLoader.ts handles live queries).
  *
  * Data sources:
  * - Colorado: USGS fourteeners list + NGS data
