@@ -41,8 +41,31 @@ const DB_NAME = 'ec-elevation-v1'
 const DB_VERSION = 1
 const STORE_NAME = 'tiles'
 
-/** Zoom level for terrain fetch — z=10 gives ~150m/pixel for good terrain detail */
+/** Default zoom level for terrain fetch — z=10 gives ~150m/pixel for good terrain detail */
 export const TERRAIN_ZOOM = 10
+
+/**
+ * Calculate optimal tile zoom level based on the physical size of the selected area.
+ * Smaller areas get higher zoom = more terrain detail per grid cell.
+ *
+ * The output grid is always 256×256, so higher zoom means each grid cell
+ * represents a smaller real-world area with more detail.
+ *
+ *   < 10 km  → z14  (~20m/px)
+ *   10-30 km → z13  (~40m/px)
+ *   30-80 km → z12  (~80m/px)
+ *   80-200km → z11  (~150m/px)
+ *   200-400km → z10 (~300m/px)
+ *   > 400 km → z9   (~600m/px)
+ */
+export function adaptiveZoomForArea(maxSideKm: number): number {
+  if (maxSideKm < 10)  return 14
+  if (maxSideKm < 30)  return 13
+  if (maxSideKm < 80)  return 12
+  if (maxSideKm < 200) return 11
+  if (maxSideKm < 400) return 10
+  return 9
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -271,9 +294,10 @@ export async function loadRegionElevation(
   region: Region,
   gridSize: number,
   onProgress: (p: number) => void,
+  zoomOverride?: number,
 ): Promise<Float32Array> {
   const endTiming = log.time(`loadRegionElevation(${region.id})`)
-  const z = TERRAIN_ZOOM
+  const z = zoomOverride ?? TERRAIN_ZOOM
 
   log.info('━━━ ELEVATION LOAD START ━━━', {
     region: region.id,

@@ -1,9 +1,14 @@
 /**
- * EarthContours — EXPLORE Screen  (v3.0 — Solid Three.js terrain)
+ * EarthContours — EXPLORE Screen  (v3.1 — Custom bounds + debug panel)
  *
  * 3D terrain view with solid mesh surface. PlaneGeometry displaced by
  * elevation heightmap, vertex-colored with ocean-depth palette, lit by
- * directional + ambient lights. No more see-through contour lines.
+ * directional + ambient lights.
+ *
+ * v3.1 additions:
+ *   - Re-center button to reset orbit camera to default position
+ *   - Debug panel showing bounds, peaks/lakes/rivers counts, tile zoom
+ *   - Loading progress for custom bounds from MAP screen
  *
  * Navigation (desktop):
  *   Left drag        → pan across terrain
@@ -38,10 +43,14 @@ const ExploreScreen: React.FC = () => {
     orbitTheta, orbitPhi, orbitRadius,
     orbitPanX, orbitPanZ,
     applyOrbitDrag, applyOrbitPan, applyOrbitZoom, setOrbitPan,
-    initOrbitCamera,
+    initOrbitCamera, resetOrbitCamera,
   } = useCameraStore()
 
-  const { peaks, meshData, contourElevations, activeRegion, isRealElevation } = useTerrainStore()
+  const {
+    peaks, meshData, contourElevations, activeRegion, isRealElevation,
+    waterBodies, rivers, terrainZoom, isCustomBounds,
+    loadingState, loadingProgress, loadingMessage,
+  } = useTerrainStore()
   const { units, showPeakLabels, verticalExaggeration } = useSettingsStore()
   const { activeLat, activeLng, mode } = useLocationStore()
 
@@ -55,6 +64,7 @@ const ExploreScreen: React.FC = () => {
   const isRightClickRef   = useRef(false)
 
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
+  const [showDebug, setShowDebug] = useState(false)
 
   const [showHint, setShowHint] = useState<boolean>(() => {
     try { return !localStorage.getItem('ec_explore_hint_seen') } catch { return true }
@@ -64,6 +74,18 @@ const ExploreScreen: React.FC = () => {
     setShowHint(false)
     try { localStorage.setItem('ec_explore_hint_seen', '1') } catch { /* ignore */ }
   }, [])
+
+  // ── Re-center handler ────────────────────────────────────────────────────
+
+  const handleRecenter = useCallback(() => {
+    if (meshData) {
+      const terrainWidth_m = meshData.worldWidth_km * 1000
+      initOrbitCamera(terrainWidth_m)
+      log.info('Camera re-centered on terrain')
+    } else {
+      resetOrbitCamera()
+    }
+  }, [meshData, initOrbitCamera, resetOrbitCamera])
 
   // ── Initialize Three.js renderer ─────────────────────────────────────────
 
@@ -296,17 +318,27 @@ const ExploreScreen: React.FC = () => {
     return (
       <div className={styles.screen}>
         <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
           height: '100%', color: 'var(--ec-text-muted)',
           fontFamily: 'var(--font-display)', letterSpacing: '0.1em',
+          gap: '12px',
         }}>
-          LOADING TERRAIN...
+          <div>{loadingState === 'loading' ? loadingMessage || 'LOADING TERRAIN...' : 'LOADING TERRAIN...'}</div>
+          {loadingState === 'loading' && loadingProgress > 0 && (
+            <div style={{ width: '200px', height: '4px', background: 'rgba(132,209,219,0.15)', borderRadius: '2px' }}>
+              <div style={{
+                width: `${loadingProgress}%`, height: '100%',
+                background: 'var(--ec-glow)', borderRadius: '2px',
+                transition: 'width 0.3s ease',
+              }} />
+            </div>
+          )}
         </div>
       </div>
     )
   }
 
-  const { minElevation_m, maxElevation_m } = meshData
+  const { minElevation_m, maxElevation_m, bounds } = meshData
 
   return (
     <div className={styles.screen}>
@@ -315,7 +347,9 @@ const ExploreScreen: React.FC = () => {
         <div>
           <div className={styles.headerTitle}>EXPLORE</div>
           {activeRegion && (
-            <div className={styles.regionName}>{activeRegion.name}</div>
+            <div className={styles.regionName}>
+              {isCustomBounds ? '3D Explore View' : activeRegion.name}
+            </div>
           )}
         </div>
         <div
@@ -417,6 +451,53 @@ const ExploreScreen: React.FC = () => {
           {formatElevation(minElevation_m, units)}
         </div>
       </div>
+
+      {/* Re-center button */}
+      <button
+        className={styles.recenterBtn}
+        onClick={handleRecenter}
+        aria-label="Re-center camera on terrain"
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+          <circle cx="7" cy="7" r="5" />
+          <circle cx="7" cy="7" r="1.5" fill="currentColor" />
+          <line x1="7" y1="0" x2="7" y2="3" />
+          <line x1="7" y1="11" x2="7" y2="14" />
+          <line x1="0" y1="7" x2="3" y2="7" />
+          <line x1="11" y1="7" x2="14" y2="7" />
+        </svg>
+        RE-CENTER
+      </button>
+
+      {/* Debug toggle */}
+      <button
+        className={styles.debugToggle}
+        onClick={() => setShowDebug(v => !v)}
+        aria-label="Toggle explore debug panel"
+      >
+        {showDebug ? '\u2715' : '\u2299'}
+      </button>
+
+      {/* Debug panel */}
+      {showDebug && (
+        <div className={styles.debugPanel}>
+          <strong>Explore Debug</strong><br />
+          <strong>Bounds</strong><br />
+          NW: {bounds.north.toFixed(4)}&deg;, {bounds.west.toFixed(4)}&deg;<br />
+          NE: {bounds.north.toFixed(4)}&deg;, {bounds.east.toFixed(4)}&deg;<br />
+          SE: {bounds.south.toFixed(4)}&deg;, {bounds.east.toFixed(4)}&deg;<br />
+          SW: {bounds.south.toFixed(4)}&deg;, {bounds.west.toFixed(4)}&deg;<br />
+          <strong>Data</strong><br />
+          Peaks: {peaks.length} · Lakes: {waterBodies.length} · Rivers: {rivers.length}<br />
+          Tile zoom: z{terrainZoom} · Grid: {meshData.width}&times;{meshData.height}<br />
+          Source: {isCustomBounds ? 'Custom bounds' : (activeRegion?.id ?? 'none')}<br />
+          Elev: {formatElevation(minElevation_m, units)} &ndash; {formatElevation(maxElevation_m, units)}<br />
+          Size: {meshData.worldWidth_km.toFixed(1)} &times; {meshData.worldDepth_km.toFixed(1)} km<br />
+          <strong>Camera</strong><br />
+          Radius: {(orbitRadius / 1000).toFixed(1)}km · Pan: {orbitPanX.toFixed(3)}, {orbitPanZ.toFixed(3)}<br />
+          Theta: {(orbitTheta * 180 / Math.PI).toFixed(1)}&deg; · Phi: {(orbitPhi * 180 / Math.PI).toFixed(1)}&deg;
+        </div>
+      )}
     </div>
   )
 }
