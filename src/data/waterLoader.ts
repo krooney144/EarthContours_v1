@@ -30,7 +30,7 @@ import type { WaterBody, River, LatLng } from '../core/types'
 const log = createLogger('DATA:WATER_LOADER')
 
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
-const DB_NAME      = 'ec-water-v4'
+const DB_NAME      = 'ec-water-v5'
 const STORE_NAME   = 'water'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000  // 24 h
 
@@ -379,11 +379,16 @@ async function fetchWaterInBounds(
     if (cached) return cached
 
     // Single Overpass query: lakes + rivers + named streams
+    // Union auto-deduplicates, so overlapping filters are safe.
+    // We match both natural=water AND water=* to catch reservoirs (Lake Mead etc.)
+    // that may have water=reservoir on the relation without natural=water.
     const bbox = `${south},${west},${north},${east}`
     const query = `[out:json][timeout:90];
 (
   way["natural"="water"]["name"](${bbox});
   relation["natural"="water"]["name"](${bbox});
+  way["water"]["name"](${bbox});
+  relation["water"]["name"](${bbox});
   way["waterway"="river"]["name"](${bbox});
   way["waterway"="stream"]["name"](${bbox});
 );
