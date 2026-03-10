@@ -90,6 +90,7 @@ export interface WaterBody {
   type: 'lake' | 'reservoir' | 'pond' | 'water'
   center: LatLng
   polygon: LatLng[]
+  innerRings?: LatLng[][]  // Island/hole polygons for multipolygon relations
 }
 
 /** A terrain region (Colorado Rockies, Anchorage, etc.) */
