@@ -42,7 +42,7 @@ import {
   clamp, formatCoordinates, formatDistance,
 } from '../../core/utils'
 import { loadElevationTile } from '../../data/elevationLoader'
-import { loadNaturalEarthRivers, loadNaturalEarthLakes, loadNaturalEarthGlaciers } from '../../data/geoManager'
+import { loadNaturalEarthRivers, loadNaturalEarthLakes, loadNaturalEarthGlaciers, loadNaturalEarthCoastlines } from '../../data/geoManager'
 import type { TileCoord } from '../../core/types'
 import styles from './MapScreen.module.css'
 
@@ -531,8 +531,8 @@ function computeScaleBar(
 
 const MapScreen: React.FC = () => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
-  const { peaks, waterBodies, rivers, glaciers, meshData, activeRegion, setWaterBodies, setRivers, setGlaciers } = useTerrainStore()
-  const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, showGlaciers, units } = useSettingsStore()
+  const { peaks, waterBodies, rivers, glaciers, coastlines, meshData, activeRegion, setWaterBodies, setRivers, setGlaciers, setCoastlines } = useTerrainStore()
+  const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, showGlaciers, showCoastlines, units } = useSettingsStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const globeCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -918,11 +918,12 @@ const MapScreen: React.FC = () => {
     }
 
     // ── Water body polygons (Natural Earth, filtered by scalerank + zoom) ────
-    // z7: scalerank ≤ 6 (major + medium lakes)
+    // z6: scalerank ≤ 3 (major lakes)
+    // z7: scalerank ≤ 6
     // z8-9: scalerank ≤ 8
     // z10+: all lakes
-    if (showLakes && waterBodies.length > 0 && tileZoom >= 7) {
-      const maxScalerank = tileZoom <= 7 ? 6 : tileZoom <= 9 ? 8 : 99
+    if (showLakes && waterBodies.length > 0 && tileZoom >= 6) {
+      const maxScalerank = tileZoom <= 6 ? 3 : tileZoom <= 7 ? 6 : tileZoom <= 9 ? 8 : 99
       const minPts = tileZoom <= 9 ? 10 : 4
 
       for (let wbIdx = 0; wbIdx < waterBodies.length; wbIdx++) {
@@ -978,12 +979,13 @@ const MapScreen: React.FC = () => {
     }
 
     // ── River lines (Natural Earth, filtered by scalerank + zoom) ──────────
-    // z7: scalerank ≤ 6 (major + medium rivers)
+    // z6: scalerank ≤ 3 (major rivers)
+    // z7: scalerank ≤ 6
     // z8-9: scalerank ≤ 8
     // z10+: all rivers including streams
     // Line thickness scales with zoom for visual weight.
-    if (showRiversSetting && rivers.length > 0 && tileZoom >= 7) {
-      const maxScalerank = tileZoom <= 7 ? 6 : tileZoom <= 9 ? 8 : 99
+    if (showRiversSetting && rivers.length > 0 && tileZoom >= 6) {
+      const maxScalerank = tileZoom <= 6 ? 3 : tileZoom <= 7 ? 6 : tileZoom <= 9 ? 8 : 99
 
       ctx.lineJoin    = 'round'
       ctx.lineCap     = 'round'
@@ -1002,7 +1004,7 @@ const MapScreen: React.FC = () => {
         if (mp.x < -500 || mp.x > W + 500 || mp.y < -500 || mp.y > H + 500) continue
 
         // Line thickness scales: major rivers thicker, zoom adds weight
-        const zoomScale = 0.8 + (tileZoom - 7) * 0.15
+        const zoomScale = 0.8 + (tileZoom - 6) * 0.15
         if (river.isStream) {
           ctx.strokeStyle = 'rgba(50, 120, 200, 0.3)'
           ctx.lineWidth   = 0.8 * zoomScale
@@ -1035,11 +1037,12 @@ const MapScreen: React.FC = () => {
     }
 
     // ── Glacier polygons (Natural Earth, filtered by scalerank + zoom) ──────
-    // z7: scalerank ≤ 3 (ice sheets, major ice caps, large glaciers)
+    // z6: scalerank ≤ 1 (ice sheets + ice caps)
+    // z7: scalerank ≤ 3
     // z8-9: scalerank ≤ 6
     // z10+: all glaciers
-    if (showGlaciers && glaciers.length > 0 && tileZoom >= 7) {
-      const maxScalerank = tileZoom <= 7 ? 3 : tileZoom <= 9 ? 6 : 99
+    if (showGlaciers && glaciers.length > 0 && tileZoom >= 6) {
+      const maxScalerank = tileZoom <= 6 ? 1 : tileZoom <= 7 ? 3 : tileZoom <= 9 ? 6 : 99
 
       for (let gIdx = 0; gIdx < glaciers.length; gIdx++) {
         const gl = glaciers[gIdx]
@@ -1086,6 +1089,44 @@ const MapScreen: React.FC = () => {
           ctx.fillStyle = 'rgba(200, 220, 240, 0.75)'
           ctx.fillText(gl.name, cp.x, cp.y)
         }
+      }
+    }
+
+    // ── Coastlines (Natural Earth, filtered by scalerank + zoom) ────────────
+    // z6: scalerank ≤ 1 (major continental coastlines)
+    // z7: scalerank ≤ 3
+    // z8-9: scalerank ≤ 5
+    // z10+: all coastlines
+    if (showCoastlines && coastlines.length > 0 && tileZoom >= 6) {
+      const maxScalerank = tileZoom <= 6 ? 1 : tileZoom <= 7 ? 3 : tileZoom <= 9 ? 5 : 99
+      const zoomScale = 0.6 + (tileZoom - 6) * 0.1
+
+      ctx.lineJoin = 'round'
+      ctx.lineCap  = 'round'
+
+      for (let cIdx = 0; cIdx < coastlines.length; cIdx++) {
+        const coast = coastlines[cIdx]
+        if (coast.scalerank > maxScalerank) continue
+
+        const pts = coast.points
+        if (pts.length < 2) continue
+
+        // Quick cull: check midpoint
+        const midIdx = Math.floor(pts.length / 2)
+        const mp = latLngToPixel(pts[midIdx].lat, pts[midIdx].lng, centerLat, centerLng, effZoom, W, H)
+        if (mp.x < -500 || mp.x > W + 500 || mp.y < -500 || mp.y > H + 500) continue
+
+        ctx.strokeStyle = 'rgba(140, 180, 160, 0.6)'
+        ctx.lineWidth   = 1.0 * zoomScale
+
+        ctx.beginPath()
+        const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, effZoom, W, H)
+        ctx.moveTo(first.x, first.y)
+        for (let i = 1; i < pts.length; i++) {
+          const p = latLngToPixel(pts[i].lat, pts[i].lng, centerLat, centerLng, effZoom, W, H)
+          ctx.lineTo(p.x, p.y)
+        }
+        ctx.stroke()
       }
     }
 
@@ -1180,7 +1221,7 @@ const MapScreen: React.FC = () => {
 
     setIsLoading(false)
     log.debug('DEM map draw complete')
-  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, rivers, glaciers, showLakes, showRiversSetting, showGlaciers, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
+  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, rivers, glaciers, coastlines, showLakes, showRiversSetting, showGlaciers, showCoastlines, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
 
   // ── Resize observer ──────────────────────────────────────────────────────────
 
@@ -1217,10 +1258,10 @@ const MapScreen: React.FC = () => {
     }
   }, [drawMap])
 
-  // ── Natural Earth water/glacier data (static GeoJSON, cached in IndexedDB) ──
+  // ── Natural Earth geo data (static GeoJSON, cached in IndexedDB) ──
   // Loads once on mount, cached forever after first fetch.
   useEffect(() => {
-    if (showLakes || showRiversSetting || showGlaciers) {
+    if (showLakes || showRiversSetting || showGlaciers || showCoastlines) {
       if (showRiversSetting && rivers.length === 0) {
         loadNaturalEarthRivers().then(setRivers).catch((err) => log.warn('Failed to load rivers', err))
       }
@@ -1230,8 +1271,11 @@ const MapScreen: React.FC = () => {
       if (showGlaciers && glaciers.length === 0) {
         loadNaturalEarthGlaciers().then(setGlaciers).catch((err) => log.warn('Failed to load glaciers', err))
       }
+      if (showCoastlines && coastlines.length === 0) {
+        loadNaturalEarthCoastlines().then(setCoastlines).catch((err) => log.warn('Failed to load coastlines', err))
+      }
     }
-  }, [showLakes, showRiversSetting, showGlaciers, rivers.length, waterBodies.length, glaciers.length, setRivers, setWaterBodies, setGlaciers])
+  }, [showLakes, showRiversSetting, showGlaciers, showCoastlines, rivers.length, waterBodies.length, glaciers.length, coastlines.length, setRivers, setWaterBodies, setGlaciers, setCoastlines])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
 
@@ -2360,7 +2404,7 @@ const MapScreen: React.FC = () => {
             <strong>Scale ({SCALE_KM}km)</strong><br />
             Globe: {globePx300.toFixed(0)}px · Flat: {flatPx300.toFixed(0)}px · Ratio: {flatPx300 > 0 ? (globePx300 / flatPx300).toFixed(2) : '—'}×<br />
             <strong>Natural Earth</strong><br />
-            Lakes: {showLakes ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {showRiversSetting ? 'ON' : 'OFF'} ({rivers.length}) · Glaciers: {showGlaciers ? 'ON' : 'OFF'} ({glaciers.length})
+            Lakes: {showLakes ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {showRiversSetting ? 'ON' : 'OFF'} ({rivers.length}) · Glaciers: {showGlaciers ? 'ON' : 'OFF'} ({glaciers.length}) · Coast: {showCoastlines ? 'ON' : 'OFF'} ({coastlines.length})
           </div>
         )
       })()}

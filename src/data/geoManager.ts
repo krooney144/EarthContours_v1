@@ -9,7 +9,7 @@
  * this module returns ALL features and lets the renderer decide.
  */
 
-import type { River, WaterBody, Glacier, GlacierType, LatLng } from '../core/types'
+import type { River, WaterBody, Glacier, GlacierType, Coastline, LatLng } from '../core/types'
 import { loadGeoLayer } from './geoLoader'
 import type { GeoJSONFeature } from './geoLoader'
 import { createLogger } from '../core/logger'
@@ -180,6 +180,34 @@ function featureToGlacier(feature: GeoJSONFeature, index: number): Glacier | nul
   return null
 }
 
+// ─── Coastline Conversion ─────────────────────────────────────────────────
+
+function featureToCoastlines(feature: GeoJSONFeature, index: number): Coastline[] {
+  const props = feature.properties
+  const scalerank = (props.scalerank as number) ?? 10
+  const geom = feature.geometry
+
+  if (geom.type === 'LineString') {
+    const coords = geom.coordinates as [number, number][]
+    return [{
+      id: `ne-coast-${index}`,
+      points: coords.map(toLatLng),
+      scalerank,
+    }]
+  }
+
+  if (geom.type === 'MultiLineString') {
+    const lines = geom.coordinates as [number, number][][]
+    return lines.map((coords, li) => ({
+      id: `ne-coast-${index}-${li}`,
+      points: coords.map(toLatLng),
+      scalerank,
+    }))
+  }
+
+  return []
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /** Load and convert all Natural Earth rivers */
@@ -224,7 +252,21 @@ export async function loadNaturalEarthGlaciers(): Promise<Glacier[]> {
   return glaciers
 }
 
-/** Load all three layers in parallel */
+/** Load and convert all Natural Earth coastlines */
+export async function loadNaturalEarthCoastlines(): Promise<Coastline[]> {
+  const fc = await loadGeoLayer('coastline')
+  const coastlines: Coastline[] = []
+
+  for (let i = 0; i < fc.features.length; i++) {
+    const converted = featureToCoastlines(fc.features[i], i)
+    coastlines.push(...converted)
+  }
+
+  log.info('Coastlines loaded', { features: fc.features.length, coastlines: coastlines.length })
+  return coastlines
+}
+
+/** Load all four layers in parallel */
 export async function loadAllNaturalEarthData(): Promise<{
   rivers: River[]
   lakes: WaterBody[]

@@ -17,7 +17,7 @@
  */
 
 import { create } from 'zustand'
-import type { Peak, River, WaterBody, Glacier, TerrainMeshData, LoadingState, Region } from '../core/types'
+import type { Peak, River, WaterBody, Glacier, Coastline, TerrainMeshData, LoadingState, Region } from '../core/types'
 import { createLogger } from '../core/logger'
 import { TerrainLoadError } from '../core/errors'
 import { loadRegionElevation } from '../data/elevationLoader'
@@ -36,6 +36,7 @@ interface TerrainStore {
   rivers: River[]
   waterBodies: WaterBody[]
   glaciers: Glacier[]
+  coastlines: Coastline[]
   meshData: TerrainMeshData | null
   contourElevations: number[]
   loadingState: LoadingState
@@ -49,6 +50,7 @@ interface TerrainStore {
   setWaterBodies: (waterBodies: WaterBody[]) => void
   setRivers: (rivers: River[]) => void
   setGlaciers: (glaciers: Glacier[]) => void
+  setCoastlines: (coastlines: Coastline[]) => void
 }
 
 // ─── Store Implementation ─────────────────────────────────────────────────────
@@ -59,6 +61,7 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
   rivers: [],
   waterBodies: [],
   glaciers: [],
+  coastlines: [],
   meshData: null,
   contourElevations: [],
   loadingState: 'idle',
@@ -202,6 +205,11 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
   setGlaciers: (glaciers) => {
     log.info('Glaciers set', { count: glaciers.length })
     set({ glaciers })
+  },
+
+  setCoastlines: (coastlines) => {
+    log.info('Coastlines set', { count: coastlines.length })
+    set({ coastlines })
   },
 }))
 
