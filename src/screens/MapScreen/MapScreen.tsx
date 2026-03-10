@@ -928,7 +928,7 @@ const MapScreen: React.FC = () => {
         const cp = latLngToPixel(wb.center.lat, wb.center.lng, centerLat, centerLng, effZoom, W, H)
         if (cp.x < -500 || cp.x > W + 500 || cp.y < -500 || cp.y > H + 500) continue
 
-        // Draw polygon fill
+        // Draw outer polygon + inner rings (islands) using evenodd fill rule
         ctx.beginPath()
         const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, effZoom, W, H)
         ctx.moveTo(first.x, first.y)
@@ -938,9 +938,23 @@ const MapScreen: React.FC = () => {
         }
         ctx.closePath()
 
-        // Semi-transparent blue fill with thin outline
+        // Inner rings (islands/holes) — drawn in same path for evenodd cutout
+        if (wb.innerRings) {
+          for (const ring of wb.innerRings) {
+            if (ring.length < 4) continue
+            const rf = latLngToPixel(ring[0].lat, ring[0].lng, centerLat, centerLng, effZoom, W, H)
+            ctx.moveTo(rf.x, rf.y)
+            for (let i = 1; i < ring.length; i++) {
+              const p = latLngToPixel(ring[i].lat, ring[i].lng, centerLat, centerLng, effZoom, W, H)
+              ctx.lineTo(p.x, p.y)
+            }
+            ctx.closePath()
+          }
+        }
+
+        // Semi-transparent blue fill with thin outline — evenodd cuts out islands
         ctx.fillStyle   = 'rgba(30, 90, 160, 0.35)'
-        ctx.fill()
+        ctx.fill('evenodd')
         ctx.strokeStyle = 'rgba(70, 140, 210, 0.6)'
         ctx.lineWidth   = 1
         ctx.stroke()
