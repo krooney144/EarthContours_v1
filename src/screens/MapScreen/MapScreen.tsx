@@ -42,9 +42,8 @@ import {
   clamp, formatCoordinates, formatDistance,
 } from '../../core/utils'
 import { loadElevationTile } from '../../data/elevationLoader'
-import { getWaterTileManager } from '../../data/waterLoader'
-import type { WaterTileStats } from '../../data/waterLoader'
-import type { TileCoord, River } from '../../core/types'
+import { loadNaturalEarthRivers, loadNaturalEarthLakes, loadNaturalEarthGlaciers } from '../../data/geoManager'
+import type { TileCoord } from '../../core/types'
 import styles from './MapScreen.module.css'
 
 const log = createLogger('SCREEN:MAP')
@@ -532,8 +531,8 @@ function computeScaleBar(
 
 const MapScreen: React.FC = () => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
-  const { peaks, waterBodies, rivers, meshData, activeRegion, setWaterBodies, setRivers } = useTerrainStore()
-  const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, units } = useSettingsStore()
+  const { peaks, waterBodies, rivers, glaciers, meshData, activeRegion, setWaterBodies, setRivers, setGlaciers } = useTerrainStore()
+  const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, showGlaciers, units } = useSettingsStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const globeCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -549,9 +548,6 @@ const MapScreen: React.FC = () => {
   const [globeTilesLoaded, setGlobeTilesLoaded] = useState(0)
   const [globeTilesTotal, setGlobeTilesTotal] = useState(0)
   const [showGlobeDebug, setShowGlobeDebug] = useState(false)
-
-  // Water tile stats (for debug panel)
-  const [waterStats, setWaterStats] = useState<WaterTileStats | null>(null)
 
   // Debug counters
   const globeRenderCountRef = useRef(0)
@@ -921,17 +917,17 @@ const MapScreen: React.FC = () => {
       }
     }
 
-    // ── Water body polygons (progressive by zoom) ───────────────────────────
-    // z7-8: top 15 largest lakes only
-    // z9-10: top 30 lakes
-    // z11+: all lakes (max 50)
+    // ── Water body polygons (Natural Earth, filtered by scalerank + zoom) ────
+    // z7-8: scalerank ≤ 3 (major lakes: Great Lakes, Caspian, etc.)
+    // z9-10: scalerank ≤ 6 (medium lakes)
+    // z11+: all lakes
     if (showLakes && waterBodies.length > 0 && tileZoom >= 7) {
-      const maxLakes = tileZoom <= 8 ? 15 : tileZoom <= 10 ? 30 : 50
-      // Min polygon points filter — skip tiny polygons at low zoom
+      const maxScalerank = tileZoom <= 8 ? 3 : tileZoom <= 10 ? 6 : 99
       const minPts = tileZoom <= 9 ? 10 : 4
 
-      for (let wbIdx = 0; wbIdx < Math.min(waterBodies.length, maxLakes); wbIdx++) {
+      for (let wbIdx = 0; wbIdx < waterBodies.length; wbIdx++) {
         const wb = waterBodies[wbIdx]
+        if ((wb.scalerank ?? 10) > maxScalerank) continue
         const pts = wb.polygon
         if (pts.length < minPts) continue
 
@@ -970,9 +966,10 @@ const MapScreen: React.FC = () => {
         ctx.lineWidth   = 1
         ctx.stroke()
 
-        // Label at center — progressive: top 5 largest at z10+, all at z12+
-        if (wb.name && (tileZoom >= 12 || (tileZoom >= 10 && wbIdx < 5))) {
-          ctx.font      = `10px 'Josefin Sans', sans-serif`
+        // Labels: scalerank ≤ 3 at z9+, all named at z12+. Size scales with zoom.
+        if (wb.name && (tileZoom >= 12 || (tileZoom >= 9 && (wb.scalerank ?? 10) <= 3))) {
+          const fontSize = tileZoom <= 9 ? 9 : tileZoom <= 11 ? 10 : 12
+          ctx.font      = `${fontSize}px 'Josefin Sans', sans-serif`
           ctx.textAlign = 'center'
           ctx.fillStyle = 'rgba(120, 190, 240, 0.85)'
           ctx.fillText(wb.name, cp.x, cp.y)
@@ -980,20 +977,21 @@ const MapScreen: React.FC = () => {
       }
     }
 
-    // ── River lines (progressive by zoom) ─────────────────────────────────
-    // z9-11: rivers only (no streams), max 40
-    // z12+: rivers + streams, max 80
-    if (showRiversSetting && rivers.length > 0 && tileZoom >= 9) {
-      const showStreams = tileZoom >= 12
-      const maxRivers = showStreams ? 80 : 40
+    // ── River lines (Natural Earth, filtered by scalerank + zoom) ──────────
+    // z7-8: scalerank ≤ 3 (major rivers: Mississippi, Amazon, Nile, etc.)
+    // z9-10: scalerank ≤ 6 (medium rivers)
+    // z11+: all rivers including streams
+    // Line thickness scales with zoom for visual weight.
+    if (showRiversSetting && rivers.length > 0 && tileZoom >= 7) {
+      const maxScalerank = tileZoom <= 8 ? 3 : tileZoom <= 10 ? 6 : 99
 
       ctx.lineJoin    = 'round'
       ctx.lineCap     = 'round'
 
-      let drawn = 0
-      for (let rIdx = 0; rIdx < rivers.length && drawn < maxRivers; rIdx++) {
+      for (let rIdx = 0; rIdx < rivers.length; rIdx++) {
         const river = rivers[rIdx]
-        if (!showStreams && river.isStream) continue
+        const sr = river.scalerank ?? 10
+        if (sr > maxScalerank) continue
 
         const pts = river.points
         if (pts.length < 2) continue
@@ -1003,13 +1001,17 @@ const MapScreen: React.FC = () => {
         const mp = latLngToPixel(pts[midIdx].lat, pts[midIdx].lng, centerLat, centerLng, effZoom, W, H)
         if (mp.x < -500 || mp.x > W + 500 || mp.y < -500 || mp.y > H + 500) continue
 
-        // Streams get thinner, more transparent lines
+        // Line thickness scales: major rivers thicker, zoom adds weight
+        const zoomScale = 0.8 + (tileZoom - 7) * 0.15
         if (river.isStream) {
           ctx.strokeStyle = 'rgba(50, 120, 200, 0.3)'
-          ctx.lineWidth   = 1
+          ctx.lineWidth   = 0.8 * zoomScale
+        } else if (sr <= 3) {
+          ctx.strokeStyle = 'rgba(50, 120, 200, 0.6)'
+          ctx.lineWidth   = 2.0 * zoomScale
         } else {
-          ctx.strokeStyle = 'rgba(50, 120, 200, 0.5)'
-          ctx.lineWidth   = 1.5
+          ctx.strokeStyle = 'rgba(50, 120, 200, 0.45)'
+          ctx.lineWidth   = 1.2 * zoomScale
         }
 
         ctx.beginPath()
@@ -1020,15 +1022,72 @@ const MapScreen: React.FC = () => {
           ctx.lineTo(p.x, p.y)
         }
         ctx.stroke()
-        drawn++
 
-        // Label at midpoint — rivers at z11+, streams at z13+
-        const labelZoom = river.isStream ? 13 : 11
-        if (river.name && tileZoom >= labelZoom) {
-          ctx.font      = `italic 9px 'Josefin Sans', sans-serif`
+        // Labels: major rivers (scalerank ≤ 3) at z9+, all named at z12+. Size scales with zoom.
+        if (river.name) {
+          const labelZoom = sr <= 3 ? 9 : river.isStream ? 13 : 12
+          if (tileZoom >= labelZoom) {
+            const fontSize = tileZoom <= 9 ? 8 : tileZoom <= 11 ? 9 : 11
+            ctx.font      = `italic ${fontSize}px 'Josefin Sans', sans-serif`
+            ctx.textAlign = 'center'
+            ctx.fillStyle = 'rgba(100, 170, 230, 0.8)'
+            ctx.fillText(river.name, mp.x, mp.y - 4)
+          }
+        }
+      }
+    }
+
+    // ── Glacier polygons (Natural Earth, filtered by scalerank + zoom) ──────
+    // z7-8: scalerank ≤ 1 (ice sheets, major ice caps)
+    // z9-10: scalerank ≤ 3 (large glaciers)
+    // z11+: all glaciers
+    if (showGlaciers && glaciers.length > 0 && tileZoom >= 7) {
+      const maxScalerank = tileZoom <= 8 ? 1 : tileZoom <= 10 ? 3 : 99
+
+      for (let gIdx = 0; gIdx < glaciers.length; gIdx++) {
+        const gl = glaciers[gIdx]
+        if (gl.scalerank > maxScalerank) continue
+        const pts = gl.polygon
+        if (pts.length < 4) continue
+
+        const cp = latLngToPixel(gl.center.lat, gl.center.lng, centerLat, centerLng, effZoom, W, H)
+        if (cp.x < -500 || cp.x > W + 500 || cp.y < -500 || cp.y > H + 500) continue
+
+        ctx.beginPath()
+        const first = latLngToPixel(pts[0].lat, pts[0].lng, centerLat, centerLng, effZoom, W, H)
+        ctx.moveTo(first.x, first.y)
+        for (let i = 1; i < pts.length; i++) {
+          const p = latLngToPixel(pts[i].lat, pts[i].lng, centerLat, centerLng, effZoom, W, H)
+          ctx.lineTo(p.x, p.y)
+        }
+        ctx.closePath()
+
+        if (gl.innerRings) {
+          for (const ring of gl.innerRings) {
+            if (ring.length < 4) continue
+            const rf = latLngToPixel(ring[0].lat, ring[0].lng, centerLat, centerLng, effZoom, W, H)
+            ctx.moveTo(rf.x, rf.y)
+            for (let i = 1; i < ring.length; i++) {
+              const p = latLngToPixel(ring[i].lat, ring[i].lng, centerLat, centerLng, effZoom, W, H)
+              ctx.lineTo(p.x, p.y)
+            }
+            ctx.closePath()
+          }
+        }
+
+        ctx.fillStyle   = 'rgba(200, 220, 240, 0.25)'
+        ctx.fill('evenodd')
+        ctx.strokeStyle = 'rgba(180, 210, 240, 0.5)'
+        ctx.lineWidth   = 0.8
+        ctx.stroke()
+
+        // Labels: major glaciers (scalerank ≤ 1) at z9+, all named at z12+
+        if (gl.name && (tileZoom >= 12 || (tileZoom >= 9 && gl.scalerank <= 1))) {
+          const fontSize = tileZoom <= 9 ? 8 : tileZoom <= 11 ? 9 : 11
+          ctx.font      = `${fontSize}px 'Josefin Sans', sans-serif`
           ctx.textAlign = 'center'
-          ctx.fillStyle = 'rgba(100, 170, 230, 0.8)'
-          ctx.fillText(river.name, mp.x, mp.y - 4)
+          ctx.fillStyle = 'rgba(200, 220, 240, 0.75)'
+          ctx.fillText(gl.name, cp.x, cp.y)
         }
       }
     }
@@ -1124,7 +1183,7 @@ const MapScreen: React.FC = () => {
 
     setIsLoading(false)
     log.debug('DEM map draw complete')
-  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, rivers, showLakes, showRiversSetting, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
+  }, [centerLat, centerLng, zoom, gpsLat, gpsLng, activeLat, activeLng, mode, peaks, showPeakLabels, waterBodies, rivers, glaciers, showLakes, showRiversSetting, showGlaciers, activeRegion, meshData, selectionStart, selectionEnd, isSelectingArea, selectionSeverity, selectionDims, units])
 
   // ── Resize observer ──────────────────────────────────────────────────────────
 
@@ -1161,38 +1220,21 @@ const MapScreen: React.FC = () => {
     }
   }, [drawMap])
 
-  // ── Tiled water features via Web Worker ─────────────────────────────────────
-  // Compute viewport bounds → 1° tiles → worker fetches + caches each tile.
-  // Tiles persist in IndexedDB (24h) and in-memory, so panning reuses cached tiles.
-
-  const waterManagerRef = useRef(getWaterTileManager())
-
+  // ── Natural Earth water/glacier data (static GeoJSON, cached in IndexedDB) ──
+  // Loads once on mount, cached forever after first fetch.
   useEffect(() => {
-    const mgr = waterManagerRef.current
-    mgr.onResults((lakes, rivers: River[], stats) => {
-      setWaterBodies(lakes)
-      setRivers(rivers)
-      setWaterStats(stats)
-    })
-    return () => { mgr.onResults(() => {}) }
-  }, [setWaterBodies, setRivers])
-
-  // Request tiles based on viewport — debounced via rounded center
-  useEffect(() => {
-    if (!showLakes && !showRiversSetting) return
-
-    // Compute viewport bounds with some padding (1.5× viewport for prefetch)
-    const viewW = canvasRef.current?.clientWidth || 400
-    const viewH = canvasRef.current?.clientHeight || 700
-    const padX = viewW * 0.25
-    const padY = viewH * 0.25
-
-    const nw = pixelToLatLng(-padX, -padY, centerLat, centerLng, zoom, viewW, viewH)
-    const se = pixelToLatLng(viewW + padX, viewH + padY, centerLat, centerLng, zoom, viewW, viewH)
-
-    waterManagerRef.current.requestTiles(se.lat, nw.lng, nw.lat, se.lng)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showLakes, showRiversSetting, Math.round(centerLat * 2), Math.round(centerLng * 2), Math.round(zoom)])
+    if (showLakes || showRiversSetting || showGlaciers) {
+      if (showRiversSetting && rivers.length === 0) {
+        loadNaturalEarthRivers().then(setRivers).catch((err) => log.warn('Failed to load rivers', err))
+      }
+      if (showLakes && waterBodies.length === 0) {
+        loadNaturalEarthLakes().then(setWaterBodies).catch((err) => log.warn('Failed to load lakes', err))
+      }
+      if (showGlaciers && glaciers.length === 0) {
+        loadNaturalEarthGlaciers().then(setGlaciers).catch((err) => log.warn('Failed to load glaciers', err))
+      }
+    }
+  }, [showLakes, showRiversSetting, showGlaciers, rivers.length, waterBodies.length, glaciers.length, setRivers, setWaterBodies, setGlaciers])
 
   // ── Three.js Globe Setup ──────────────────────────────────────────────────────
 
@@ -2320,13 +2362,8 @@ const MapScreen: React.FC = () => {
             Pointer: {gOpacity >= 0.5 ? 'GLOBE' : 'FLAT'} · Brightness: {gOpacity > 0 ? `${(1 + gOpacity * 0.35).toFixed(2)}×` : '1.00×'}<br />
             <strong>Scale ({SCALE_KM}km)</strong><br />
             Globe: {globePx300.toFixed(0)}px · Flat: {flatPx300.toFixed(0)}px · Ratio: {flatPx300 > 0 ? (globePx300 / flatPx300).toFixed(2) : '—'}×<br />
-            <strong>Water (tiled worker)</strong><br />
-            Lakes: {showLakes ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {showRiversSetting ? 'ON' : 'OFF'} ({rivers.length})<br />
-            {waterStats && <>
-              Tiles: {waterStats.totalTiles} ({waterStats.cached} cached, {waterStats.fetched} fetched{waterStats.pendingTiles > 0 ? `, ${waterStats.pendingTiles} pending` : ''})<br />
-              {waterStats.fetched > 0 && <>Overpass: {waterStats.totalFetchMs}ms · </>}
-              Gen: {waterStats.generation}
-            </>}
+            <strong>Natural Earth</strong><br />
+            Lakes: {showLakes ? 'ON' : 'OFF'} ({waterBodies.length}) · Rivers: {showRiversSetting ? 'ON' : 'OFF'} ({rivers.length}) · Glaciers: {showGlaciers ? 'ON' : 'OFF'} ({glaciers.length})
           </div>
         )
       })()}
