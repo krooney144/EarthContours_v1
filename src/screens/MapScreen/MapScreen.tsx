@@ -1494,12 +1494,12 @@ const MapScreen: React.FC = () => {
     gd.lastX = e.clientX
     gd.lastY = e.clientY
 
-    // Scale rotation sensitivity to match flat map drag speed at the same zoom.
-    // At zoom z, flat map moves 360/(256*2^z) degrees per pixel of drag.
-    // Globe rotation of θ radians = θ*180/π degrees, so:
-    //   rotScale * 180/π = 360 / (256 * 2^zoom)
-    //   rotScale = 2π / (256 * 2^zoom)
-    const rotScale = (2 * Math.PI) / (TILE_SIZE * Math.pow(2, zoom))
+    // Gentle zoom-dependent rotation sensitivity.
+    // 0.005 at zoom ≤2 (original feel), lerp down to 0.002 at zoom 5.5+.
+    // Keeps low-zoom navigation unchanged, tames high-zoom exaggeration.
+    const rotScale = zoom <= 2 ? 0.005
+      : zoom >= 5.5 ? 0.002
+      : 0.005 - (zoom - 2) * (0.003 / 3.5)  // linear 0.005→0.002 over zoom 2→5.5
     const dx = deltaX * rotScale
     const dy = deltaY * rotScale
 
