@@ -246,32 +246,29 @@ function globeOpacity(zoom: number): number {
 }
 
 
-/** Perspective magnification offset: the globe's center is closer to the camera
- *  than a flat plane at the same distance, so the globe appears ~1.25 zoom levels
- *  more magnified than a Mercator flat map at the same slider zoom. During the
- *  crossfade we boost the flat map zoom by this amount (blended by globe opacity)
- *  so both layers show the same geographic scale. */
-const GLOBE_PERSPECTIVE_OFFSET = 1.25
-
 /** Compute the effective zoom for flat map rendering and drag sensitivity.
- *  During the globe→flat transition, blends toward the globe's apparent scale
- *  (displayZoom + perspective offset) so features align during crossfade.
- *  Outside the transition zone, returns the raw display zoom unchanged. */
+ *  Returns the display zoom directly — the globe camera is now corrected to match
+ *  Mercator scale (via GLOBE_CAMERA_ZOOM_BOOST in zoomToCameraZ), so the flat map
+ *  no longer needs a perspective offset. This keeps effectiveFlatZoom monotonically
+ *  increasing with displayZoom (no more wrong-direction pixel scaling). */
 function effectiveFlatZoom(displayZoom: number, _viewHeight: number): number {
-  const gOp = globeOpacity(displayZoom)
-  if (gOp <= 0) return displayZoom
-  if (gOp >= 1) return displayZoom  // flat map not drawn when globe fully visible
-  // Blend: at gOp=1 (start of transition) flat map matches globe scale (zoom + offset),
-  // at gOp=0 (end of transition) flat map uses its true zoom.
-  return displayZoom + gOp * GLOBE_PERSPECTIVE_OFFSET
+  return displayZoom
 }
+
+/** Zoom boost for globe camera to compensate for sphere foreshortening.
+ *  The theoretical Mercator-match formula is correct at the sub-camera point,
+ *  but averaged across the visible area the sphere appears less magnified due
+ *  to surface curvature. Adding 0.4 zoom levels brings the globe camera ~32%
+ *  closer, making the globe's visible scale match the flat Mercator map's scale
+ *  at the same slider zoom. This eliminates the scale jump during crossfade. */
+const GLOBE_CAMERA_ZOOM_BOOST = 0.4
 
 /** Map zoom level to camera Z distance from globe center.
  *
  * Derives camera distance so that at the sub-camera point, the globe's
  * degrees-per-pixel matches a Mercator flat map at the same zoom level.
- * This ensures the globe and flat map show the same geographic scale during
- * the crossfade transition — no size mismatch.
+ * Includes GLOBE_CAMERA_ZOOM_BOOST to compensate for sphere foreshortening
+ * so the apparent scale matches the flat map during crossfade.
  *
  * Math: At distance d from sphere center (radius 1), 1 radian of arc
  * subtends 1/(d-1) units in view space. Combined with FOV 45° and viewport
@@ -280,7 +277,8 @@ function effectiveFlatZoom(displayZoom: number, _viewHeight: number): number {
  * For low zooms the formula is clamped so the globe stays within the viewport.
  */
 function zoomToCameraZ(zoom: number, viewHeight: number = 700): number {
-  const degPerPx = 360 / (TILE_SIZE * Math.pow(2, zoom))
+  const correctedZoom = zoom + GLOBE_CAMERA_ZOOM_BOOST
+  const degPerPx = 360 / (TILE_SIZE * Math.pow(2, correctedZoom))
   const radPerPx = degPerPx * Math.PI / 180
   const halfFov = (45 / 2) * Math.PI / 180  // FOV = 45°
   const d = 1 + radPerPx * viewHeight / (2 * Math.tan(halfFov))
@@ -1496,7 +1494,12 @@ const MapScreen: React.FC = () => {
     gd.lastX = e.clientX
     gd.lastY = e.clientY
 
-    const rotScale = 0.005
+    // Scale rotation sensitivity to match flat map drag speed at the same zoom.
+    // At zoom z, flat map moves 360/(256*2^z) degrees per pixel of drag.
+    // Globe rotation of θ radians = θ*180/π degrees, so:
+    //   rotScale * 180/π = 360 / (256 * 2^zoom)
+    //   rotScale = 2π / (256 * 2^zoom)
+    const rotScale = (2 * Math.PI) / (TILE_SIZE * Math.pow(2, zoom))
     const dx = deltaX * rotScale
     const dy = deltaY * rotScale
 
