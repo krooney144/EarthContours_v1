@@ -1,50 +1,225 @@
 /**
- * B2 Wrap Screen — Fullscreen placeholder
+ * B2 Wrap Screen — 360° cylindrical projection surface (10880×1080)
  */
 
 .screen {
   position: fixed;
   inset: 0;
-  background: var(--ec-void);
+  background: #000810;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-direction: column;
-  gap: var(--space-4);
 }
 
-.title {
+/* The canvas container maintains 10880:1080 aspect ratio and scales to fit */
+.canvasContainer {
+  position: relative;
+  width: 10880px;
+  height: 1080px;
+  transform-origin: center center;
+  /* Scale computed via JS and set as inline style */
+}
+
+.terrainCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Height Slider (right edge) ───────────────────────────────────────────── */
+
+.heightSlider {
+  position: absolute;
+  right: 12px;
+  top: 40px;
+  bottom: 80px;
+  width: 36px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 10;
+}
+
+.heightSliderLabel {
   font-family: var(--font-display);
-  font-size: clamp(2rem, 5vw, 4rem);
-  font-weight: 700;
-  letter-spacing: 0.18em;
-  color: var(--ec-white);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+.heightSliderTrack {
+  flex: 1;
+  width: 2px;
+  background: var(--ec-border);
+  border-radius: var(--radius-full);
+  position: relative;
+  margin: var(--space-2) 0;
+  touch-action: none;
+}
+
+.heightSliderFill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  background: linear-gradient(to top, var(--ec-ocean), var(--ec-glow));
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 6px var(--ec-glow);
+}
+
+.heightSliderThumb {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, 50%);
+  width: 16px;
+  height: 16px;
+  background: var(--ec-glow);
+  border-radius: 50%;
+  box-shadow: var(--shadow-glow);
+  cursor: ns-resize;
+}
+
+.heightSliderValue {
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: var(--ec-glow);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  letter-spacing: 0.05em;
+}
+
+/* ── Coordinate Overlay (bottom center) ───────────────────────────────────── */
+
+.coordOverlay {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(0, 8, 16, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--ec-border);
+  border-radius: 6px;
+  padding: 8px 16px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.coordItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.coordLabel {
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
-.subtitle {
-  font-size: clamp(0.875rem, 2vw, 1.25rem);
-  color: var(--ec-text-muted);
+.coordValue {
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--ec-glow);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.coordDivider {
+  width: 1px;
+  height: 24px;
+  background: var(--ec-border);
+}
+
+.coordReady {
+  color: var(--ec-success, #4CAF50);
+  font-size: 9px;
   letter-spacing: 0.08em;
 }
 
-.route {
-  font-family: monospace;
-  font-size: clamp(0.75rem, 1.5vw, 1rem);
-  color: var(--ec-mid);
-  background: var(--ec-bg-secondary);
-  padding: var(--space-2) var(--space-4);
-  border-radius: 4px;
+/* ── Loading overlay ──────────────────────────────────────────────────────── */
+
+.loadingOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  z-index: 20;
+  pointer-events: none;
 }
 
+.loadingBar {
+  width: 200px;
+  height: 3px;
+  background: rgba(75, 142, 163, 0.2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.loadingFill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--ec-mid), var(--ec-glow));
+  transition: width 0.3s ease;
+}
+
+.loadingLabel {
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.06em;
+}
+
+/* ── Cardinal direction markers ───────────────────────────────────────────── */
+
+.cardinalMarker {
+  position: absolute;
+  top: 12px;
+  transform: translateX(-50%);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--ec-foam);
+  text-shadow: 0 0 8px rgba(132, 209, 219, 0.5);
+  z-index: 10;
+  pointer-events: none;
+}
+
+.cardinalSub {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ec-text-muted);
+}
+
+/* ── Back link ────────────────────────────────────────────────────────────── */
+
 .backLink {
-  margin-top: var(--space-4);
+  position: absolute;
+  top: 12px;
+  left: 12px;
   color: var(--ec-reef);
   text-decoration: none;
-  font-size: 0.875rem;
+  font-size: 12px;
   letter-spacing: 0.06em;
-  opacity: 0.7;
+  opacity: 0.5;
   transition: opacity 0.2s;
+  z-index: 10;
 }
 
 .backLink:hover {
