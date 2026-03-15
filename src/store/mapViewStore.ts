@@ -98,9 +98,9 @@ export const useMapViewStore = create<MapViewStore>()((set, get) => ({
   },
 
   panStep: () => {
-    // Small step that scales with zoom — ~1/4 of the visible area
-    // At zoom 9: ~0.01° (~1.1 km). At zoom 16: ~0.0001° (~11 m).
+    // Step that scales with zoom — visible nudge at every zoom level
+    // At zoom 9: ~0.03° (~3.3 km). At zoom 3: ~2°. At zoom 16: ~0.0003°.
     const z = get().zoom
-    return 0.5 / Math.pow(2, z - 1)
+    return 1.5 / Math.pow(2, z - 1)
   },
 }))

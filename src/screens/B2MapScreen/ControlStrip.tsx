@@ -12,7 +12,7 @@
  *   right  (-90°) — person faces west on screen
  */
 
-import React, { useCallback } from 'react'
+import React, { useCallback, useRef, useEffect } from 'react'
 import { useMapViewStore } from '../../store'
 import { useLocationStore } from '../../store'
 import { createLogger } from '../../core/logger'
@@ -25,6 +25,15 @@ type Side = 'top' | 'bottom' | 'left' | 'right'
 interface ControlStripProps {
   side: Side
 }
+
+// ─── Press-and-Hold Repeat ───────────────────────────────────────────────────
+// First fire on press, then after 300ms delay start repeating every 80ms.
+// Acceleration: speed multiplier ramps from 1× to 4× over ~2 seconds of holding.
+
+const INITIAL_DELAY_MS = 300
+const REPEAT_INTERVAL_MS = 80
+const MAX_ACCEL = 4
+const ACCEL_RAMP_MS = 2000  // time to reach max acceleration
 
 // ─── Direction Mapping ───────────────────────────────────────────────────────
 // Each person sees ↑↓←→ from their perspective.
@@ -81,12 +90,57 @@ const ControlStrip: React.FC<ControlStripProps> = ({ side }) => {
   const zoomOut = useMapViewStore((s) => s.zoomOut)
   const setExploreLocation = useLocationStore((s) => s.setExploreLocation)
 
-  const handlePan = useCallback((dir: Dir) => {
+  // Track active hold timers so we can clean up
+  const holdRef = useRef<{
+    timeoutId: ReturnType<typeof setTimeout> | null
+    intervalId: ReturnType<typeof setInterval> | null
+    startTime: number
+  }>({ timeoutId: null, intervalId: null, startTime: 0 })
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => stopHold()
+  }, [])
+
+  const stopHold = useCallback(() => {
+    const h = holdRef.current
+    if (h.timeoutId !== null) { clearTimeout(h.timeoutId); h.timeoutId = null }
+    if (h.intervalId !== null) { clearInterval(h.intervalId); h.intervalId = null }
+    h.startTime = 0
+  }, [])
+
+  const doPan = useCallback((dir: Dir, accel: number) => {
     const step = panStep()
     const { dLat, dLng } = getDelta(side, dir)
-    pan(dLat * step, dLng * step)
-    log.debug('Pan', { side, dir, step: step.toFixed(4) })
+    pan(dLat * step * accel, dLng * step * accel)
   }, [side, pan, panStep])
+
+  const startPanHold = useCallback((dir: Dir) => {
+    stopHold()
+    // Fire immediately at 1× speed
+    doPan(dir, 1)
+    holdRef.current.startTime = Date.now()
+
+    // After initial delay, start repeating with acceleration
+    holdRef.current.timeoutId = setTimeout(() => {
+      holdRef.current.intervalId = setInterval(() => {
+        const elapsed = Date.now() - holdRef.current.startTime
+        const accel = 1 + (MAX_ACCEL - 1) * Math.min(elapsed / ACCEL_RAMP_MS, 1)
+        doPan(dir, accel)
+      }, REPEAT_INTERVAL_MS)
+    }, INITIAL_DELAY_MS)
+  }, [doPan, stopHold])
+
+  const doZoom = useCallback((zoomFn: () => void) => {
+    stopHold()
+    zoomFn()
+    holdRef.current.startTime = Date.now()
+    holdRef.current.timeoutId = setTimeout(() => {
+      holdRef.current.intervalId = setInterval(() => {
+        zoomFn()
+      }, 250) // Slower repeat for zoom — 4 levels/sec
+    }, INITIAL_DELAY_MS)
+  }, [stopHold])
 
   const handleSelect = useCallback(() => {
     const { centerLat, centerLng } = useMapViewStore.getState()
@@ -102,6 +156,21 @@ const ControlStrip: React.FC<ControlStripProps> = ({ side }) => {
     right:  '-90deg',
   }
 
+  // Shared pointer-down/up handlers for hold behavior
+  const panProps = (dir: Dir) => ({
+    onPointerDown: () => startPanHold(dir),
+    onPointerUp: stopHold,
+    onPointerLeave: stopHold,
+    onPointerCancel: stopHold,
+  })
+
+  const zoomProps = (fn: () => void) => ({
+    onPointerDown: () => doZoom(fn),
+    onPointerUp: stopHold,
+    onPointerLeave: stopHold,
+    onPointerCancel: stopHold,
+  })
+
   return (
     <div
       className={`${styles.controlStrip} ${styles[`strip_${side}`]}`}
@@ -112,7 +181,7 @@ const ControlStrip: React.FC<ControlStripProps> = ({ side }) => {
         <div className={styles.dpad}>
           <button
             className={`${styles.dpadBtn} ${styles.dpadUp}`}
-            onClick={() => handlePan('up')}
+            {...panProps('up')}
             aria-label={`Pan up (${side} side)`}
           >
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
@@ -121,7 +190,7 @@ const ControlStrip: React.FC<ControlStripProps> = ({ side }) => {
           </button>
           <button
             className={`${styles.dpadBtn} ${styles.dpadLeft}`}
-            onClick={() => handlePan('left')}
+            {...panProps('left')}
             aria-label={`Pan left (${side} side)`}
           >
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
@@ -130,7 +199,7 @@ const ControlStrip: React.FC<ControlStripProps> = ({ side }) => {
           </button>
           <button
             className={`${styles.dpadBtn} ${styles.dpadRight}`}
-            onClick={() => handlePan('right')}
+            {...panProps('right')}
             aria-label={`Pan right (${side} side)`}
           >
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
@@ -139,7 +208,7 @@ const ControlStrip: React.FC<ControlStripProps> = ({ side }) => {
           </button>
           <button
             className={`${styles.dpadBtn} ${styles.dpadDown}`}
-            onClick={() => handlePan('down')}
+            {...panProps('down')}
             aria-label={`Pan down (${side} side)`}
           >
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
@@ -152,14 +221,14 @@ const ControlStrip: React.FC<ControlStripProps> = ({ side }) => {
         <div className={styles.zoomBtns}>
           <button
             className={styles.stripBtn}
-            onClick={zoomIn}
+            {...zoomProps(zoomIn)}
             aria-label="Zoom in"
           >
             +
           </button>
           <button
             className={styles.stripBtn}
-            onClick={zoomOut}
+            {...zoomProps(zoomOut)}
             aria-label="Zoom out"
           >
             −
