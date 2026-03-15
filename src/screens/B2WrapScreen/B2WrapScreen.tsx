@@ -134,7 +134,7 @@ const B2WrapScreen: React.FC = () => {
     if (!ctx) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
 
-    const renderScale = WRAP_W / 1000
+    const renderScale = WRAP_W / 4000
 
     const cam: CameraParams = {
       heading_deg: WRAP_HEADING,
