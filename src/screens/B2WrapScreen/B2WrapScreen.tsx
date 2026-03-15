@@ -92,7 +92,7 @@ const B2WrapScreen: React.FC = () => {
   const [refinedArcs, setRefinedArcs]               = useState<RefinedArc[]>([])
   const [osmPeaks, setOsmPeaks]                     = useState<Peak[]>([])
   const [peakPositions, setPeakPositions]           = useState<PeakScreenPos[]>([])
-  const [cssScale, setCssScale]                     = useState(1)
+
 
   const activePeaks: Peak[] = osmPeaks.length > 0 ? osmPeaks : peaks
 
@@ -134,7 +134,7 @@ const B2WrapScreen: React.FC = () => {
     if (!ctx) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
 
-    const renderScale = WRAP_W / 4000
+    const renderScale = 1
 
     const cam: CameraParams = {
       heading_deg: WRAP_HEADING,
@@ -256,17 +256,6 @@ const B2WrapScreen: React.FC = () => {
     rafRef.current = requestAnimationFrame(redrawCanvas)
     return () => cancelAnimationFrame(rafRef.current)
   }, [redrawCanvas])
-
-  // ── CSS scaling to fit viewport ─────────────────────────────────────────
-
-  useEffect(() => {
-    const updateScale = () => {
-      setCssScale(window.innerWidth / WRAP_W)
-    }
-    updateScale()
-    window.addEventListener('resize', updateScale)
-    return () => window.removeEventListener('resize', updateScale)
-  }, [])
 
   // ── Web Worker ──────────────────────────────────────────────────────────
 
@@ -418,7 +407,6 @@ const B2WrapScreen: React.FC = () => {
       <div
         ref={containerRef}
         className={styles.canvasContainer}
-        style={{ transform: `scale(${cssScale})` }}
       >
         <canvas
           ref={canvasRef}

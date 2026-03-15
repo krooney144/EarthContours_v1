@@ -6,11 +6,7 @@
   position: fixed;
   inset: 0;
   background: #000810;
-  overflow-x: hidden;
-  overflow-y: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  overflow: auto;
 }
 
 /* The canvas container maintains 10880:1080 aspect ratio and scales to fit */
@@ -18,9 +14,7 @@
   position: relative;
   width: 10880px;
   height: 1080px;
-  transform-origin: center center;
-  will-change: transform;
-  /* Scale computed via JS and set as inline style */
+  /* Native resolution — scroll to pan, browser zoom to scale */
 }
 
 .terrainCanvas {
