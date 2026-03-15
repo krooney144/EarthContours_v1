@@ -1,14 +1,25 @@
 /**
- * B2 Map Screen — Fullscreen top-down map projection surface
+ * B2 Map Screen — Fullscreen top-down table projection surface
  *
- * Will render the MapScreen (flat DEM) in center of a 1920×1920 square
- * with touch control zones on all 4 sides for table projection.
- * Currently a placeholder to confirm routing works.
+ * Fixed 1920×1920 layout for ceiling-mounted projector on a square table.
+ * Visitors stand around all 4 sides and interact via touch control strips.
+ *
+ * Layout:
+ *   ┌──────────────────────────────────┐
+ *   │          TOP STRIP (326px)       │
+ *   ├──────┬──────────────────┬────────┤
+ *   │ LEFT │   MapScreen      │ RIGHT  │
+ *   │ STRIP│   (1268×1268)    │ STRIP  │
+ *   │      │    + crosshair   │        │
+ *   ├──────┴──────────────────┴────────┤
+ *   │        BOTTOM STRIP (326px)      │
+ *   └──────────────────────────────────┘
  */
 
 import React from 'react'
-import { Link } from 'react-router-dom'
 import { createLogger } from '../../core/logger'
+import MapScreen from '../MapScreen/MapScreen'
+import ControlStrip from './ControlStrip'
 import styles from './B2MapScreen.module.css'
 
 const log = createLogger('SCREEN:B2-MAP')
@@ -18,10 +29,36 @@ const B2MapScreen: React.FC = () => {
 
   return (
     <div className={styles.screen}>
-      <div className={styles.title}>B2 Map</div>
-      <div className={styles.subtitle}>Top-Down Table Projection — 1920×1920</div>
-      <div className={styles.route}>/b2-map</div>
-      <Link to="/" className={styles.backLink}>← Back to App</Link>
+      {/* Top control strip */}
+      <div className={styles.topStrip}>
+        <ControlStrip side="top" />
+      </div>
+
+      {/* Middle row: left strip + map + right strip */}
+      <div className={styles.middleRow}>
+        <div className={styles.leftStrip}>
+          <ControlStrip side="left" />
+        </div>
+
+        <div className={styles.mapContainer}>
+          <MapScreen exhibitMode={true} />
+          {/* Crosshair overlay — target indicator at center */}
+          <div className={styles.crosshair} aria-hidden="true">
+            <div className={styles.crosshairH} />
+            <div className={styles.crosshairV} />
+            <div className={styles.crosshairDot} />
+          </div>
+        </div>
+
+        <div className={styles.rightStrip}>
+          <ControlStrip side="right" />
+        </div>
+      </div>
+
+      {/* Bottom control strip */}
+      <div className={styles.bottomStrip}>
+        <ControlStrip side="bottom" />
+      </div>
     </div>
   )
 }

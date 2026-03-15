@@ -30,7 +30,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
-import { useLocationStore, useTerrainStore, useSettingsStore, useUIStore } from '../../store'
+import { useLocationStore, useTerrainStore, useSettingsStore, useUIStore, useMapViewStore } from '../../store'
 import { createLogger } from '../../core/logger'
 import {
   DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM,
@@ -529,7 +529,11 @@ function computeScaleBar(
 
 // ─── Main Component ────────────────────────────────────────────────────────────
 
-const MapScreen: React.FC = () => {
+interface MapScreenProps {
+  exhibitMode?: boolean
+}
+
+const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
   const { peaks, waterBodies, rivers, glaciers, coastlines, meshData, activeRegion, isCustomBounds, setWaterBodies, setRivers, setGlaciers, setCoastlines, loadCustomBounds } = useTerrainStore()
   const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, showGlaciers, showCoastlines, units } = useSettingsStore()
@@ -538,9 +542,12 @@ const MapScreen: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const globeCanvasRef = useRef<HTMLCanvasElement>(null)
 
-  const [centerLat, setCenterLat] = useState(DEFAULT_MAP_CENTER.lat)
-  const [centerLng, setCenterLng] = useState(DEFAULT_MAP_CENTER.lng)
-  const [zoom, setZoom]           = useState(DEFAULT_MAP_ZOOM)
+  const centerLat = useMapViewStore((s) => s.centerLat)
+  const centerLng = useMapViewStore((s) => s.centerLng)
+  const zoom = useMapViewStore((s) => s.zoom)
+  const setCenterLat = useMapViewStore((s) => s.setCenterLat)
+  const setCenterLng = useMapViewStore((s) => s.setCenterLng)
+  const setZoom = useMapViewStore((s) => s.setZoom)
   const [isLoading, setIsLoading] = useState(false)
 
   // ── Globe State ──────────────────────────────────────────────────────────
@@ -1706,8 +1713,9 @@ const MapScreen: React.FC = () => {
   const handleGlobeWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
     const delta = e.deltaY > 0 ? -0.3 : 0.3
-    setZoom((z: number) => clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
-  }, [])
+    const z = useMapViewStore.getState().zoom
+    setZoom(clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
+  }, [setZoom])
 
   // Globe pinch zoom — finger-anchored (Apple Maps style)
   const globePinchRef = useRef({
@@ -1938,11 +1946,10 @@ const MapScreen: React.FC = () => {
   const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
     const delta = e.deltaY > 0 ? -0.3 : 0.3
-    setZoom((z: number) => {
-      const newZ = clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM)
-      log.debug('Map zoom', { from: z, to: newZ })
-      return newZ
-    })
+    const z = useMapViewStore.getState().zoom
+    const newZ = clamp(z + delta, MAP_MIN_ZOOM, MAP_MAX_ZOOM)
+    log.debug('Map zoom', { from: z, to: newZ })
+    setZoom(newZ)
   }, [])
 
   // ── Pinch Zoom (2-finger) ──────────────────────────────────────────────────
@@ -1987,8 +1994,14 @@ const MapScreen: React.FC = () => {
 
   // ── Zoom buttons ──────────────────────────────────────────────────────────────
 
-  const handleZoomIn  = () => setZoom((z) => clamp(Math.floor(z) + 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
-  const handleZoomOut = () => setZoom((z) => clamp(Math.ceil(z)  - 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
+  const handleZoomIn  = () => {
+    const z = useMapViewStore.getState().zoom
+    setZoom(clamp(Math.floor(z) + 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
+  }
+  const handleZoomOut = () => {
+    const z = useMapViewStore.getState().zoom
+    setZoom(clamp(Math.ceil(z) - 1, MAP_MIN_ZOOM, MAP_MAX_ZOOM))
+  }
 
   // ── Custom vertical zoom slider ────────────────────────────────────────────
   const zoomTrackRef = useRef<HTMLDivElement>(null)
@@ -2132,6 +2145,9 @@ const MapScreen: React.FC = () => {
         className={`${styles.tileLoadingIndicator} ${isLoading ? styles.loading : ''}`}
         aria-hidden="true"
       />
+
+      {/* In exhibit mode, hide all chrome — B2 control strips handle everything */}
+      {!exhibitMode && (<>
 
       {/* Location banner — shows active viewpoint with color-coded state.
           Teal = user tapped a point on the map ("Selected Location").
@@ -2492,6 +2508,9 @@ const MapScreen: React.FC = () => {
         </span>
         <span className={styles.zoomText}>Z{Math.round(zoom)}</span>
       </div>
+
+      {/* End of non-exhibit chrome */}
+      </>)}
     </div>
   )
 }
