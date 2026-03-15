@@ -12,9 +12,14 @@
  * - Native app feel — no URL changes
  * - Custom zoom transitions between screens
  * - Complex state (e.g., 3D camera) persists between screen visits
+ *
+ * React Router is used ONLY for the 4 B2/dev pages (/b2-wrap, /b2-wrap-v2,
+ * /b2-map, /scan2) which need real URLs for venue projection access.
+ * The root / route renders the existing Zustand-based app unchanged.
  */
 
 import React, { useEffect } from 'react'
+import { Routes, Route } from 'react-router-dom'
 import { useUIStore, useSettingsStore } from './store'
 import SplashScreen from './components/SplashScreen'
 import Nav from './components/Nav'
@@ -24,6 +29,10 @@ import ScanScreen from './screens/ScanScreen'
 import ExploreScreen from './screens/ExploreScreen'
 import MapScreen from './screens/MapScreen'
 import SettingsScreen from './screens/SettingsScreen'
+import B2WrapScreen from './screens/B2WrapScreen'
+import B2WrapV2Screen from './screens/B2WrapV2Screen'
+import B2MapScreen from './screens/B2MapScreen'
+import Scan2Screen from './screens/Scan2Screen'
 import { createLogger, appLog } from './core/logger'
 import styles from './App.module.css'
 
@@ -43,9 +52,9 @@ const SCREENS: Record<string, React.ReactNode> = {
   settings: <SettingsScreen />,
 }
 
-// ─── App Component ────────────────────────────────────────────────────────────
+// ─── Main App (Zustand-routed) ───────────────────────────────────────────────
 
-const App: React.FC = () => {
+const MainApp: React.FC = () => {
   const {
     activeScreen,
     isPreviewMode,
@@ -129,6 +138,23 @@ const App: React.FC = () => {
         </>
       )}
     </div>
+  )
+}
+
+// ─── App Component (Router shell) ────────────────────────────────────────────
+
+const App: React.FC = () => {
+  return (
+    <Routes>
+      {/* B2/Dev pages — fullscreen, no nav, no splash */}
+      <Route path="/b2-wrap" element={<B2WrapScreen />} />
+      <Route path="/b2-wrap-v2" element={<B2WrapV2Screen />} />
+      <Route path="/b2-map" element={<B2MapScreen />} />
+      <Route path="/scan2" element={<Scan2Screen />} />
+
+      {/* Root — existing Zustand-based app (splash, nav, transitions) */}
+      <Route path="/*" element={<MainApp />} />
+    </Routes>
   )
 }
 

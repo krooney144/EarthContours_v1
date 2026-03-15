@@ -15,6 +15,7 @@
  */
 
 import React, { useCallback, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useSettingsStore, useLocationStore } from '../../store'
 import { createLogger } from '../../core/logger'
 import { submitFeedback } from '../../data/feedbackService'
@@ -115,6 +116,7 @@ const SettingsScreen: React.FC = () => {
   const [feedbackIssueUrl, setFeedbackIssueUrl] = useState<string | null>(null)
   const [resetConfirm, setResetConfirm] = useState(false)
   const [showLocationHelp, setShowLocationHelp] = useState(false)
+  const navigate = useNavigate()
 
   log.debug('SettingsScreen render', {
     units: settings.units,
@@ -597,6 +599,30 @@ const SettingsScreen: React.FC = () => {
               aria-label={resetConfirm ? 'Confirm settings reset' : 'Reset all settings'}
             >
               {resetConfirm ? 'CONFIRM?' : 'RESET'}
+            </button>
+          </Row>
+        </Section>
+
+        {/* ── Section 8: Dev Pages ── */}
+        <Section icon="⚙" title="Dev Pages">
+          <Row label="B2 Wrap" description="360° cylindrical projection — Scan V1">
+            <button className={styles.actionBtn} onClick={() => navigate('/b2-wrap')}>
+              OPEN
+            </button>
+          </Row>
+          <Row label="B2 Wrap V2" description="360° cylindrical projection — Scan V2">
+            <button className={styles.actionBtn} onClick={() => navigate('/b2-wrap-v2')}>
+              OPEN
+            </button>
+          </Row>
+          <Row label="B2 Map" description="Top-down table projection — 1920×1920">
+            <button className={styles.actionBtn} onClick={() => navigate('/b2-map')}>
+              OPEN
+            </button>
+          </Row>
+          <Row label="Scan 2" description="First-person terrain test environment">
+            <button className={styles.actionBtn} onClick={() => navigate('/scan2')}>
+              OPEN
             </button>
           </Row>
         </Section>
