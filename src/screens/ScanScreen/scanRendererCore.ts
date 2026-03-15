@@ -28,6 +28,7 @@ export interface CameraParams {
   hfov:        number
   W:           number   // Physical pixels (canvas.width)
   H:           number   // Physical pixels (canvas.height)
+  scale?:      number   // Visual size multiplier (defaults to 1)
 }
 
 export interface ProjectedBands {
@@ -482,6 +483,7 @@ export function renderTerrain(
   showBandLines: boolean = true,
 ): void {
   const { W, H } = cam
+  const scale = cam.scale ?? 1
   const numBands = skyline.bands.length
 
   let globalElevMin = Infinity
@@ -497,7 +499,7 @@ export function renderTerrain(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48]
+  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48].map(s => Math.round(s * scale))
 
   for (let bi = numBands - 1; bi >= 0; bi--) {
     const style = bandStyleForIndex(bi, numBands)
@@ -570,7 +572,7 @@ export function renderTerrain(
             : 0.5
           const dist = bandDistAt(skyline, bi, bearingDeg)
           const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
-          ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
+          ctx.lineWidth = (style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)) * scale
           ctx.beginPath()
           ctx.strokeStyle = elevToRidgeColor(tElev)
           ctx.moveTo(col, clampedY)
@@ -585,7 +587,7 @@ export function renderTerrain(
             : 0.5
           const dist = bandDistAt(skyline, bi, bearingDeg)
           const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
-          ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
+          ctx.lineWidth = (style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)) * scale
           ctx.beginPath()
           ctx.strokeStyle = elevToRidgeColor(tElev)
           ctx.moveTo(col, clampedY)
@@ -610,12 +612,13 @@ export function renderContours(
   globalElevMax: number,
 ): void {
   const { W, H } = cam
+  const scale = cam.scale ?? 1
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
   const MAX_D = 400_000
-  const WIDTH_MIN = 0.5
-  const WIDTH_MAX = 5
+  const WIDTH_MIN = 0.5 * scale
+  const WIDTH_MAX = 5 * scale
   const WIDTH_RANGE = WIDTH_MAX - WIDTH_MIN
   const WIDTH_POWER = 0.2
 
@@ -771,13 +774,14 @@ export function drawHorizonGlow(
 ): void {
   const horizonY = getHorizonY(cam)
   const { W } = cam
+  const g = Math.round(12 * (cam.scale ?? 1))
 
-  const glowGrad = ctx.createLinearGradient(0, horizonY - 12, 0, horizonY + 12)
+  const glowGrad = ctx.createLinearGradient(0, horizonY - g, 0, horizonY + g)
   glowGrad.addColorStop(0,   'rgba(132, 209, 219, 0)')
   glowGrad.addColorStop(0.5, 'rgba(132, 209, 219, 0.22)')
   glowGrad.addColorStop(1,   'rgba(132, 209, 219, 0)')
   ctx.fillStyle = glowGrad
-  ctx.fillRect(0, Math.round(horizonY - 12), W, 24)
+  ctx.fillRect(0, Math.round(horizonY - g), W, 2 * g)
 
   ctx.fillStyle = 'rgba(132, 209, 219, 0.18)'
   ctx.fillRect(0, Math.round(horizonY), W, 1)

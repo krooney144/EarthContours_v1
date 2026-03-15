@@ -32,10 +32,10 @@
 
 .heightSlider {
   position: absolute;
-  right: 12px;
-  top: 40px;
-  bottom: 80px;
-  width: 36px;
+  right: 80px;
+  top: 60px;
+  bottom: 120px;
+  width: 60px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -45,7 +45,7 @@
 
 .heightSliderLabel {
   font-family: var(--font-display);
-  font-size: 9px;
+  font-size: 18px;
   color: var(--ec-text-muted);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -55,7 +55,7 @@
 
 .heightSliderTrack {
   flex: 1;
-  width: 2px;
+  width: 4px;
   background: var(--ec-border);
   border-radius: var(--radius-full);
   position: relative;
@@ -77,8 +77,8 @@
   position: absolute;
   left: 50%;
   transform: translate(-50%, 50%);
-  width: 16px;
-  height: 16px;
+  width: 40px;
+  height: 40px;
   background: var(--ec-glow);
   border-radius: 50%;
   box-shadow: var(--shadow-glow);
@@ -87,7 +87,7 @@
 
 .heightSliderValue {
   font-family: var(--font-body);
-  font-size: 10px;
+  font-size: 20px;
   color: var(--ec-glow);
   font-variant-numeric: tabular-nums;
   text-align: center;
@@ -98,18 +98,18 @@
 
 .coordOverlay {
   position: absolute;
-  bottom: 16px;
+  bottom: 40px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 32px;
   background: rgba(0, 8, 16, 0.75);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border: 1px solid var(--ec-border);
-  border-radius: 6px;
-  padding: 8px 16px;
+  border-radius: 16px;
+  padding: 24px 48px;
   z-index: 10;
   pointer-events: none;
 }
@@ -123,7 +123,7 @@
 
 .coordLabel {
   font-family: var(--font-display);
-  font-size: 9px;
+  font-size: 20px;
   color: var(--ec-text-muted);
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -131,7 +131,7 @@
 
 .coordValue {
   font-family: var(--font-body);
-  font-size: 11px;
+  font-size: 28px;
   color: var(--ec-glow);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.05em;
@@ -140,7 +140,7 @@
 
 .coordDivider {
   width: 1px;
-  height: 24px;
+  height: 60px;
   background: var(--ec-border);
 }
 
@@ -192,7 +192,7 @@
   top: 12px;
   transform: translateX(-50%);
   font-family: var(--font-display);
-  font-size: 14px;
+  font-size: 40px;
   font-weight: 700;
   letter-spacing: 0.12em;
   color: var(--ec-foam);
