@@ -1,52 +1,258 @@
 /**
- * B2 Map Screen — Fullscreen placeholder
+ * B2 Map Screen — 1920×1920 exhibit table layout
+ *
+ * Fixed pixel dimensions (not responsive). Projected from ceiling onto table.
+ * Control strips on all 4 edges, map in center with crosshair overlay.
  */
 
+/* ─── Screen Container ──────────────────────────────────────────────────────── */
+
 .screen {
-  position: fixed;
-  inset: 0;
+  width: 1920px;
+  height: 1920px;
   background: var(--ec-void);
+  display: grid;
+  grid-template-rows: 326px 1fr 326px;
+  overflow: hidden;
+  position: relative;
+  /* Prevent any browser chrome */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ─── Layout Rows ───────────────────────────────────────────────────────────── */
+
+.topStrip {
+  grid-row: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-direction: column;
-  gap: var(--space-4);
+  overflow: hidden;
 }
 
-.title {
-  font-family: var(--font-display);
-  font-size: clamp(2rem, 5vw, 4rem);
-  font-weight: 700;
-  letter-spacing: 0.18em;
-  color: var(--ec-white);
-  text-transform: uppercase;
+.middleRow {
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: 326px 1fr 326px;
+  overflow: hidden;
 }
 
-.subtitle {
-  font-size: clamp(0.875rem, 2vw, 1.25rem);
-  color: var(--ec-text-muted);
-  letter-spacing: 0.08em;
+.leftStrip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
-.route {
-  font-family: monospace;
-  font-size: clamp(0.75rem, 1.5vw, 1rem);
-  color: var(--ec-mid);
+.rightStrip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.bottomStrip {
+  grid-row: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* ─── Map Container ─────────────────────────────────────────────────────────── */
+
+.mapContainer {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  /* Border to separate from control strips */
+  border: 1px solid var(--ec-border);
+}
+
+/* ─── Crosshair Overlay ─────────────────────────────────────────────────────── */
+
+.crosshair {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 15;
+}
+
+.crosshairH,
+.crosshairV {
+  position: absolute;
+  background: rgba(240, 248, 255, 0.5);
+}
+
+.crosshairH {
+  /* Horizontal line */
+  top: 50%;
+  left: calc(50% - 40px);
+  width: 80px;
+  height: 2px;
+  transform: translateY(-1px);
+  filter: drop-shadow(0 0 4px rgba(132, 209, 219, 0.6));
+}
+
+.crosshairV {
+  /* Vertical line */
+  left: 50%;
+  top: calc(50% - 40px);
+  width: 2px;
+  height: 80px;
+  transform: translateX(-1px);
+  filter: drop-shadow(0 0 4px rgba(132, 209, 219, 0.6));
+}
+
+.crosshairDot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(240, 248, 255, 0.7);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.8);
+}
+
+/* ─── Control Strip ─────────────────────────────────────────────────────────── */
+
+.controlStrip {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: var(--ec-bg-secondary);
-  padding: var(--space-2) var(--space-4);
-  border-radius: 4px;
+  border: 1px solid var(--ec-border);
 }
 
-.backLink {
-  margin-top: var(--space-4);
-  color: var(--ec-reef);
-  text-decoration: none;
-  font-size: 0.875rem;
+/* Rotate strips so controls face the person at that table edge */
+.strip_top .stripInner {
+  transform: rotate(180deg);
+}
+
+.strip_left .stripInner {
+  transform: rotate(90deg);
+}
+
+.strip_right .stripInner {
+  transform: rotate(-90deg);
+}
+
+.strip_bottom .stripInner {
+  transform: rotate(0deg);
+}
+
+.stripInner {
+  display: flex;
+  align-items: center;
+  gap: 40px;
+}
+
+/* ─── D-Pad (Directional Buttons) ───────────────────────────────────────────── */
+
+.dpad {
+  display: grid;
+  grid-template-columns: 80px 80px 80px;
+  grid-template-rows: 80px 80px 80px;
+  gap: 4px;
+}
+
+.dpadBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+  border: 1px solid var(--ec-border);
+  border-radius: 12px;
+  background: var(--ec-bg-elevated);
+  color: var(--ec-text-primary);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.1s, border-color 0.1s, box-shadow 0.1s;
+}
+
+.dpadBtn:active {
+  background: var(--ec-deep);
+  border-color: var(--ec-glow);
+  box-shadow:
+    0 0 12px var(--ec-glow-medium),
+    inset 0 0 8px var(--ec-glow-soft);
+}
+
+/* Position arrows in the diamond */
+.dpadUp {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.dpadLeft {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.dpadRight {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.dpadDown {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+/* ─── Zoom & Action Buttons ─────────────────────────────────────────────────── */
+
+.zoomBtns {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stripBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 80px;
+  min-height: 80px;
+  padding: 0 20px;
+  border: 1px solid var(--ec-border);
+  border-radius: 12px;
+  background: var(--ec-bg-elevated);
+  color: var(--ec-text-primary);
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 600;
   letter-spacing: 0.06em;
-  opacity: 0.7;
-  transition: opacity 0.2s;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.1s, border-color 0.1s, box-shadow 0.1s;
 }
 
-.backLink:hover {
-  opacity: 1;
+.stripBtn:active {
+  background: var(--ec-deep);
+  border-color: var(--ec-glow);
+  box-shadow:
+    0 0 12px var(--ec-glow-medium),
+    inset 0 0 8px var(--ec-glow-soft);
+}
+
+.selectBtn {
+  font-size: 18px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: var(--ec-navy);
+  border-color: var(--ec-ocean);
+}
+
+.selectBtn:active {
+  background: var(--ec-ocean);
+  border-color: var(--ec-glow);
+  box-shadow:
+    0 0 16px var(--ec-glow-strong),
+    inset 0 0 10px var(--ec-glow-medium);
 }
