@@ -325,9 +325,11 @@ const B2WrapScreen: React.FC = () => {
     setSkylineProgress(0)
 
     worker.postMessage({
-      lat: activeLat,
-      lng: activeLng,
-      elev: height_m,
+      viewerLat:     activeLat,
+      viewerLng:     activeLng,
+      viewerHeightM: height_m,
+      resolution:    4,
+      maxRange:      400_000,
     })
   }, [activeLat, activeLng]) // eslint-disable-line react-hooks/exhaustive-deps
 
