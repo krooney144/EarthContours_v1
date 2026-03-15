@@ -134,12 +134,15 @@ const B2WrapScreen: React.FC = () => {
     if (!ctx) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
 
+    const renderScale = WRAP_W / 1000
+
     const cam: CameraParams = {
       heading_deg: WRAP_HEADING,
       pitch_deg:   WRAP_PITCH,
       hfov:        WRAP_HFOV,
       W:           WRAP_W,
       H:           WRAP_H,
+      scale:       renderScale,
     }
 
     // 1. Sky + stars
@@ -216,15 +219,15 @@ const B2WrapScreen: React.FC = () => {
 
         // Draw peak dot on canvas
         ctx.beginPath()
-        ctx.arc(screenX, screenY, 4, 0, Math.PI * 2)
+        ctx.arc(screenX, screenY, 4 * renderScale, 0, Math.PI * 2)
         ctx.fillStyle = 'rgba(167, 221, 229, 0.9)'
         ctx.fill()
 
         // Draw peak name
-        ctx.font = '11px system-ui, sans-serif'
+        ctx.font = `${Math.round(11 * renderScale)}px system-ui, sans-serif`
         ctx.fillStyle = 'rgba(240, 248, 255, 0.85)'
         ctx.textAlign = 'center'
-        ctx.fillText(peak.name, screenX, screenY - 10)
+        ctx.fillText(peak.name, screenX, screenY - 10 * renderScale)
 
         newPositions.push({
           id: `${peak.lat}-${peak.lng}`,
@@ -446,70 +449,70 @@ const B2WrapScreen: React.FC = () => {
             </span>
           </div>
         )}
-      </div>
 
-      {/* Height slider */}
-      <div className={styles.heightSlider}>
-        <span className={styles.heightSliderLabel}>HIGH</span>
-        <div
-          ref={sliderRef}
-          className={styles.heightSliderTrack}
-          onPointerDown={handleSliderPointerDown}
-          onPointerMove={handleSliderPointerMove}
-          onPointerUp={handleSliderPointerUp}
-          onPointerCancel={handleSliderPointerUp}
-          role="slider"
-          aria-label="Eye height above ground"
-          aria-valuemin={Math.round(metersToFeet(MIN_HEIGHT_M))}
-          aria-valuemax={Math.round(metersToFeet(MAX_HEIGHT_M))}
-          aria-valuenow={Math.round(metersToFeet(height_m))}
-        >
+        {/* Height slider */}
+        <div className={styles.heightSlider}>
+          <span className={styles.heightSliderLabel}>HIGH</span>
           <div
-            className={styles.heightSliderFill}
-            style={{ height: `${((height_m - MIN_HEIGHT_M) / (MAX_HEIGHT_M - MIN_HEIGHT_M)) * 100}%` }}
-          />
-          <div
-            className={styles.heightSliderThumb}
-            style={{ bottom: `${((height_m - MIN_HEIGHT_M) / (MAX_HEIGHT_M - MIN_HEIGHT_M)) * 100}%` }}
-          />
+            ref={sliderRef}
+            className={styles.heightSliderTrack}
+            onPointerDown={handleSliderPointerDown}
+            onPointerMove={handleSliderPointerMove}
+            onPointerUp={handleSliderPointerUp}
+            onPointerCancel={handleSliderPointerUp}
+            role="slider"
+            aria-label="Eye height above ground"
+            aria-valuemin={Math.round(metersToFeet(MIN_HEIGHT_M))}
+            aria-valuemax={Math.round(metersToFeet(MAX_HEIGHT_M))}
+            aria-valuenow={Math.round(metersToFeet(height_m))}
+          >
+            <div
+              className={styles.heightSliderFill}
+              style={{ height: `${((height_m - MIN_HEIGHT_M) / (MAX_HEIGHT_M - MIN_HEIGHT_M)) * 100}%` }}
+            />
+            <div
+              className={styles.heightSliderThumb}
+              style={{ bottom: `${((height_m - MIN_HEIGHT_M) / (MAX_HEIGHT_M - MIN_HEIGHT_M)) * 100}%` }}
+            />
+          </div>
+          <span className={styles.heightSliderLabel}>LOW</span>
+          <span className={styles.heightSliderValue}>
+            {units === 'imperial'
+              ? `${Math.round(metersToFeet(height_m))}ft`
+              : `${Math.round(height_m)}m`}
+          </span>
         </div>
-        <span className={styles.heightSliderLabel}>LOW</span>
-        <span className={styles.heightSliderValue}>
-          {units === 'imperial'
-            ? `${Math.round(metersToFeet(height_m))}ft`
-            : `${Math.round(height_m)}m`}
-        </span>
-      </div>
 
-      {/* Coordinate overlay — bottom center, under North */}
-      <div className={styles.coordOverlay}>
-        <div className={styles.coordItem}>
-          <span className={styles.coordLabel}>LAT</span>
-          <span className={styles.coordValue}>{activeLat.toFixed(4)}°</span>
+        {/* Coordinate overlay — bottom center, under North */}
+        <div className={styles.coordOverlay}>
+          <div className={styles.coordItem}>
+            <span className={styles.coordLabel}>LAT</span>
+            <span className={styles.coordValue}>{activeLat.toFixed(4)}°</span>
+          </div>
+          <div className={styles.coordDivider} />
+          <div className={styles.coordItem}>
+            <span className={styles.coordLabel}>LONG</span>
+            <span className={styles.coordValue}>{Math.abs(activeLng).toFixed(4)}°{activeLng < 0 ? 'W' : 'E'}</span>
+          </div>
+          <div className={styles.coordDivider} />
+          <div className={styles.coordItem}>
+            <span className={styles.coordLabel}>ELEV</span>
+            <span className={styles.coordValue}>{formatElevation(groundElev, units)}</span>
+          </div>
+          <div className={styles.coordDivider} />
+          <div className={styles.coordItem}>
+            <span className={styles.coordLabel}>AGL</span>
+            <span className={styles.coordValue}>{formatElevation(height_m, units)}</span>
+          </div>
+          {skylineData && (
+            <>
+              <div className={styles.coordDivider} />
+              <div className={styles.coordItem}>
+                <span className={`${styles.coordValue} ${styles.coordReady}`}>360° READY</span>
+              </div>
+            </>
+          )}
         </div>
-        <div className={styles.coordDivider} />
-        <div className={styles.coordItem}>
-          <span className={styles.coordLabel}>LONG</span>
-          <span className={styles.coordValue}>{Math.abs(activeLng).toFixed(4)}°{activeLng < 0 ? 'W' : 'E'}</span>
-        </div>
-        <div className={styles.coordDivider} />
-        <div className={styles.coordItem}>
-          <span className={styles.coordLabel}>ELEV</span>
-          <span className={styles.coordValue}>{formatElevation(groundElev, units)}</span>
-        </div>
-        <div className={styles.coordDivider} />
-        <div className={styles.coordItem}>
-          <span className={styles.coordLabel}>AGL</span>
-          <span className={styles.coordValue}>{formatElevation(height_m, units)}</span>
-        </div>
-        {skylineData && (
-          <>
-            <div className={styles.coordDivider} />
-            <div className={styles.coordItem}>
-              <span className={`${styles.coordValue} ${styles.coordReady}`}>360° READY</span>
-            </div>
-          </>
-        )}
       </div>
     </div>
   )
