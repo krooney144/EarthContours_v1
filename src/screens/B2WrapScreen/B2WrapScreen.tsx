@@ -261,9 +261,7 @@ const B2WrapScreen: React.FC = () => {
 
   useEffect(() => {
     const updateScale = () => {
-      const scaleX = window.innerWidth / WRAP_W
-      const scaleY = window.innerHeight / WRAP_H
-      setCssScale(Math.min(scaleX, scaleY))
+      setCssScale(window.innerWidth / WRAP_W)
     }
     updateScale()
     window.addEventListener('resize', updateScale)
