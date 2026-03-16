@@ -2,8 +2,8 @@
  * B2 Wrap Screen — 360° Cylindrical Projection Surface
  *
  * Renders a full 360° panorama on a 10880×1080 canvas for cylindrical
- * projection in the B2 venue. North is centered (pixel ~5440), South is
- * split at both edges. East is to the right of North, West to the left.
+ * projection in the B2 venue. South is centered (pixel ~5440), North is
+ * split at both edges. East is to the left of South, West to the right.
  *
  * Uses the same skyline worker and rendering pipeline as ScanScreen but
  * with a fixed 360° horizontal FOV and no drag/gyro/zoom interaction.
@@ -45,26 +45,22 @@ const WRAP_H = 1080
 
 /**
  * Fixed camera for 360° panorama:
- * - heading = 180° so that bearing 0° (North) projects to center (x = W/2)
+ * - heading = 180° (looking South) so that South is centered (x = W/2)
  * - pitch = 0 (horizon at vertical center)
  * - hfov = 360 (full panorama)
  *
- * With heading=180 and hfov=360:
- *   North (0°) → dBearing = 0-180 = -180, but wrapped: 0-180=-180 → +180? No.
- *   Actually: dBearing = 0 - 180 = -180 → since < -180? No, -180 is not < -180.
- *   So dBearing = -180, dBearingRad = -π, x = W/2 + (-π) * (W/(2π)) = W/2 - W/2 = 0
- *   That puts North at left edge. We want North at CENTER.
+ * With heading=180, hfov=360:
+ *   South (180°) → dBearing = 0, x = W/2. ✓ (center)
+ *   West  (270°) → dBearing = 90°, x = W/2 + W/4 = 3W/4. ✓ (right of center)
+ *   East  ( 90°) → dBearing = -90°, x = W/2 - W/4 = W/4. ✓ (left of center)
+ *   North (  0°) → dBearing = -180°, x = W/2 - W/2 = 0 (left edge)
+ *   North (360°) → dBearing = +180°, x = W/2 + W/2 = W (right edge)
  *
- * Correct approach: heading = 0 (looking North).
- * North (0°) → dBearing = 0, x = W/2.
- * East (90°) → dBearing = 90°, x = W/2 + W/4 = 3W/4. ✓ (right of center)
- * West (270°) → dBearing = -90°, x = W/2 - W/4 = W/4. ✓ (left of center)
- * South (180°) → dBearing = ±180° → wraps to +180, x = W/2 + W/2 = W (right edge)
- * South (-180°) → x = W/2 - W/2 = 0 (left edge)
- *
- * So heading=0, hfov=360 gives: North center, East right, West left, South at both edges. ✓
+ * This places North at both edges — aligning the display seam with the
+ * skyline data's natural 0°/360° boundary, which eliminates horizontal
+ * line artifacts from contour strands wrapping across the screen.
  */
-const WRAP_HEADING = 0
+const WRAP_HEADING = 180
 const WRAP_PITCH   = 0
 const WRAP_HFOV    = 360
 
@@ -416,14 +412,14 @@ const B2WrapScreen: React.FC = () => {
         />
 
         {/* Cardinal direction markers */}
-        <div className={styles.cardinalMarker} style={{ left: '50%' }}>N</div>
-        <div className={styles.cardinalMarker} style={{ left: '75%' }}>E</div>
-        <div className={styles.cardinalMarker} style={{ left: '25%' }}>W</div>
+        <div className={styles.cardinalMarker} style={{ left: '50%' }}>S</div>
+        <div className={styles.cardinalMarker} style={{ left: '75%' }}>W</div>
+        <div className={styles.cardinalMarker} style={{ left: '25%' }}>E</div>
         <div className={styles.cardinalMarker} style={{ left: '0%' }}>
-          <span className={styles.cardinalSub}>S</span>
+          <span className={styles.cardinalSub}>N</span>
         </div>
         <div className={styles.cardinalMarker} style={{ left: '100%' }}>
-          <span className={styles.cardinalSub}>S</span>
+          <span className={styles.cardinalSub}>N</span>
         </div>
 
         {/* Loading overlay */}
@@ -471,7 +467,7 @@ const B2WrapScreen: React.FC = () => {
           </span>
         </div>
 
-        {/* Coordinate overlay — bottom center, under North */}
+        {/* Coordinate overlay — bottom center, under South */}
         <div className={styles.coordOverlay}>
           <div className={styles.coordItem}>
             <span className={styles.coordLabel}>LAT</span>
