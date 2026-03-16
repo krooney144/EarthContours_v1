@@ -752,15 +752,14 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
   // t = 0 (far) → 1 (near)
   const t = bandCount <= 1 ? 1 : 1 - bandIndex / (bandCount - 1)
 
-  // Fill: far = washed-out blue-grey, near = deep dark navy
-  // Wider palette for better depth separation across bands
+  // Fill: void (#000810) → deep (#124B6B), on the ocean-depth palette
   const FILL_COLORS: [number, number, number][] = [
-    [6,  16, 28],   // ultra-near — almost black
-    [10, 24, 40],   // near — very dark navy
-    [16, 34, 54],   // mid-near — dark blue
-    [24, 48, 72],   // mid — medium blue-grey
-    [34, 62, 90],   // mid-far — lighter blue-grey
-    [44, 74, 106],  // far — lightest, most washed out
+    [2,  12, 20],   // ultra-near — near void
+    [5,  24, 38],   // near — 20% toward deep
+    [8,  36, 56],   // mid-near — 40% toward deep
+    [11, 48, 74],   // mid — 60% toward deep
+    [14, 62, 90],   // mid-far — 80% toward deep
+    [18, 75, 107],  // far — exactly ec-deep
   ]
   const bandIdx = bandCount <= 1 ? 0 : Math.round((1 - t) * (FILL_COLORS.length - 1))
   const [fillR, fillG, fillB] = FILL_COLORS[Math.min(bandIdx, FILL_COLORS.length - 1)]
