@@ -173,8 +173,8 @@ export function buildContourStrands(
           if (useOcclusion && angle <= runningMaxAngle) continue
           if (useOcclusion) runningMaxAngle = angle
 
-          // Skip sea-level / negative elevation — avoids coastline artifacts
-          if (c.elev <= 0) continue
+          // Skip sea-level / near-sea-level elevation — avoids coastline artifacts
+          if (c.elev < 1) continue
 
           const snappedLevel = Math.round(c.elev / interval) * interval
           const levelKey = `${snappedLevel}_${c.dir > 0 ? 'u' : 'd'}`
@@ -495,7 +495,7 @@ export function renderTerrain(
   for (let bi = 0; bi < numBands; bi++) {
     const elev = skyline.bands[bi].elevations
     for (let i = 0; i < elev.length; i++) {
-      if (elev[i] === -Infinity) continue
+      if (elev[i] === -Infinity || elev[i] <= 0) continue
       if (elev[i] < globalElevMin) globalElevMin = elev[i]
       if (elev[i] > globalElevMax) globalElevMax = elev[i]
     }

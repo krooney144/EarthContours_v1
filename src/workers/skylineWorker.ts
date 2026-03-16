@@ -253,11 +253,12 @@ function sampleTileGrid(
   )
 }
 
-/** Best-available elevation: tile cache first, sea-level fallback. */
+/** Best-available elevation: tile cache first, sea-level fallback.
+ *  Clamps to 0 — ocean/negative elevations are treated as sea level. */
 function sampleBest(lat: number, lng: number, zoom: number): number {
   const { x: tx, y: ty } = latLngToTileXY(lat, lng, zoom)
   const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
-  if (grid) return sampleTileGrid(grid, lat, lng, zoom, tx, ty)
+  if (grid) return Math.max(0, sampleTileGrid(grid, lat, lng, zoom, tx, ty))
   return 0  // No tile cached — assume sea level (tiles are prefetched so this rarely fires)
 }
 
@@ -296,8 +297,9 @@ function detectCrossings(
   crossings: number[],  // output: push [elev, dist, lat, lng, dir] tuples
 ): void {
   if (prevElev === -Infinity || currElev === -Infinity) return
-  // Skip crossings entirely within ocean/sea-level — avoids coastline spike artifacts
-  if (prevElev <= 0 && currElev <= 0) return
+  // Skip crossings involving ocean/sea-level on EITHER side — avoids coastline spike artifacts.
+  // Ocean-to-land transitions generate many spurious crossings that render as vertical columns.
+  if (prevElev <= 0 || currElev <= 0) return
 
   const dElev = currElev - prevElev
   if (Math.abs(dElev) < 0.01) return  // Flat — no crossings
