@@ -26,11 +26,11 @@ import {
   type CameraParams, type ProjectedBands, type ProjectedRefinedArc,
   type PrebuiltContourStrand, type PeakScreenPos,
   DEG_TO_RAD, EARTH_R, REFRACTION_K, MAX_PEAK_DIST,
-  reprojectBands, reprojectRefinedArcs, buildContourStrands, reprojectContourStrands,
+  reprojectBands, reprojectRefinedArcs, buildContourStrands,
   project, getHorizonY,
   projectFirstPerson, isPeakVisible,
   skylineAngleAt, bandAngleAt,
-  renderTerrain,
+  renderTerrain, renderContours,
   drawSkyAndStars, drawHorizonGlow,
 } from '../ScanScreen/scanRendererCore'
 import styles from './B2WrapScreen.module.css'
@@ -100,19 +100,11 @@ const B2WrapScreen: React.FC = () => {
     return reprojectBands(skylineData, viewerElev)
   }, [skylineData, height_m])
 
-  // Build strands once on skyline change; rawElev enables cheap AGL re-projection
-  const rawContourStrands = useMemo<PrebuiltContourStrand[]>(() => {
+  const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
     if (!skylineData) return []
     const viewerElev = skylineData.computedAt.groundElev + height_m
     return buildContourStrands(skylineData, viewerElev)
-  }, [skylineData]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Re-project strand angles when AGL changes (sub-millisecond)
-  const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
-    if (rawContourStrands.length === 0 || !skylineData) return rawContourStrands
-    const viewerElev = skylineData.computedAt.groundElev + height_m
-    return reprojectContourStrands(rawContourStrands, viewerElev)
-  }, [rawContourStrands, skylineData, height_m])
+  }, [skylineData, height_m])
 
   const projectedArcs = useMemo<ProjectedRefinedArc[] | null>(() => {
     if (!skylineData || refinedArcs.length === 0) return null
@@ -152,9 +144,23 @@ const B2WrapScreen: React.FC = () => {
     // 1. Sky + stars
     drawSkyAndStars(ctx, WRAP_W, WRAP_H)
 
-    // 2. Terrain bands (far→near painter's order) with interleaved contour fills
+    // 2. Terrain bands (far→near painter's order)
     if (skylineData) {
-      renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, contourStrands)
+      renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines)
+    }
+
+    // 3. Contour lines
+    if (contourStrands.length > 0 && skylineData) {
+      let cElevMin = Infinity, cElevMax = -Infinity
+      for (let bi = 0; bi < skylineData.bands.length; bi++) {
+        const elev = skylineData.bands[bi].elevations
+        for (let i = 0; i < elev.length; i++) {
+          if (elev[i] === -Infinity) continue
+          if (elev[i] < cElevMin) cElevMin = elev[i]
+          if (elev[i] > cElevMax) cElevMax = elev[i]
+        }
+      }
+      renderContours(ctx, contourStrands, cam, cElevMin, cElevMax, skylineData, projectedBands)
     }
 
     // 4. Horizon glow
