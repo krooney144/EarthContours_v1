@@ -465,9 +465,18 @@ const BAND_LINE_WIDTHS: [number, number][] = [
 export function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
   const t = bandCount <= 1 ? 1 : 1 - bandIndex / (bandCount - 1)
 
-  const fillR = Math.round(10 - t * 5)
-  const fillG = Math.round(30 - t * 16)
-  const fillB = Math.round(46 - t * 22)
+  // Fill: far = washed-out blue-grey, near = deep dark navy
+  // Wider palette for better depth separation across bands
+  const FILL_COLORS: [number, number, number][] = [
+    [6,  16, 28],   // ultra-near — almost black
+    [10, 24, 40],   // near — very dark navy
+    [16, 34, 54],   // mid-near — dark blue
+    [24, 48, 72],   // mid — medium blue-grey
+    [34, 62, 90],   // mid-far — lighter blue-grey
+    [44, 74, 106],  // far — lightest, most washed out
+  ]
+  const bandIdx = bandCount <= 1 ? 0 : Math.round((1 - t) * (FILL_COLORS.length - 1))
+  const [fillR, fillG, fillB] = FILL_COLORS[Math.min(bandIdx, FILL_COLORS.length - 1)]
   const fillColor = `rgb(${fillR},${fillG},${fillB})`
 
   const strokeColor = `rgba(132, 209, 219, ${(0.15 + t * 0.65).toFixed(2)})`
@@ -614,6 +623,8 @@ export function renderContours(
   cam: CameraParams,
   globalElevMin: number,
   globalElevMax: number,
+  skyline?: SkylineData,
+  projected?: ProjectedBands | null,
 ): void {
   const { W, H } = cam
   const scale = cam.scale ?? 1
@@ -653,6 +664,27 @@ export function renderContours(
 
     for (let i = 0; i < strand.points.length; i++) {
       const pt = strand.points[i]
+
+      // ── Occlusion check: skip points hidden behind nearer bands ──
+      // For each strand point, check if any band closer than this strand's band
+      // has a ridgeline angle above this point's angle at this bearing.
+      // This works at all AGL values because projected band angles are already
+      // re-projected for the current viewer elevation.
+      if (skyline && bi > 0) {
+        let occluded = false
+        for (let nearerBi = 0; nearerBi < bi; nearerBi++) {
+          const nearerAngle = bandAngleAt(skyline, nearerBi, pt.bearingDeg, projected ?? null)
+          if (nearerAngle > -Math.PI / 2 + 0.001 && nearerAngle >= pt.elevAngleRad) {
+            occluded = true
+            break
+          }
+        }
+        if (occluded) {
+          if (pathStarted) { ctx.stroke(); pathStarted = false }
+          continue
+        }
+      }
+
       const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
       const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
 

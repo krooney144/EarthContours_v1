@@ -160,7 +160,7 @@ const B2WrapScreen: React.FC = () => {
           if (elev[i] > cElevMax) cElevMax = elev[i]
         }
       }
-      renderContours(ctx, contourStrands, cam, cElevMin, cElevMax)
+      renderContours(ctx, contourStrands, cam, cElevMin, cElevMax, skylineData, projectedBands)
     }
 
     // 4. Horizon glow
