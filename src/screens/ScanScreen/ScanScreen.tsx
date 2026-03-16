@@ -68,7 +68,6 @@ const MAX_PEAK_DIST     = 400_000     // Max distance for peak label display (m)
 const EARTH_R           = 6_371_000  // Earth radius (m)
 const REFRACTION_K      = 0.13       // Atmospheric refraction coefficient
 const DEG_TO_RAD        = Math.PI / 180
-const OCEAN_ELEV_M      = 5         // Elevations below this are ocean (matches worker threshold)
 const SKYLINE_RESOLUTION = 4         // 0.25° per step = 1440 azimuths for full 360°
 
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
@@ -111,7 +110,7 @@ function reprojectBands(
       const elev = band.elevations[ai]
       const dist = band.distances[ai]
 
-      if (elev === -Infinity || elev < OCEAN_ELEV_M || dist <= 0) {
+      if (elev === -Infinity || elev <= 0 || dist <= 0) {
         angles[ai] = -Math.PI / 2
         continue
       }
@@ -251,8 +250,8 @@ function buildContourStrands(
           if (useOcclusion && angle <= runningMaxAngle) continue
           if (useOcclusion) runningMaxAngle = angle
 
-          // Skip ocean / near-sea-level elevation — avoids coastline artifacts
-          if (c.elev < OCEAN_ELEV_M) continue
+          // Skip sea-level / near-sea-level elevation — avoids coastline artifacts
+          if (c.elev < 1) continue
 
           // Snap level to nearest interval — eliminates floating point drift
           const snappedLevel = Math.round(c.elev / interval) * interval
@@ -590,11 +589,11 @@ function bandAngleAt(
   }
 
   // Fallback: compute from raw data with interpolation
-  if ((band.elevations[idx0] === -Infinity || band.elevations[idx0] < OCEAN_ELEV_M) &&
-      (band.elevations[idx1] === -Infinity || band.elevations[idx1] < OCEAN_ELEV_M)) return -Math.PI / 2
+  if ((band.elevations[idx0] === -Infinity || band.elevations[idx0] <= 0) &&
+      (band.elevations[idx1] === -Infinity || band.elevations[idx1] <= 0)) return -Math.PI / 2
 
   const computeAngle = (idx: number) => {
-    if (band.elevations[idx] === -Infinity || band.elevations[idx] < OCEAN_ELEV_M) return -Math.PI / 2
+    if (band.elevations[idx] === -Infinity || band.elevations[idx] <= 0) return -Math.PI / 2
     const dist = band.distances[idx]
     const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
     return Math.atan2(band.elevations[idx] - curvDrop - skyline.computedAt.elev, dist)
@@ -798,7 +797,7 @@ function renderTerrain(
   for (let bi = 0; bi < numBands; bi++) {
     const elev = skyline.bands[bi].elevations
     for (let i = 0; i < elev.length; i++) {
-      if (elev[i] === -Infinity || elev[i] < OCEAN_ELEV_M) continue
+      if (elev[i] === -Infinity || elev[i] <= 0) continue
       if (elev[i] < globalElevMin) globalElevMin = elev[i]
       if (elev[i] > globalElevMax) globalElevMax = elev[i]
     }
@@ -1082,7 +1081,7 @@ function renderPeakRidgelines(
   for (let bi = 0; bi < numBands; bi++) {
     const elev = skyline.bands[bi].elevations
     for (let i = 0; i < elev.length; i++) {
-      if (elev[i] === -Infinity || elev[i] < OCEAN_ELEV_M) continue
+      if (elev[i] === -Infinity || elev[i] <= 0) continue
       if (elev[i] < globalElevMin) globalElevMin = elev[i]
       if (elev[i] > globalElevMax) globalElevMax = elev[i]
     }
