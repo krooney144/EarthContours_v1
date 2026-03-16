@@ -45,7 +45,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   showCoastlines: true,
   showTownLabels: false,        // Off by default per briefing
   showContourLines: true,
-  showBandLines: true,           // Depth band ridgeline strokes in SCAN
+  showBandLines: false,           // Depth band ridgeline strokes in SCAN
+  showFill: false,                // Terrain fill below ridgelines in SCAN
   solidTerrain: true,            // Solid terrain mesh in EXPLORE (off = contour lines only)
   contourAnimation: true,       // Slow pulse on by default
   verticalExaggeration: 4,     // 4× default — real mountains visible without being overwhelming
@@ -86,6 +87,7 @@ interface SettingsStore extends AppSettings {
   toggleTownLabels: () => void
   toggleContourLines: () => void
   toggleBandLines: () => void
+  toggleFill: () => void
   toggleSolidTerrain: () => void
   toggleContourAnimation: () => void
   setVerticalExaggeration: (v: VerticalExaggeration) => void
@@ -174,6 +176,12 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ showBandLines: next })
       },
 
+      toggleFill: () => {
+        const next = !get().showFill
+        log.info('Fill toggled', { now: next })
+        set({ showFill: next })
+      },
+
       toggleSolidTerrain: () => {
         const next = !get().solidTerrain
         log.info('Solid terrain toggled', { now: next })
@@ -257,11 +265,12 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'earthcontours-settings',      // localStorage key
-      version: 3,                          // bump when persisted shape changes
+      version: 4,                          // bump when persisted shape changes
       /**
        * Migrations:
        * v1→v2: snap old verticalExaggeration values to new set (1|2|4|10|20).
        * v2→v3: replace showRiverLabels + showWaterLabels with showRivers + showLakes + showGlaciers.
+       * v3→v4: add showFill (default false), showBandLines default changed to false.
        */
       migrate: (persisted: unknown, fromVersion: number) => {
         const state = persisted as Record<string, unknown>
@@ -273,6 +282,11 @@ export const useSettingsStore = create<SettingsStore>()(
           )
           log.info('Migrating verticalExaggeration', { from: old, to: snapped })
           state.verticalExaggeration = snapped
+        }
+        if (fromVersion < 4) {
+          log.info('Migrating settings v3→v4: add showFill, showBandLines default off')
+          if (state.showFill === undefined) state.showFill = false
+          if (state.showBandLines === undefined) state.showBandLines = false
         }
         if (fromVersion < 3) {
           log.info('Migrating water settings v2→v3')
@@ -311,6 +325,7 @@ export const useSettingsStore = create<SettingsStore>()(
         showTownLabels: state.showTownLabels,
         showContourLines: state.showContourLines,
         showBandLines: state.showBandLines,
+        showFill: state.showFill,
         solidTerrain: state.solidTerrain,
         contourAnimation: state.contourAnimation,
         verticalExaggeration: state.verticalExaggeration,

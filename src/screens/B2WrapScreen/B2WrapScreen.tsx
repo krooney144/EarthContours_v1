@@ -70,7 +70,7 @@ const B2WrapScreen: React.FC = () => {
   const { height_m, setHeightFromSlider } = useCameraStore()
   const { activeLat, activeLng } = useLocationStore()
   const { peaks } = useTerrainStore()
-  const { units, showBandLines, showPeakLabels } = useSettingsStore()
+  const { units, showBandLines, showFill, showPeakLabels } = useSettingsStore()
 
   const canvasRef       = useRef<HTMLCanvasElement>(null)
   const containerRef    = useRef<HTMLDivElement>(null)
@@ -146,7 +146,7 @@ const B2WrapScreen: React.FC = () => {
 
     // 2. Terrain bands (far→near painter's order)
     if (skylineData) {
-      renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines)
+      renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill)
     }
 
     // 3. Contour lines
@@ -242,7 +242,7 @@ const B2WrapScreen: React.FC = () => {
     setPeakPositions(newPositions)
   }, [
     skylineData, projectedBands, contourStrands, projectedArcs,
-    showBandLines, showPeakLabels,
+    showBandLines, showFill, showPeakLabels,
     activeLat, activeLng, height_m, groundElev, activePeaks,
   ])
 

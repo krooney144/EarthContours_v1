@@ -221,6 +221,7 @@ export interface AppSettings {
   showTownLabels: boolean
   showContourLines: boolean
   showBandLines: boolean
+  showFill: boolean
   solidTerrain: boolean
   contourAnimation: boolean
   verticalExaggeration: VerticalExaggeration

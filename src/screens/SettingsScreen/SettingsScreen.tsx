@@ -304,6 +304,14 @@ const SettingsScreen: React.FC = () => {
               onChange={settings.toggleBandLines}
             />
           </Row>
+          <Row label="Terrain Fill" description="Show solid fill below ridgelines in SCAN view">
+            <Toggle
+              id="toggle-fill"
+              label="Toggle terrain fill"
+              checked={settings.showFill}
+              onChange={settings.toggleFill}
+            />
+          </Row>
           <Row label="Contour Animation" description="Slow pulsing glow on contour lines">
             <Toggle
               id="toggle-contour-anim"

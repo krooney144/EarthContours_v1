@@ -786,6 +786,7 @@ function renderTerrain(
   cam: CameraParams,
   projected: ProjectedBands | null,
   showBandLines: boolean = true,
+  showFill: boolean = true,
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -843,7 +844,7 @@ function renderTerrain(
 
     ctx.lineTo(W, H)
     ctx.closePath()
-    if (hasVisiblePixels) {
+    if (hasVisiblePixels && showFill) {
       ctx.fillStyle = style.fillColor
       ctx.fill()
     }
@@ -1361,6 +1362,7 @@ function drawScanCanvas(
   contourStrands: PrebuiltContourStrand[],
   projectedArcs: ProjectedRefinedArc[] | null,
   showBandLines: boolean = true,
+  showFill: boolean = true,
   showPeakLabels: boolean = true,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
@@ -1410,7 +1412,7 @@ function drawScanCanvas(
 
   // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
   if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines)
+    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill)
   }
 
   // ── 2b. Contour lines — pre-built strands projected to screen ───────────────
@@ -1532,7 +1534,7 @@ const ScanScreen: React.FC = () => {
   } = useCameraStore()
   const { activeLat, activeLng }               = useLocationStore()
   const { peaks } = useTerrainStore()
-  const { units, showPeakLabels, showBandLines, showDebugPanel } = useSettingsStore()
+  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -1909,7 +1911,7 @@ const ScanScreen: React.FC = () => {
       activeLat, activeLng,
       fov, skylineData, projectedBands,
       contourStrands, projectedArcs,
-      showBandLines, showPeakLabels,
+      showBandLines, showFill, showPeakLabels,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -1922,7 +1924,7 @@ const ScanScreen: React.FC = () => {
     activeLat, activeLng,
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs,
-    showBandLines, showPeakLabels,
+    showBandLines, showFill, showPeakLabels,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
