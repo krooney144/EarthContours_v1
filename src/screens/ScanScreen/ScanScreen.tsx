@@ -250,6 +250,9 @@ function buildContourStrands(
           if (useOcclusion && angle <= runningMaxAngle) continue
           if (useOcclusion) runningMaxAngle = angle
 
+          // Skip sea-level / negative elevation — avoids coastline artifacts
+          if (c.elev <= 0) continue
+
           // Snap level to nearest interval — eliminates floating point drift
           const snappedLevel = Math.round(c.elev / interval) * interval
           const levelKey = `${snappedLevel}_${c.dir > 0 ? 'u' : 'd'}`
