@@ -786,7 +786,6 @@ function renderTerrain(
   cam: CameraParams,
   projected: ProjectedBands | null,
   showBandLines: boolean = true,
-  contourStrands: PrebuiltContourStrand[] = [],
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -804,14 +803,6 @@ function renderTerrain(
   }
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1  // Avoid division by zero
-
-  // Pre-bucket contour strands by band index (one O(n) pass)
-  const strandsByBand: PrebuiltContourStrand[][] = Array.from({ length: numBands }, () => [])
-  for (const strand of contourStrands) {
-    if (strand.bandIdx >= 0 && strand.bandIdx < numBands) {
-      strandsByBand[strand.bandIdx].push(strand)
-    }
-  }
 
   // Per-band segment size: near bands update color/width frequently,
   // far bands use long segments to avoid dotty appearance from stroke gaps
@@ -923,12 +914,6 @@ function renderTerrain(
       // Flush final segment
       if (segStartCol >= 0) ctx.stroke()
     }
-
-    // ── Contour strands for this band (drawn after fill+ridgeline,
-    //    before next nearer band's fill covers them) ──
-    if (strandsByBand[bi].length > 0) {
-      renderContours(ctx, strandsByBand[bi], cam, globalElevMin, globalElevMax)
-    }
   }
 }
 
@@ -951,6 +936,8 @@ function renderContours(
   cam: CameraParams,
   globalElevMin: number,
   globalElevMax: number,
+  skyline?: SkylineData,
+  projected?: ProjectedBands | null,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
@@ -994,8 +981,25 @@ function renderContours(
     for (let i = 0; i < strand.points.length; i++) {
       const pt = strand.points[i]
 
-      // Occlusion is handled by painter's order: each band's contours are drawn
-      // after its fill, and the next nearer band's fill covers them naturally.
+      // ── Occlusion check: skip points hidden behind nearer bands ──
+      // For each strand point, check if any band closer than this strand's band
+      // has a ridgeline angle above this point's angle at this bearing.
+      // This works at all AGL values because projected band angles are already
+      // re-projected for the current viewer elevation.
+      if (skyline && bi > 0) {
+        let occluded = false
+        for (let nearerBi = 0; nearerBi < bi; nearerBi++) {
+          const nearerAngle = bandAngleAt(skyline, nearerBi, pt.bearingDeg, projected ?? null)
+          if (nearerAngle > -Math.PI / 2 + 0.001 && nearerAngle >= pt.elevAngleRad) {
+            occluded = true
+            break
+          }
+        }
+        if (occluded) {
+          if (pathStarted) { ctx.stroke(); pathStarted = false }
+          continue
+        }
+      }
 
       const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
       const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
@@ -1405,10 +1409,23 @@ function drawScanCanvas(
   ctx.restore()
 
   // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
-  //    Contour strands are now drawn per-band inside renderTerrain
-  //    (band fill → band ridgeline → band contours → next nearer band covers them)
   if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, contourStrands)
+    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines)
+  }
+
+  // ── 2b. Contour lines — pre-built strands projected to screen ───────────────
+  if (contourStrands.length > 0 && skylineData) {
+    // Compute global elevation range (same as renderTerrain uses)
+    let cElevMin = Infinity, cElevMax = -Infinity
+    for (let bi = 0; bi < skylineData.bands.length; bi++) {
+      const elev = skylineData.bands[bi].elevations
+      for (let i = 0; i < elev.length; i++) {
+        if (elev[i] === -Infinity) continue
+        if (elev[i] < cElevMin) cElevMin = elev[i]
+        if (elev[i] > cElevMax) cElevMax = elev[i]
+      }
+    }
+    renderContours(ctx, contourStrands, cam, cElevMin, cElevMax, skylineData, projectedBands)
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
