@@ -110,7 +110,7 @@ function reprojectBands(
       const elev = band.elevations[ai]
       const dist = band.distances[ai]
 
-      if (elev === -Infinity || dist <= 0) {
+      if (elev === -Infinity || elev <= 0 || dist <= 0) {
         angles[ai] = -Math.PI / 2
         continue
       }
@@ -589,10 +589,11 @@ function bandAngleAt(
   }
 
   // Fallback: compute from raw data with interpolation
-  if (band.elevations[idx0] === -Infinity && band.elevations[idx1] === -Infinity) return -Math.PI / 2
+  if ((band.elevations[idx0] === -Infinity || band.elevations[idx0] <= 0) &&
+      (band.elevations[idx1] === -Infinity || band.elevations[idx1] <= 0)) return -Math.PI / 2
 
   const computeAngle = (idx: number) => {
-    if (band.elevations[idx] === -Infinity) return -Math.PI / 2
+    if (band.elevations[idx] === -Infinity || band.elevations[idx] <= 0) return -Math.PI / 2
     const dist = band.distances[idx]
     const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
     return Math.atan2(band.elevations[idx] - curvDrop - skyline.computedAt.elev, dist)

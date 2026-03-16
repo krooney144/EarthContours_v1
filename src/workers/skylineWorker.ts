@@ -296,6 +296,8 @@ function detectCrossings(
   crossings: number[],  // output: push [elev, dist, lat, lng, dir] tuples
 ): void {
   if (prevElev === -Infinity || currElev === -Infinity) return
+  // Skip crossings entirely within ocean/sea-level — avoids coastline spike artifacts
+  if (prevElev <= 0 && currElev <= 0) return
 
   const dElev = currElev - prevElev
   if (Math.abs(dElev) < 0.01) return  // Flat — no crossings
