@@ -54,7 +54,6 @@ const TILE_PX       = 256
 const EARTH_R       = 6_371_000   // metres
 const REFRACTION_K  = 0.13
 const DEG_TO_RAD    = Math.PI / 180
-const OCEAN_ELEV_M  = 5           // Elevations below this are treated as ocean (Terrarium tiles encode sea as ~0–2m)
 // NW-45° sun direction (ENU: x=east, y=up, z=north)
 const LIGHT_X = -0.5, LIGHT_Y = 0.707, LIGHT_Z = 0.5
 
@@ -691,8 +690,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
       if (elevAngle > Math.PI / 3) continue
 
-      // Overall maximum (skip ocean)
-      if (rawElev >= OCEAN_ELEV_M && elevAngle > maxAngle) {
+      // Overall maximum
+      if (elevAngle > maxAngle) {
         maxAngle  = elevAngle
         ridgeDist = dist
         ridgeLat  = sLat
@@ -704,8 +703,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         const band = DEPTH_BANDS[bi]
         if (dist < band.minDist || dist > band.maxDist) continue
 
-        // Ridgeline: track maximum elevation angle (skip ocean)
-        if (rawElev >= OCEAN_ELEV_M && elevAngle > bandMaxAngles[bi]) {
+        // Ridgeline: track maximum elevation angle
+        if (elevAngle > bandMaxAngles[bi]) {
           bandMaxAngles[bi] = elevAngle
           bandRidgeDist[bi] = dist
           bandRidgeLat[bi]  = sLat
@@ -797,8 +796,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           const band = DEPTH_BANDS[bi]
           if (dist < band.minDist || dist > band.maxDist) continue
 
-          // Ridgeline: track maximum elevation angle (skip ocean)
-          if (rawElev >= OCEAN_ELEV_M && elevAngle > bandMaxAngles[bi]) {
+          // Ridgeline: track maximum elevation angle
+          if (elevAngle > bandMaxAngles[bi]) {
             bandMaxAngles[bi] = elevAngle
             bandRidgeDist[bi] = dist
             bandRidgeLat[bi]  = sLat
@@ -884,7 +883,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
         if (elevAngle > Math.PI / 3) continue
 
-        if (rawElev >= OCEAN_ELEV_M && elevAngle > bestAngle) {
+        if (elevAngle > bestAngle) {
           bestAngle = elevAngle
           bestDist  = dist
           bestLat   = sLat
