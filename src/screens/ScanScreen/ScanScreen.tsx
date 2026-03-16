@@ -183,8 +183,8 @@ interface PrebuiltContourStrand {
   level:    number   // Contour elevation (m), snapped to interval grid
   bandIdx:  number   // Depth band index (for line width/opacity)
   interval: number   // Contour interval for this band (m) — used for major/minor detection
-  /** Per-point bearing + elevation angle + distance. Angle is precomputed for the current viewerElev. */
-  points:   Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
+  /** Per-point bearing + elevation angle + distance + raw elevation. rawElev enables cheap AGL re-projection. */
+  points:   Array<{ bearingDeg: number; elevAngleRad: number; dist: number; rawElev: number }>
 }
 
 /**
@@ -218,7 +218,7 @@ function buildContourStrands(
       lastAi:   number
       lastDist: number
       level:    number
-      points:   Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
+      points:   Array<{ bearingDeg: number; elevAngleRad: number; dist: number; rawElev: number }>
     }>>()
 
     for (let ai = 0; ai < bandAz; ai++) {
@@ -287,13 +287,13 @@ function buildContourStrands(
           if (bestIdx >= 0) {
             strands[bestIdx].lastAi = ai
             strands[bestIdx].lastDist = c.dist
-            strands[bestIdx].points.push({ bearingDeg, elevAngleRad: angle, dist: c.dist })
+            strands[bestIdx].points.push({ bearingDeg, elevAngleRad: angle, dist: c.dist, rawElev: c.elev })
           } else {
             strands.push({
               lastAi: ai,
               lastDist: c.dist,
               level: snappedLevel,
-              points: [{ bearingDeg, elevAngleRad: angle, dist: c.dist }],
+              points: [{ bearingDeg, elevAngleRad: angle, dist: c.dist, rawElev: c.elev }],
             })
           }
         }
@@ -329,6 +329,27 @@ function buildContourStrands(
   }
 
   return completed
+}
+
+/**
+ * Re-project contour strand angles from raw elevation data for a new viewer elevation.
+ * Same formula as reprojectBands(): atan2(rawElev - curvDrop - viewerElev, dist).
+ * Sub-millisecond — avoids re-running the full buildContourStrands() on AGL change.
+ */
+function reprojectContourStrands(
+  strands: PrebuiltContourStrand[],
+  viewerElev: number,
+): PrebuiltContourStrand[] {
+  return strands.map(strand => ({
+    ...strand,
+    points: strand.points.map(pt => {
+      const curvDrop = (pt.dist * pt.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      return {
+        ...pt,
+        elevAngleRad: Math.atan2(pt.rawElev - curvDrop - viewerElev, pt.dist),
+      }
+    }),
+  }))
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -772,25 +793,108 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
   return { fillColor, strokeColor, lineWidthNear: widths[0], lineWidthFar: widths[1] }
 }
 
-/**
- * Layered terrain renderer — draws depth bands in painter's order (far→near).
- * Each band gets its own fill (flat) + ridgeline stroke with:
- *   - Distance-based line width (edges match at band boundaries)
- *   - Per-azimuth color from elevation (high=reef/bright → low=abyss/dark)
- *   - All bands render all segments (no fill gaps)
- * All projection goes through project() — single camera source of truth.
- */
+// ─── Fill Color Palette ──────────────────────────────────────────────────────
+
+/** void→deep palette endpoints for distance-based fill interpolation */
+const FILL_VOID: [number, number, number] = [0, 8, 16]
+const FILL_DEEP: [number, number, number] = [18, 75, 107]
+
+function distToFillColor(dist: number, maxDist: number = MAX_DIST): string {
+  const t = Math.max(0, Math.min(1, dist / maxDist))
+  const r = Math.round(FILL_VOID[0] + (FILL_DEEP[0] - FILL_VOID[0]) * t)
+  const g = Math.round(FILL_VOID[1] + (FILL_DEEP[1] - FILL_VOID[1]) * t)
+  const b = Math.round(FILL_VOID[2] + (FILL_DEEP[2] - FILL_VOID[2]) * t)
+  return `rgb(${r},${g},${b})`
+}
+
+// ─── Terrain Feature Detection (Peak/Valley Binning) ────────────────────────
+
+interface TerrainFeature {
+  topStrand:    PrebuiltContourStrand
+  bottomStrand: PrebuiltContourStrand
+  avgDist:      number
+  bandIdx:      number
+}
+
+function buildTerrainFeatures(
+  strands: PrebuiltContourStrand[],
+  bandIdx: number,
+): TerrainFeature[] {
+  if (strands.length < 2) return []
+
+  const BAND_GAP_FACTORS = [0.15, 0.15, 0.20, 0.25, 0.30, 0.35]
+  const gapFactor = BAND_GAP_FACTORS[bandIdx] ?? 0.25
+
+  const withAvgDist = strands.map(s => {
+    let sumDist = 0
+    for (const pt of s.points) sumDist += pt.dist
+    return { strand: s, avgDist: sumDist / s.points.length }
+  })
+  withAvgDist.sort((a, b) => a.avgDist - b.avgDist)
+
+  const clusters: typeof withAvgDist[] = []
+  let currentCluster: typeof withAvgDist = [withAvgDist[0]]
+  for (let i = 1; i < withAvgDist.length; i++) {
+    const gap = withAvgDist[i].avgDist - withAvgDist[i - 1].avgDist
+    const threshold = withAvgDist[i - 1].avgDist * gapFactor
+    if (gap > Math.max(threshold, 500)) {
+      clusters.push(currentCluster)
+      currentCluster = [withAvgDist[i]]
+    } else {
+      currentCluster.push(withAvgDist[i])
+    }
+  }
+  clusters.push(currentCluster)
+
+  const features: TerrainFeature[] = []
+
+  for (const cluster of clusters) {
+    if (cluster.length < 2) continue
+
+    cluster.sort((a, b) => a.strand.level - b.strand.level)
+
+    const maxPairs = Math.min(cluster.length - 1, 8)
+    const step = Math.max(1, Math.floor((cluster.length - 1) / maxPairs))
+
+    for (let i = 0; i < cluster.length - 1; i += step) {
+      const bottom = cluster[i]
+      const top = cluster[Math.min(i + step, cluster.length - 1)]
+      if (bottom === top) continue
+
+      const bMin = bottom.strand.points[0]?.bearingDeg ?? 0
+      const bMax = bottom.strand.points[bottom.strand.points.length - 1]?.bearingDeg ?? 360
+      const tMin = top.strand.points[0]?.bearingDeg ?? 0
+      const tMax = top.strand.points[top.strand.points.length - 1]?.bearingDeg ?? 360
+      const overlapMin = Math.max(bMin, tMin)
+      const overlapMax = Math.min(bMax, tMax)
+      if (overlapMax - overlapMin < 1) continue
+
+      features.push({
+        topStrand: top.strand,
+        bottomStrand: bottom.strand,
+        avgDist: (top.avgDist + bottom.avgDist) / 2,
+        bandIdx,
+      })
+    }
+  }
+
+  features.sort((a, b) => b.avgDist - a.avgDist)
+  return features
+}
+
+// ─── Terrain Renderer (interleaved contour fills) ────────────────────────────
+
 function renderTerrain(
   ctx: CanvasRenderingContext2D,
   skyline: SkylineData,
   cam: CameraParams,
   projected: ProjectedBands | null,
   showBandLines: boolean = true,
+  strands: PrebuiltContourStrand[] = [],
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
 
-  // ── Global elevation range for color normalization ───────────────────────
   let globalElevMin = Infinity
   let globalElevMax = -Infinity
   for (let bi = 0; bi < numBands; bi++) {
@@ -802,168 +906,290 @@ function renderTerrain(
     }
   }
   const elevRange = globalElevMax - globalElevMin
-  const hasElevRange = elevRange > 1  // Avoid division by zero
+  const hasElevRange = elevRange > 1
 
-  // Per-band segment size: near bands update color/width frequently,
-  // far bands use long segments to avoid dotty appearance from stroke gaps
-  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48]  // ultra-near → far
+  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48]
 
-  // Draw bands far→near (painter's order: far gets painted first, near overlaps)
-  // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
+  // Pre-bucket strands by band index (O(n) setup)
+  const strandsByBand: PrebuiltContourStrand[][] = Array.from({ length: numBands }, () => [])
+  for (const s of strands) {
+    if (s.bandIdx >= 0 && s.bandIdx < numBands) strandsByBand[s.bandIdx].push(s)
+  }
+
+  // Contour rendering helpers
+  const CONTOUR_OPACITIES = [0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
+  const CONTOUR_WIDTH_MIN = 0.5
+  const CONTOUR_WIDTH_MAX = 5
+  const CONTOUR_WIDTH_RANGE = CONTOUR_WIDTH_MAX - CONTOUR_WIDTH_MIN
+  const CONTOUR_WIDTH_POWER = 0.2
+  const CONTOUR_MAX_D = 400_000
+
   for (let bi = numBands - 1; bi >= 0; bi--) {
     const style = bandStyleForIndex(bi, numBands)
     const bandCfg = DEPTH_BANDS[bi]
     const segSize = SEGMENT_SIZES[bi] ?? 24
 
-    // Line width interpolation helper
     const lwMin = bandCfg ? bandCfg.minDist : 0
     const lwMax = bandCfg ? bandCfg.maxDist : 1
     const lwRange = lwMax - lwMin
 
-    // ── Fill below this band's ridgeline ───────────────────────────────────
-    ctx.beginPath()
-    ctx.moveTo(0, H)
-    let hasVisiblePixels = false
+    if (bi >= 3) {
+      // ── Bands 3-5 (mid/mid-far/far): flat fill + ridgeline + contour strands ──
 
-    for (let col = 0; col < W; col++) {
-      const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
-      const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
-
-      // Skip columns where this band has no data (sentinel -PI/2)
-      if (angle <= -Math.PI / 2 + 0.001) {
-        ctx.lineTo(col, H)
-        continue
-      }
-
-      hasVisiblePixels = true
-      const { y } = project(bearingDeg, angle, cam)
-      const screenY = Math.round(y)
-      ctx.lineTo(col, Math.min(H, Math.max(0, screenY)))
-    }
-
-    ctx.lineTo(W, H)
-    ctx.closePath()
-    if (hasVisiblePixels) {
-      ctx.fillStyle = style.fillColor
-      ctx.fill()
-    }
-
-    // ── Ridgeline stroke — continuous paths with periodic color updates ──
-    if (hasVisiblePixels && showBandLines) {
-      ctx.lineCap = 'butt'
-      ctx.lineJoin = 'round'
-
-      let segStartCol = -1
+      ctx.beginPath()
+      ctx.moveTo(0, H)
+      let hasVisiblePixels = false
 
       for (let col = 0; col < W; col++) {
         const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
         const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
 
         if (angle <= -Math.PI / 2 + 0.001) {
-          if (segStartCol >= 0) ctx.stroke()
-          segStartCol = -1
+          ctx.lineTo(col, H)
           continue
         }
 
+        hasVisiblePixels = true
         const { y } = project(bearingDeg, angle, cam)
-        const screenY = Math.round(y)
+        ctx.lineTo(col, Math.min(H, Math.max(0, Math.round(y))))
+      }
 
-        if (screenY >= H) {
-          if (segStartCol >= 0) ctx.stroke()
-          segStartCol = -1
+      ctx.lineTo(W, H)
+      ctx.closePath()
+      if (hasVisiblePixels) {
+        ctx.fillStyle = style.fillColor
+        ctx.fill()
+      }
+
+      if (hasVisiblePixels && showBandLines) {
+        renderBandRidgelineLocal(ctx, skyline, bi, cam, projected, segSize,
+          hasElevRange, globalElevMin, elevRange, lwMin, lwRange, style)
+      }
+
+      renderBandContoursLocal(ctx, strandsByBand[bi], cam, skyline, projected, bi,
+        globalElevMin, elevRange, hasElevRange, CONTOUR_OPACITIES,
+        CONTOUR_WIDTH_MIN, CONTOUR_WIDTH_RANGE, CONTOUR_WIDTH_POWER, CONTOUR_MAX_D)
+
+    } else {
+      // ── Bands 0-2 (ultra-near/near/mid-near): contour-bounded fills ──
+
+      ctx.beginPath()
+      ctx.moveTo(0, H)
+      let hasVisiblePixels = false
+
+      for (let col = 0; col < W; col++) {
+        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+        const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
+
+        if (angle <= -Math.PI / 2 + 0.001) {
+          ctx.lineTo(col, H)
           continue
         }
 
-        const clampedY = Math.max(0, screenY)
+        hasVisiblePixels = true
+        const { y } = project(bearingDeg, angle, cam)
+        ctx.lineTo(col, Math.min(H, Math.max(0, Math.round(y))))
+      }
 
-        if (segStartCol < 0) {
-          // Start a new segment — compute color + distance-based line width
-          const elev = bandElevAt(skyline, bi, bearingDeg)
-          const tElev = hasElevRange && elev > -Infinity
-            ? (elev - globalElevMin) / elevRange
-            : 0.5
-          const dist = bandDistAt(skyline, bi, bearingDeg)
-          const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
-          ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
-          ctx.beginPath()
-          ctx.strokeStyle = elevToRidgeColor(tElev)
-          ctx.moveTo(col, clampedY)
-          segStartCol = col
-        } else if (col - segStartCol >= segSize) {
-          // Flush current segment, start new one with updated color + width.
-          // Overlap by 1px: lineTo then moveTo at same point prevents gaps.
-          ctx.lineTo(col, clampedY)
-          ctx.stroke()
+      ctx.lineTo(W, H)
+      ctx.closePath()
+      if (hasVisiblePixels) {
+        ctx.fillStyle = style.fillColor
+        ctx.fill()
+      }
 
-          const elev = bandElevAt(skyline, bi, bearingDeg)
-          const tElev = hasElevRange && elev > -Infinity
-            ? (elev - globalElevMin) / elevRange
-            : 0.5
-          const dist = bandDistAt(skyline, bi, bearingDeg)
-          const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
-          ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
-          ctx.beginPath()
-          ctx.strokeStyle = elevToRidgeColor(tElev)
-          ctx.moveTo(col, clampedY)
-          segStartCol = col
-        } else {
-          ctx.lineTo(col, clampedY)
+      // Contour-bounded terrain feature fills
+      const bandStrands = strandsByBand[bi]
+      if (bandStrands.length >= 2) {
+        const features = buildTerrainFeatures(bandStrands, bi)
+        for (const feature of features) {
+          renderFeatureFillLocal(ctx, feature, cam, H)
         }
       }
 
-      // Flush final segment
-      if (segStartCol >= 0) ctx.stroke()
+      if (hasVisiblePixels && showBandLines) {
+        renderBandRidgelineLocal(ctx, skyline, bi, cam, projected, segSize,
+          hasElevRange, globalElevMin, elevRange, lwMin, lwRange, style)
+      }
+
+      renderBandContoursLocal(ctx, bandStrands, cam, skyline, projected, bi,
+        globalElevMin, elevRange, hasElevRange, CONTOUR_OPACITIES,
+        CONTOUR_WIDTH_MIN, CONTOUR_WIDTH_RANGE, CONTOUR_WIDTH_POWER, CONTOUR_MAX_D)
     }
   }
 }
 
-// ─── Contour Line Renderer ────────────────────────────────────────────────────
+// ─── Band Ridgeline Stroke (local helper) ───────────────────────────────────
 
-/**
- * Renders pre-built contour strands by projecting them to screen space.
- *
- * Depth cues:
- *   - Per-point distance-based line width: thick near (5px), thin far (0.5px)
- *     using compressed power curve: width = 0.5 + 4.5 × (1 - (d/maxDist)^0.2)
- *   - Per-band opacity (near=vivid, far=faint)
- *
- * Strands are drawn as continuous paths, flushing only when line width changes
- * by more than 20% to avoid the dotty appearance of per-segment strokes.
- */
-function renderContours(
+function renderBandRidgelineLocal(
   ctx: CanvasRenderingContext2D,
-  strands: PrebuiltContourStrand[],
+  skyline: SkylineData,
+  bi: number,
   cam: CameraParams,
+  projected: ProjectedBands | null,
+  segSize: number,
+  hasElevRange: boolean,
   globalElevMin: number,
-  globalElevMax: number,
-  skyline?: SkylineData,
-  projected?: ProjectedBands | null,
+  elevRange: number,
+  lwMin: number,
+  lwRange: number,
+  style: BandStyle,
 ): void {
   const { W, H } = cam
-  const elevRange = globalElevMax - globalElevMin
-  const hasElevRange = elevRange > 1
+  ctx.lineCap = 'butt'
+  ctx.lineJoin = 'round'
 
-  // Distance-based width: 0.5px at 400km, 5px at ~0m
-  const MAX_DIST = 400_000
-  const WIDTH_MIN = 0.5
-  const WIDTH_MAX = 5
-  const WIDTH_RANGE = WIDTH_MAX - WIDTH_MIN
-  const WIDTH_POWER = 0.2
+  let segStartCol = -1
 
-  // Per-band opacity (near=vivid, far=faint)
-  const CONTOUR_OPACITIES = [0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
+  for (let col = 0; col < W; col++) {
+    const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+    const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
 
-  // Width change threshold: flush path when width differs by >20%
+    if (angle <= -Math.PI / 2 + 0.001) {
+      if (segStartCol >= 0) ctx.stroke()
+      segStartCol = -1
+      continue
+    }
+
+    const { y } = project(bearingDeg, angle, cam)
+    const screenY = Math.round(y)
+
+    if (screenY >= H) {
+      if (segStartCol >= 0) ctx.stroke()
+      segStartCol = -1
+      continue
+    }
+
+    const clampedY = Math.max(0, screenY)
+
+    if (segStartCol < 0 || col - segStartCol >= segSize) {
+      if (segStartCol >= 0) {
+        ctx.lineTo(col, clampedY)
+        ctx.stroke()
+      }
+      const elev = bandElevAt(skyline, bi, bearingDeg)
+      const tElev = hasElevRange && elev > -Infinity
+        ? (elev - globalElevMin) / elevRange
+        : 0.5
+      const dist = bandDistAt(skyline, bi, bearingDeg)
+      const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
+      ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
+      ctx.beginPath()
+      ctx.strokeStyle = elevToRidgeColor(tElev)
+      ctx.moveTo(col, clampedY)
+      segStartCol = col
+    } else {
+      ctx.lineTo(col, clampedY)
+    }
+  }
+
+  if (segStartCol >= 0) ctx.stroke()
+}
+
+// ─── Feature Fill Renderer (local) ──────────────────────────────────────────
+
+function renderFeatureFillLocal(
+  ctx: CanvasRenderingContext2D,
+  feature: TerrainFeature,
+  cam: CameraParams,
+  H: number,
+): void {
+  const { topStrand, bottomStrand, avgDist } = feature
+
+  const topMap = new Map<number, number>()
+  for (const pt of topStrand.points) {
+    const key = Math.round(pt.bearingDeg * 10)
+    const existing = topMap.get(key)
+    if (existing === undefined || pt.elevAngleRad > existing) {
+      topMap.set(key, pt.elevAngleRad)
+    }
+  }
+
+  const bottomMap = new Map<number, number>()
+  for (const pt of bottomStrand.points) {
+    const key = Math.round(pt.bearingDeg * 10)
+    const existing = bottomMap.get(key)
+    if (existing === undefined || pt.elevAngleRad < existing) {
+      bottomMap.set(key, pt.elevAngleRad)
+    }
+  }
+
+  const topBearings = [...topMap.keys()].sort((a, b) => a - b)
+  const bottomBearings = [...bottomMap.keys()].sort((a, b) => a - b)
+  if (topBearings.length === 0 || bottomBearings.length === 0) return
+
+  const overlapMin = Math.max(topBearings[0], bottomBearings[0])
+  const overlapMax = Math.min(
+    topBearings[topBearings.length - 1],
+    bottomBearings[bottomBearings.length - 1],
+  )
+  if (overlapMax <= overlapMin) return
+
+  const fillColor = distToFillColor(avgDist)
+  const topPoints: Array<{ x: number; y: number }> = []
+  const bottomPoints: Array<{ x: number; y: number }> = []
+
+  for (let bKey = overlapMin; bKey <= overlapMax; bKey++) {
+    const bearing = bKey / 10
+    const topAngle = topMap.get(bKey)
+    const bottomAngle = bottomMap.get(bKey)
+    if (topAngle === undefined || bottomAngle === undefined) continue
+    if (topAngle <= bottomAngle) continue
+
+    const topPt = project(bearing, topAngle, cam)
+    const bottomPt = project(bearing, bottomAngle, cam)
+
+    const topY = Math.min(H, Math.max(0, Math.round(topPt.y)))
+    const bottomY = Math.min(H, Math.max(0, Math.round(bottomPt.y)))
+
+    if (topY >= H && bottomY >= H) continue
+
+    topPoints.push({ x: topPt.x, y: topY })
+    bottomPoints.push({ x: bottomPt.x, y: bottomY })
+  }
+
+  if (topPoints.length < 2 || bottomPoints.length < 2) return
+
+  ctx.beginPath()
+  ctx.moveTo(bottomPoints[0].x, bottomPoints[0].y)
+  for (let i = 1; i < bottomPoints.length; i++) {
+    ctx.lineTo(bottomPoints[i].x, bottomPoints[i].y)
+  }
+  for (let i = topPoints.length - 1; i >= 0; i--) {
+    ctx.lineTo(topPoints[i].x, topPoints[i].y)
+  }
+  ctx.closePath()
+  ctx.fillStyle = fillColor
+  ctx.fill()
+}
+
+// ─── Band Contour Stroke Renderer (local) ───────────────────────────────────
+
+function renderBandContoursLocal(
+  ctx: CanvasRenderingContext2D,
+  bandStrands: PrebuiltContourStrand[],
+  cam: CameraParams,
+  skyline: SkylineData,
+  projected: ProjectedBands | null,
+  bi: number,
+  globalElevMin: number,
+  elevRange: number,
+  hasElevRange: boolean,
+  opacities: number[],
+  widthMin: number,
+  widthRange: number,
+  widthPower: number,
+  maxDist: number,
+): void {
+  const { W, H } = cam
+  const opacity = opacities[bi] ?? 0.15
   const WIDTH_FLUSH_RATIO = 0.2
 
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
-  for (const strand of strands) {
+  for (const strand of bandStrands) {
     if (strand.points.length < 2) continue
-
-    const bi = strand.bandIdx
-    const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
 
     const tElev = hasElevRange
       ? Math.max(0, Math.min(1, (strand.level - globalElevMin) / elevRange))
@@ -974,19 +1200,13 @@ function renderContours(
 
     ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
 
-    // Draw as continuous path, flushing only on significant width change or gap
     let pathStarted = false
     let currentWidth = 0
 
     for (let i = 0; i < strand.points.length; i++) {
       const pt = strand.points[i]
 
-      // ── Occlusion check: skip points hidden behind nearer bands ──
-      // For each strand point, check if any band closer than this strand's band
-      // has a ridgeline angle above this point's angle at this bearing.
-      // This works at all AGL values because projected band angles are already
-      // re-projected for the current viewer elevation.
-      if (skyline && bi > 0) {
+      if (bi > 0) {
         let occluded = false
         for (let nearerBi = 0; nearerBi < bi; nearerBi++) {
           const nearerAngle = bandAngleAt(skyline, nearerBi, pt.bearingDeg, projected ?? null)
@@ -1005,24 +1225,20 @@ function renderContours(
       const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
 
       if (!onScreen) {
-        // Off-screen: flush and reset
         if (pathStarted) { ctx.stroke(); pathStarted = false }
         continue
       }
 
-      // Compute width for this point
-      const tDist = Math.min(1, pt.dist / MAX_DIST)
-      const lw = WIDTH_MIN + WIDTH_RANGE * (1 - Math.pow(tDist, WIDTH_POWER))
+      const tDist = Math.min(1, pt.dist / maxDist)
+      const lw = widthMin + widthRange * (1 - Math.pow(tDist, widthPower))
 
       if (!pathStarted) {
-        // Start new path
         ctx.lineWidth = lw
         currentWidth = lw
         ctx.beginPath()
         ctx.moveTo(x, y)
         pathStarted = true
       } else if (Math.abs(lw - currentWidth) > currentWidth * WIDTH_FLUSH_RATIO) {
-        // Width changed significantly — flush and start new sub-path from same point
         ctx.lineTo(x, y)
         ctx.stroke()
         ctx.lineWidth = lw
@@ -1408,24 +1624,9 @@ function drawScanCanvas(
   }
   ctx.restore()
 
-  // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
+  // ── 2. Terrain — depth-layered rendering with interleaved contour fills ──────
   if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines)
-  }
-
-  // ── 2b. Contour lines — pre-built strands projected to screen ───────────────
-  if (contourStrands.length > 0 && skylineData) {
-    // Compute global elevation range (same as renderTerrain uses)
-    let cElevMin = Infinity, cElevMax = -Infinity
-    for (let bi = 0; bi < skylineData.bands.length; bi++) {
-      const elev = skylineData.bands[bi].elevations
-      for (let i = 0; i < elev.length; i++) {
-        if (elev[i] === -Infinity) continue
-        if (elev[i] < cElevMin) cElevMin = elev[i]
-        if (elev[i] > cElevMax) cElevMax = elev[i]
-      }
-    }
-    renderContours(ctx, contourStrands, cam, cElevMin, cElevMax, skylineData, projectedBands)
+    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, contourStrands)
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
@@ -1588,13 +1789,20 @@ const ScanScreen: React.FC = () => {
     return reprojectBands(skylineData, viewerElev)
   }, [skylineData, height_m])
 
-  // ── Pre-build contour strands (full 360°, one-time on data/AGL change) ────
-  // Uses the worker's z15-corrected ground elevation so contour angles match ridgelines.
-  const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
+  // ── Pre-build contour strands (full 360°, one-time on skyline data change) ──
+  // rawElev stored per point enables cheap re-projection on AGL change.
+  const rawContourStrands = useMemo<PrebuiltContourStrand[]>(() => {
     if (!skylineData) return []
     const viewerElev = skylineData.computedAt.groundElev + height_m
     return buildContourStrands(skylineData, viewerElev)
-  }, [skylineData, height_m])
+  }, [skylineData]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Re-project contour strand angles when AGL changes (sub-millisecond) ────
+  const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
+    if (rawContourStrands.length === 0 || !skylineData) return rawContourStrands
+    const viewerElev = skylineData.computedAt.groundElev + height_m
+    return reprojectContourStrands(rawContourStrands, viewerElev)
+  }, [rawContourStrands, skylineData, height_m])
 
   // ── Re-project refined arc angles when AGL changes ─────────────────────────
   // Uses separate refinedArcs state (from second-pass 'refine-peaks' response).
