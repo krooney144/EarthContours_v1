@@ -493,6 +493,7 @@ export function renderTerrain(
   cam: CameraParams,
   projected: ProjectedBands | null,
   showBandLines: boolean = true,
+  showFill: boolean = true,
 ): void {
   const { W, H } = cam
   const scale = cam.scale ?? 1
@@ -544,7 +545,7 @@ export function renderTerrain(
 
     ctx.lineTo(W, H)
     ctx.closePath()
-    if (hasVisiblePixels) {
+    if (hasVisiblePixels && showFill) {
       ctx.fillStyle = style.fillColor
       ctx.fill()
     }
